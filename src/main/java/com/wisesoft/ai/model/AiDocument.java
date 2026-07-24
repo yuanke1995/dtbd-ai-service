@@ -1,0 +1,47 @@
+package com.wisesoft.ai.model;
+
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableLogic;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.Data;
+
+import java.time.LocalDateTime;
+
+/**
+ * AI 文档表
+ *
+ * @author yuanke
+ */
+@Data
+@TableName("c_ai_document")
+public class AiDocument {
+
+    @TableId(type = IdType.ASSIGN_UUID)
+    private String id;
+
+    /** 文件名 */
+    private String fileName;
+
+    /** 文件类型: docx */
+    private String fileType;
+
+    /** 分块数量 */
+    private Integer chunkCount;
+
+    /** 状态: 0=生效, 1=已弃用 */
+    private Integer status;
+
+    /** 文件大小(字节) */
+    private Long fileSize;
+
+    /** 文档描述 */
+    private String description;
+
+    private LocalDateTime createTime;
+
+    private LocalDateTime updateTime;
+
+    @TableLogic
+    private Integer deleted;
+}
