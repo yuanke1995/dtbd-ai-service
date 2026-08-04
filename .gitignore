@@ -6,3 +6,8 @@ target/
 *.iml
 .vscode/
 .DS_Store
+# 运行时产物与本地敏感配置
+data/
+src/main/resources/application-local.yml
+.env
+.env.local

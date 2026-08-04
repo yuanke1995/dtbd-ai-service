@@ -6,50 +6,61 @@ server:
 spring:
   application:
     name: dtbd-ai-service
+  profiles:
+    active: local
 
-  # 数据库（独立库）
+  # 文件上传限制（Word/PDF 等文档，默认 1MB 太小）
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+
+  # 数据库（独立库，密码必须通过环境变量 DB_PASSWORD 提供，缺失启动即失败）
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://172.168.10.65:2881/dtbd_ai?useUnicode=true&useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8&nullCatalogMeansCurrent=true
+    url: jdbc:mysql://172.168.10.65:2881/dtbd_init?useUnicode=true&useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8&nullCatalogMeansCurrent=true
     username: root
-    password: ${DB_PASSWORD:OceanBase_123#}
+    password: ${DB_PASSWORD}
 
   # Redis Stack（向量存储）
   data:
     redis:
-      host: ${REDIS_HOST:172.16.9.130}
-      port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:wisesoft}
-      database: ${REDIS_DB:11}
+      client-type: jedis
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6380}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DB:0}
 
   ai:
     # LLM 对话：DeepSeek（OpenAI 兼容协议）
     openai:
       api-key: ${AI_DEEPSEEK_KEY:}
-      base-url: https://api.deepseek.com
+      base-url: https://llm-xdqpg8ip850vmxh3.cn-beijing.maas.aliyuncs.com/compatible-mode
       chat:
         options:
-          model: deepseek-chat
+          # 注意：该 MaaS 网关对 qwen-max 返回 DashScope 原生格式(text 字段)，Spring AI 无法解析；
+          # qwen-plus 返回标准 OpenAI 格式，流式/非流式均兼容
+          model: qwen-plus
           temperature: 0.3
       # Embedding 单独配置（DeepSeek 无 embedding，需用兼容 OpenAI 协议的向量服务）
       embedding:
         api-key: ${AI_EMBEDDING_KEY:}
-        base-url: ${AI_EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode}
+        base-url: ${AI_EMBEDDING_BASE_URL:https://llm-xdqpg8ip850vmxh3.cn-beijing.maas.aliyuncs.com/compatible-mode}
         options:
-          model: ${AI_EMBEDDING_MODEL:text-embedding-v3}
+          model: ${AI_EMBEDDING_MODEL:text-embedding-v4}
 
     # Redis 向量库配置
     vectorstore:
       redis:
         initialize-schema: true
-        index-name: dtbd-ai-index
+        index: dtbd-ai-index
         prefix: "ai:chunk:"
 
-# MyBatis-Plus
+# MyBatis-Plus（SQL 日志默认走 slf4j，级别由 LOG_LEVEL_SQL 控制）
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    log-impl: ${MYBATIS_LOG_IMPL:org.apache.ibatis.logging.slf4j.Slf4jImpl}
   global-config:
     db-config:
       logic-delete-field: deleted
@@ -70,10 +81,36 @@ ai-app:
   session:
     max-history: 10
     expire-minutes: 30
-  # 允许访问的来源（dtbd-core 服务地址，用于鉴权）
-  trusted-token: ${AI_TRUSTED_TOKEN:dtbd-ai-internal-token}
+  # 文档图片提取
+  images:
+    dir: ${AI_IMAGES_DIR:./data}
+    max-per-doc: 20
+    url-prefix: /ai/images
+    # 图片访问鉴权（HMAC 签名 URL + 过期时间；本地开发默认关闭，生产必须开启 AI_IMAGES_AUTH_ENABLED=true）
+    auth-enabled: ${AI_IMAGES_AUTH_ENABLED:false}
+    # 签名有效期（秒）
+    auth-expire-seconds: 3600
+  # 图片描述（全模态/视觉理解模型均可，已实测返回标准 OpenAI 格式；求快可换 qwen3-omni-flash）
+  vision:
+    model: ${AI_VISION_MODEL:qwen3.5-omni-plus}
+    base-url: ${AI_VISION_BASE_URL:https://llm-xdqpg8ip850vmxh3.cn-beijing.maas.aliyuncs.com/compatible-mode}
+    api-key: ${AI_DEEPSEEK_KEY}
+    enabled: true
+    timeout-millis: 30000
+  # 内部鉴权 token（与 dtbd-core 一致；必须通过环境变量 AI_TRUSTED_TOKEN 提供，缺失启动即失败）
+  trusted-token: ${AI_TRUSTED_TOKEN}
 
 logging:
   level:
-    com.wisesoft.ai: debug
-    org.springframework.ai: info
+    com.wisesoft.ai: ${LOG_LEVEL_APP:info}
+    org.springframework.ai: ${LOG_LEVEL_SPRING_AI:info}
+
+# 可观测性：健康检查
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: ${ACTUATOR_HEALTH_DETAILS:never}

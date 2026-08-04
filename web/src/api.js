@@ -1,31 +1,91 @@
 /**
- * AI 服务 API（测试台直连 AI 服务）
- * 前端调用 /proxy/** → vite 代理转发到 http://localhost:8090/ai/**
- * 携带 X-Trusted-Token 通过 AI 服务鉴权
+ * AI 服务 API 层（零依赖：原生 fetch + XHR）
+ * - 常规请求：fetch 封装（超时/401/业务失败统一抛出可读错误）
+ * - 上传：XMLHttpRequest（支持进度回调）
+ * - SSE：fetch + AbortController（支持停止生成）
+ * - 环境配置：VITE_API_BASE 接口前缀、VITE_TRUSTED_TOKEN 内部 token（生产由平台网关注入）
  */
+const BASE = import.meta.env.VITE_API_BASE || '/proxy/api/ai'
+const TOKEN = import.meta.env.VITE_TRUSTED_TOKEN || ''
 
-// 与 AI 服务 application.yml 中 ai-app.trusted-token 保持一致
-const TRUSTED_TOKEN = 'dtbd-ai-internal-token'
-
-const BASE = '/proxy/api/ai'
-
-const headers = () => ({
-  'Content-Type': 'application/json',
-  'X-Trusted-Token': TRUSTED_TOKEN,
-  'X-User-Id': 'tester',
-  'X-User-Name': '测试用户'
-})
+const authHeaders = extra => {
+  const h = { 'Content-Type': 'application/json', ...(extra || {}) }
+  if (TOKEN) h['X-Trusted-Token'] = TOKEN
+  return h
+}
 
 /**
- * 流式聊天
+ * 通用 JSON 请求：超时控制 + 401/业务失败统一抛出 Error(message)
  */
-export function sendQuestion(sessionId, question, { onToken, onDone, onError }) {
+async function request(path, { method = 'GET', body, timeout = 30000 } = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout)
+  try {
+    const res = await fetch(BASE + path, {
+      method,
+      headers: authHeaders(),
+      body,
+      signal: controller.signal
+    })
+    let data = null
+    try { data = await res.json() } catch (e) { /* 非 JSON 响应 */ }
+    if (!res.ok) {
+      if (res.status === 401) throw new Error('未授权访问')
+      throw new Error(data?.msg || `请求失败(${res.status})`)
+    }
+    if (data && data.success === false) throw new Error(data.msg || '请求失败')
+    return data
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('请求超时，请稍后重试')
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * XHR 上传（multipart，支持进度百分比回调）
+ */
+function upload(path, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', BASE + path)
+    if (TOKEN) xhr.setRequestHeader('X-Trusted-Token', TOKEN)
+    xhr.timeout = 120000
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))
+    }
+    xhr.onload = () => {
+      let data = null
+      try { data = JSON.parse(xhr.responseText) } catch (e) { /* ignore */ }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        if (data && data.success === false) reject(new Error(data.msg || '上传失败'))
+        else resolve(data)
+      } else {
+        reject(new Error(data?.msg || `上传失败(${xhr.status})`))
+      }
+    }
+    xhr.onerror = () => reject(new Error('网络错误'))
+    xhr.ontimeout = () => reject(new Error('上传超时'))
+    xhr.send(formData)
+  })
+}
+
+/**
+ * 流式聊天（SSE）
+ * signal 用于停止生成（AbortController.abort()）
+ */
+export function sendQuestion(sessionId, question, { onToken, onImage, onDone, onError, signal }) {
   fetch(`${BASE}/chat`, {
     method: 'POST',
-    headers: headers(),
-    body: JSON.stringify({ sessionId, question })
+    headers: authHeaders(),
+    body: JSON.stringify({ sessionId, question }),
+    signal
   }).then(res => {
-    if (!res.ok) { onError('请求失败: ' + res.status); return }
+    if (!res.ok) {
+      res.json().then(d => onError(d?.msg || '请求失败: ' + res.status)).catch(() => onError('请求失败: ' + res.status))
+      return
+    }
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -36,50 +96,49 @@ export function sendQuestion(sessionId, question, { onToken, onDone, onError }) 
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
+          // Spring SseEmitter 输出 "data:{...}"（冒号后无空格），需兼容带/不带空格两种
+          if (line.startsWith('data:')) {
             try {
-              const d = JSON.parse(line.substring(6))
+              const d = JSON.parse(line.substring(5).trim())
               if (d.type === 'token') onToken(d.content)
+              else if (d.type === 'image') onImage(d.content) // content 为图片URL数组JSON
               else if (d.type === 'done') { onDone(); return }
               else if (d.type === 'error') { onError(d.content); return }
             } catch (e) { /* skip */ }
           }
         }
         read()
-      }).catch(e => onError('读取失败: ' + e.message))
+      }).catch(e => {
+        if (e.name === 'AbortError') onDone()  // 用户主动停止，按正常结束处理
+        else onError('读取失败: ' + e.message)
+      })
     }
     read()
-  }).catch(e => onError('请求失败: ' + e.message))
+  }).catch(e => {
+    if (e.name === 'AbortError') onDone()
+    else onError('请求失败: ' + e.message)
+  })
 }
 
-export async function newSession() {
-  const r = await fetch(`${BASE}/session/new`, { method: 'POST', headers: headers() })
-  return r.json()
-}
+/** 新建会话 */
+export const newSession = () => request('/session/new', { method: 'POST' })
 
-export async function clearSession(sessionId) {
-  const r = await fetch(`${BASE}/session/${sessionId}`, { method: 'DELETE', headers: headers() })
-  return r.json()
-}
+/** 获取会话历史 */
+export const getHistory = sid => request(`/session/${sid}`)
 
-export async function listDocuments() {
-  const r = await fetch(`${BASE}/document/list`, { headers: headers() })
-  return r.json()
-}
+/** 清除会话 */
+export const clearSession = sid => request(`/session/${sid}`, { method: 'DELETE' })
 
-export async function uploadDocument(file, description) {
+/** 文档列表 */
+export const listDocuments = () => request('/document/list')
+
+/** 上传文档（onProgress 接收 0-100 百分比） */
+export function uploadDocument(file, description, onProgress) {
   const fd = new FormData()
   fd.append('file', file)
   if (description) fd.append('description', description)
-  const r = await fetch(`${BASE}/document/upload`, {
-    method: 'POST',
-    headers: { 'X-Trusted-Token': TRUSTED_TOKEN, 'X-User-Id': 'tester' },
-    body: fd
-  })
-  return r.json()
+  return upload('/document/upload', fd, onProgress)
 }
 
-export async function deleteDocument(id) {
-  const r = await fetch(`${BASE}/document/${id}`, { method: 'DELETE', headers: headers() })
-  return r.json()
-}
+/** 删除文档 */
+export const deleteDocument = id => request(`/document/${id}`, { method: 'DELETE' })

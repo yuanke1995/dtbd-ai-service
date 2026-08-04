@@ -30,6 +30,9 @@ public class AiKnowledge {
     /** 片段正文 */
     private String content;
 
+    /** 关联图片URL列表(JSON数组字符串)，如 ["/ai/images/xxx/1.png", ...] */
+    private String images;
+
     /** 片段序号 */
     private Integer chunkIndex;
 

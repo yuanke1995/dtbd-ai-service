@@ -28,9 +28,13 @@ public class ResultJson<T> {
     }
 
     public static <T> ResultJson<T> error(String msg) {
+        return error(500, msg);
+    }
+
+    public static <T> ResultJson<T> error(int code, String msg) {
         ResultJson<T> r = new ResultJson<>();
         r.setSuccess(false);
-        r.setCode(500);
+        r.setCode(code);
         r.setMsg(msg);
         return r;
     }

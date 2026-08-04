@@ -29,3 +29,11 @@ CREATE TABLE IF NOT EXISTS `c_ai_knowledge` (
     PRIMARY KEY (`id`),
     KEY `idx_doc_id` (`doc_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI知识片段表';
+
+-- ============================================
+-- 增量变更（已存在的库手动执行，或由运维统一升级）
+-- ============================================
+
+-- 2026-08-04: 知识片段新增图片URL(JSON数组)字段
+ALTER TABLE `c_ai_knowledge`
+    ADD COLUMN `images` VARCHAR(2000) DEFAULT NULL COMMENT '关联图片URL(JSON数组)' AFTER `content`;
