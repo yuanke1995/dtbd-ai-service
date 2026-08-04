@@ -1,0 +1,38 @@
+services:
+  redis-stack:
+    image: redis/redis-stack-server:latest
+    container_name: dtbd-redis-stack
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build: .
+    container_name: dtbd-ai-service
+    ports:
+      - "8090:8090"
+    environment:
+      # 必填（无默认值，缺失将启动失败）
+      DB_PASSWORD: ${DB_PASSWORD:?请设置 DB_PASSWORD}
+      AI_TRUSTED_TOKEN: ${AI_TRUSTED_TOKEN:?请设置 AI_TRUSTED_TOKEN}
+      AI_DEEPSEEK_KEY: ${AI_DEEPSEEK_KEY:?请设置 AI_DEEPSEEK_KEY}
+      # 可选
+      REDIS_HOST: redis-stack
+      REDIS_PORT: "6379"
+      AI_IMAGES_AUTH_ENABLED: ${AI_IMAGES_AUTH_ENABLED:-true}
+      LOG_LEVEL_APP: ${LOG_LEVEL_APP:-info}
+    volumes:
+      - app-data:/app/data
+    depends_on:
+      redis-stack:
+        condition: service_healthy
+
+volumes:
+  redis-data:
+  app-data:
