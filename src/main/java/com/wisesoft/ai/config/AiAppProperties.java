@@ -64,9 +64,9 @@ public class AiAppProperties {
     @Data
     public static class Vision {
         /** 图片描述模型（全模态，已实测返回标准 OpenAI 格式；求快可换 qwen3-omni-flash） */
-        private String model = "qwen3.5-omni-plus";
+        private String model = "";
         /** 视觉模型 base-url（与 chat 同网关） */
-        private String baseUrl = "https://llm-xdqpg8ip850vmxh3.cn-beijing.maas.aliyuncs.com/compatible-mode";
+        private String baseUrl = "";
         /** 视觉模型 API Key */
         private String apiKey = "";
         /** 是否启用图片描述（关闭则只提取图片不调模型） */
