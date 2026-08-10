@@ -100,11 +100,14 @@ export function sendQuestion(sessionId, question, { onToken, onImage, onDone, on
           if (line.startsWith('data:')) {
             try {
               const d = JSON.parse(line.substring(5).trim())
-              if (d.type === 'token') onToken(d.content)
-              else if (d.type === 'image') onImage(d.content) // content 为图片URL数组JSON
+              if (d.type === 'token') { onToken(d.content) }
+              else if (d.type === 'image') { console.log('[SSE] 收到 image 事件:', d.content); onImage(d.content) }
               else if (d.type === 'done') { onDone(); return }
               else if (d.type === 'error') { onError(d.content); return }
-            } catch (e) { /* skip */ }
+              else { console.log('[SSE] 未知事件类型:', d.type, d) }
+            } catch (e) { console.warn('[SSE] JSON 解析失败:', line, e) }
+          } else if (line.startsWith('event:')) {
+            console.log('[SSE] 收到 named event:', line)
           }
         }
         read()
@@ -126,8 +129,14 @@ export const newSession = () => request('/session/new', { method: 'POST' })
 /** 获取会话历史 */
 export const getHistory = sid => request(`/session/${sid}`)
 
-/** 清除会话 */
+/** 清除会话（Redis 缓存） */
 export const clearSession = sid => request(`/session/${sid}`, { method: 'DELETE' })
+
+/** 列出所有会话 */
+export const listSessions = () => request('/sessions')
+
+/** 删除会话（MySQL 软删除 + Redis 清理） */
+export const deleteSessionApi = sid => request(`/session/${sid}`, { method: 'DELETE' })
 
 /** 文档列表 */
 export const listDocuments = () => request('/document/list')

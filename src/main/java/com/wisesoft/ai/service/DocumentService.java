@@ -329,13 +329,35 @@ public class DocumentService {
         }
     }
 
+    /**
+     * 检测段落标题层级。
+     * 优先级：样式名 → 大纲级别 → 0（正文）
+     * 大量中文文档使用大纲级别（outlineLvl）而非 Heading 样式来定义标题层级，
+     * 因此在样式名检测不到时，继续检测大纲级别避免标题全部 fallback 到"概述"。
+     */
     private int headingLevel(XWPFParagraph p) {
+        // 1. 样式名检测（heading1-3 / 标题1-3）
         String style = p.getStyle();
-        if (style == null) return 0;
-        String s = style.toLowerCase();
-        if (s.contains("heading1") || s.contains("标题1") || s.equals("1")) return 1;
-        if (s.contains("heading2") || s.contains("标题2") || s.equals("2")) return 2;
-        if (s.contains("heading3") || s.contains("标题3") || s.equals("3")) return 3;
+        if (style != null) {
+            String s = style.toLowerCase();
+            if (s.contains("heading1") || s.contains("标题1") || s.equals("1")) return 1;
+            if (s.contains("heading2") || s.contains("标题2") || s.equals("2")) return 2;
+            if (s.contains("heading3") || s.contains("标题3") || s.equals("3")) return 3;
+        }
+
+        // 2. 大纲级别检测（outlineLvl 0-2 映射为标题 1-3）
+        try {
+            var pPr = p.getCTP().getPPr();
+            if (pPr != null && pPr.isSetOutlineLvl()) {
+                int outlineLvl = pPr.getOutlineLvl().getVal().intValue();
+                if (outlineLvl >= 0 && outlineLvl <= 2) {
+                    return outlineLvl + 1;
+                }
+            }
+        } catch (Exception ignored) {
+            // 兼容性：部分文档 CTSimpleField 等非标准结构可能导致 getCTP 抛异常
+        }
+
         return 0;
     }
 

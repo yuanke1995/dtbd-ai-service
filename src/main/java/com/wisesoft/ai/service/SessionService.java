@@ -1,24 +1,31 @@
 package com.wisesoft.ai.service;
 
+import com.alibaba.fastjson2.JSON;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wisesoft.ai.config.AiAppProperties;
+import com.wisesoft.ai.dto.SessionInfo;
+import com.wisesoft.ai.mapper.AiMessageMapper;
+import com.wisesoft.ai.mapper.AiSessionMapper;
+import com.wisesoft.ai.model.AiMessage;
+import com.wisesoft.ai.model.AiSession;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
- * 会话管理
- * Redis List 存储对话历史（RPUSH+LTRIM+EXPIRE Lua 原子操作，避免并发读改写丢失），
- * 消息结构 {role, content, images}，支持前端恢复历史时渲染 [图片N]
+ * 会话管理（MySQL + Redis 双层存储）
+ * <p>
+ * 写入：MySQL 持久化 → Redis 缓存（写穿透）
+ * 读取：MySQL 优先 → Redis 兜底
+ * 删除：MySQL 软删除 + Redis 清理
  *
  * @author yuanke
  */
@@ -41,59 +48,208 @@ public class SessionService {
     private final StringRedisTemplate redisTemplate;
     private final AiAppProperties properties;
     private final ObjectMapper objectMapper;
+    private final AiSessionMapper sessionMapper;
+    private final AiMessageMapper messageMapper;
 
     /**
-     * 创建新会话
+     * 创建新会话（MySQL + Redis）
      */
     public String createSession() {
-        return UUID.randomUUID().toString().replace("-", "");
+        String sessionId = UUID.randomUUID().toString().replace("-", "");
+        try {
+            AiSession session = new AiSession();
+            session.setId(sessionId);
+            session.setMessageCount(0);
+            sessionMapper.insert(session);
+        } catch (Exception e) {
+            log.warn("创建会话 MySQL 写入失败: {}", e.getMessage());
+        }
+        return sessionId;
     }
 
     /**
-     * 获取会话完整历史
+     * 查询所有未删除会话列表，按更新时间倒序
+     */
+    public List<SessionInfo> listSessions() {
+        try {
+            LambdaQueryWrapper<AiSession> wrapper = new LambdaQueryWrapper<>();
+            wrapper.orderByDesc(AiSession::getUpdateTime);
+            return sessionMapper.selectList(wrapper).stream().map(s -> {
+                SessionInfo info = new SessionInfo();
+                info.setId(s.getId());
+                info.setTitle(s.getTitle());
+                info.setMessageCount(s.getMessageCount());
+                info.setUpdateTime(s.getUpdateTime());
+                return info;
+            }).toList();
+        } catch (Exception e) {
+            log.warn("查询会话列表失败: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * 软删除会话（MySQL 逻辑删除会话+消息 + Redis 清理）
+     */
+    public void deleteSession(String sessionId) {
+        try {
+            sessionMapper.deleteById(sessionId);
+            // 同步软删除该会话下的所有消息
+            LambdaUpdateWrapper<AiMessage> wrapper = new LambdaUpdateWrapper<>();
+            wrapper.set(AiMessage::getDeleted, 1)
+                    .eq(AiMessage::getSessionId, sessionId);
+            messageMapper.update(null, wrapper);
+        } catch (Exception e) {
+            log.warn("删除会话 MySQL 操作失败: {}", e.getMessage());
+        }
+        try {
+            redisTemplate.delete(KEY_PREFIX + sessionId);
+        } catch (Exception e) {
+            log.warn("删除会话 Redis 清理失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 获取会话完整历史（MySQL 优先，Redis 兜底）
      */
     public List<Map<String, Object>> getHistory(String sessionId) {
-        return readRange(sessionId, 0, -1);
+        List<Map<String, Object>> fromMysql = readFromMysql(sessionId);
+        if (!fromMysql.isEmpty()) {
+            return fromMysql;
+        }
+        // MySQL 无数据，从 Redis 读取
+        List<Map<String, Object>> fromRedis = readRange(sessionId, 0, -1);
+        if (!fromRedis.isEmpty()) {
+            // 异步 backfill 到 MySQL（新线程，不阻塞当前请求）
+            backfillToMysql(sessionId, fromRedis);
+        }
+        return fromRedis;
     }
 
     /**
-     * 获取最近 N 轮对话（每条消息含 role/content/images）
+     * 获取最近 N 轮对话（MySQL 优先，Redis 兜底）
      */
     public List<Map<String, Object>> getRecentHistory(String sessionId, int rounds) {
-        int limit = rounds * 2;
-        return readRange(sessionId, -limit, -1);
+        List<Map<String, Object>> all = getHistory(sessionId);
+        int start = Math.max(0, all.size() - rounds * 2);
+        return all.subList(start, all.size());
     }
 
     /**
-     * 追加消息（原子：RPUSH + LTRIM + EXPIRE）
+     * 追加消息（MySQL 持久化 → Redis 缓存）
      *
      * @param images 该轮回答关联的图片 URL 列表（可为空）
      */
     public void appendMessage(String sessionId, String role, String content, List<String> images) {
+        // 1. MySQL 持久化
         try {
-            Map<String, Object> msg = new HashMap<>();
-            msg.put("role", role);
-            msg.put("content", content);
-            if (images != null && !images.isEmpty()) {
-                msg.put("images", images);
+            // 获取下一序号
+            int nextSeq = getNextSequence(sessionId);
+
+            // 插入消息
+            AiMessage msg = new AiMessage();
+            msg.setSessionId(sessionId);
+            msg.setRole(role);
+            msg.setContent(content);
+            msg.setImages(images != null && !images.isEmpty() ? JSON.toJSONString(images) : null);
+            msg.setSequence(nextSeq);
+            messageMapper.insert(msg);
+
+            // 更新会话：title（取首条用户问题前50字）、message_count、update_time
+            AiSession update = new AiSession();
+            update.setId(sessionId);
+            update.setMessageCount(nextSeq); // sequence 自增即消息数
+            update.setUpdateTime(null); // MyBatis-Plus 会忽略 null，用 ON UPDATE CURRENT_TIMESTAMP
+            if (role.equals("user")) {
+                // 仅在 title 为空时设置（首条用户消息）
+                AiSession existing = sessionMapper.selectById(sessionId);
+                if (existing != null && existing.getTitle() == null) {
+                    String title = content.length() > 50 ? content.substring(0, 50) : content;
+                    update.setTitle(title.trim());
+                }
             }
-            String json = objectMapper.writeValueAsString(msg);
+            sessionMapper.updateById(update);
+        } catch (Exception e) {
+            log.warn("MySQL 追加消息失败 (session={}): {}", sessionId, e.getMessage());
+        }
+
+        // 2. Redis 缓存（MySQL 失败也不影响 Redis 写入，保证前端体验）
+        try {
+            Map<String, Object> redisMsg = new HashMap<>();
+            redisMsg.put("role", role);
+            redisMsg.put("content", content);
+            if (images != null && !images.isEmpty()) {
+                redisMsg.put("images", images);
+            }
+            String json = objectMapper.writeValueAsString(redisMsg);
             int max = properties.getSession().getMaxHistory() * 2;
             long expireSeconds = properties.getSession().getExpireMinutes() * 60L;
             redisTemplate.execute(APPEND_SCRIPT, Collections.singletonList(KEY_PREFIX + sessionId),
                     json, String.valueOf(max), String.valueOf(expireSeconds));
         } catch (Exception e) {
-            log.warn("Failed to append session message: {}", e.getMessage());
+            log.warn("Redis 追加消息失败 (session={}): {}", sessionId, e.getMessage());
         }
     }
 
     /**
-     * 清除会话
+     * 清除 Redis 缓存（保留 MySQL 数据）
      */
     public void clearSession(String sessionId) {
         redisTemplate.delete(KEY_PREFIX + sessionId);
     }
 
+    // ==================== 私有方法 ====================
+
+    /**
+     * 从 MySQL 读取会话历史
+     */
+    private List<Map<String, Object>> readFromMysql(String sessionId) {
+        try {
+            LambdaQueryWrapper<AiMessage> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(AiMessage::getSessionId, sessionId)
+                    .orderByAsc(AiMessage::getSequence);
+            List<AiMessage> messages = messageMapper.selectList(wrapper);
+            if (messages.isEmpty()) return Collections.emptyList();
+
+            return messages.stream().map(m -> {
+                Map<String, Object> map = new HashMap<>();
+                map.put("role", m.getRole());
+                map.put("content", m.getContent());
+                if (m.getImages() != null && !m.getImages().isBlank()) {
+                    try {
+                        map.put("images", JSON.parseArray(m.getImages(), String.class));
+                    } catch (Exception e) {
+                        // images 解析失败忽略
+                    }
+                }
+                return map;
+            }).collect(Collectors.toList());
+        } catch (Exception e) {
+            log.warn("MySQL 读取会话历史失败 (session={}): {}", sessionId, e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * 获取会话的下一条消息序号
+     */
+    private int getNextSequence(String sessionId) {
+        try {
+            LambdaQueryWrapper<AiMessage> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(AiMessage::getSessionId, sessionId)
+                    .orderByDesc(AiMessage::getSequence)
+                    .last("LIMIT 1");
+            List<AiMessage> list = messageMapper.selectList(wrapper);
+            return list.isEmpty() ? 1 : list.get(0).getSequence() + 1;
+        } catch (Exception e) {
+            log.warn("查询消息序号失败: {}", e.getMessage());
+            return 1;
+        }
+    }
+
+    /**
+     * 从 Redis 读取指定范围的消息
+     */
     private List<Map<String, Object>> readRange(String sessionId, long start, long end) {
         List<String> jsons = redisTemplate.opsForList().range(KEY_PREFIX + sessionId, start, end);
         if (jsons == null || jsons.isEmpty()) return Collections.emptyList();
@@ -105,10 +261,73 @@ public class SessionService {
                 } catch (Exception e) {
                     return null;
                 }
-            }).filter(java.util.Objects::nonNull).toList();
+            }).filter(Objects::nonNull).toList();
         } catch (Exception e) {
             log.warn("Failed to read session history: {}", e.getMessage());
             return Collections.emptyList();
         }
+    }
+
+    /**
+     * 将 Redis 数据异步补写到 MySQL（新线程执行）
+     */
+    private void backfillToMysql(String sessionId, List<Map<String, Object>> messages) {
+        new Thread(() -> {
+            try {
+                // 检查 MySQL 是否已有数据，避免重复 backfill
+                LambdaQueryWrapper<AiMessage> check = new LambdaQueryWrapper<>();
+                check.eq(AiMessage::getSessionId, sessionId)
+                        .last("LIMIT 1");
+                if (!messageMapper.selectList(check).isEmpty()) {
+                    return; // 已有数据，跳过
+                }
+
+                // 确保 session 记录存在
+                AiSession existing = sessionMapper.selectById(sessionId);
+                if (existing == null) {
+                    AiSession session = new AiSession();
+                    session.setId(sessionId);
+                    session.setMessageCount(0);
+                    sessionMapper.insert(session);
+                }
+
+                int seq = 0;
+                String title = null;
+                for (Map<String, Object> m : messages) {
+                    String role = String.valueOf(m.getOrDefault("role", ""));
+                    String content = String.valueOf(m.getOrDefault("content", ""));
+                    Object imagesObj = m.get("images");
+                    String imagesJson = null;
+                    if (imagesObj instanceof List<?> list && !list.isEmpty()) {
+                        imagesJson = JSON.toJSONString(list);
+                    }
+
+                    AiMessage msg = new AiMessage();
+                    msg.setSessionId(sessionId);
+                    msg.setRole(role);
+                    msg.setContent(content);
+                    msg.setImages(imagesJson);
+                    msg.setSequence(++seq);
+                    messageMapper.insert(msg);
+
+                    if (title == null && "user".equals(role)) {
+                        title = content.length() > 50 ? content.substring(0, 50).trim() : content.trim();
+                    }
+                }
+
+                // 更新 session 的 title 和 message_count
+                if (title != null || seq > 0) {
+                    AiSession update = new AiSession();
+                    update.setId(sessionId);
+                    update.setMessageCount(seq);
+                    if (title != null) update.setTitle(title);
+                    sessionMapper.updateById(update);
+                }
+
+                log.info("Backfill 完成: session={}, messages={}", sessionId, seq);
+            } catch (Exception e) {
+                log.warn("Backfill 失败 (session={}): {}", sessionId, e.getMessage());
+            }
+        }, "backfill-" + sessionId).start();
     }
 }

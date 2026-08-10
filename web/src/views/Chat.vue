@@ -1,49 +1,61 @@
 <template>
-  <div class="chat">
-    <div class="chat-box">
-      <div class="head">
-        <span><robot-outlined style="color:#1677ff;margin-right:8px" />AI 助手 - 小报</span>
-        <a-button size="small" @click="clear" :disabled="loading" danger>
-          <delete-outlined /> 清除会话
-        </a-button>
-      </div>
+  <div class="chat-layout">
+    <!-- 左侧会话列表 -->
+    <SessionSidebar
+      :sessions="sessions"
+      :current-session-id="currentSessionId"
+      :collapsed="sidebarCollapsed"
+      :loading="sessionsLoading"
+      @select="switchSession"
+      @delete="handleDeleteSession"
+      @new="createNewSession"
+      @toggle-collapse="toggleSidebar"
+    />
 
-      <div class="messages" ref="box" @click="openPreview">
-        <div v-if="messages.length === 0" class="welcome">
-          <robot-outlined style="font-size:48px;color:#1677ff" />
-          <h2>你好！我是小报 👋</h2>
-          <p>基于操作手册知识库回答你关于系统使用的问题</p>
-          <div>
-            <a-tag v-for="(q,i) in tips" :key="i" color="blue" style="cursor:pointer;margin:4px" @click="ask(q)">{{ q }}</a-tag>
+    <!-- 右侧聊天区域 -->
+    <div class="chat">
+      <div class="chat-box">
+        <div class="head">
+          <span><robot-outlined style="color:#1677ff;margin-right:8px" />AI 助手 - 小报</span>
+        </div>
+
+        <div class="messages" ref="box" @click="openPreview">
+          <div v-if="messages.length === 0" class="welcome">
+            <robot-outlined style="font-size:48px;color:#1677ff" />
+            <h2>你好！我是小报 👋</h2>
+            <p>基于操作手册知识库回答你关于系统使用的问题</p>
+            <div>
+              <a-tag v-for="(q,i) in tips" :key="i" color="blue" style="cursor:pointer;margin:4px" @click="ask(q)">{{ q }}</a-tag>
+            </div>
+          </div>
+          <div v-for="(m,i) in messages" :key="i" class="row" :class="m.role">
+            <a-avatar :style="{ background: m.role==='user'?'#87d068':'#1677ff', flexShrink:0 }">{{ m.role==='user'?'我':'AI' }}</a-avatar>
+            <div class="bubble" :class="m.role">
+              <div class="md" v-html="render(m.content, m.images)"></div>
+              <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
+            </div>
           </div>
         </div>
-        <div v-for="(m,i) in messages" :key="i" class="row" :class="m.role">
-          <a-avatar :style="{ background: m.role==='user'?'#87d068':'#1677ff', flexShrink:0 }">{{ m.role==='user'?'我':'AI' }}</a-avatar>
-          <div class="bubble" :class="m.role">
-            <div class="md" v-html="render(m.content, m.images)"></div>
-            <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
-          </div>
+
+        <!-- 图片点击放大灯箱 -->
+        <div v-if="previewUrl" class="lightbox" @click="previewUrl = ''">
+          <img :src="previewUrl" alt="大图预览" @click.stop />
+          <span class="lightbox-close" @click="previewUrl = ''">×</span>
         </div>
-      </div>
 
-      <!-- 图片点击放大灯箱：点击遮罩或 × 关闭 -->
-      <div v-if="previewUrl" class="lightbox" @click="previewUrl = ''">
-        <img :src="previewUrl" alt="大图预览" @click.stop />
-        <span class="lightbox-close" @click="previewUrl = ''">×</span>
-      </div>
-
-      <div class="input">
-        <a-input
-          v-model:value="text" placeholder="请输入问题，回车发送" :disabled="loading"
-          @press-enter="send" allow-clear
-        >
-          <template #suffix>
-            <a-button v-if="loading" type="text" size="small" @click="stop" style="color:#ff4d4f">
-              <pause-circle-outlined /> 停止
-            </a-button>
-            <send-outlined v-else-if="text.trim()" style="color:#1677ff;cursor:pointer" @click="send" />
-          </template>
-        </a-input>
+        <div class="input">
+          <a-input
+            v-model:value="text" placeholder="请输入问题，回车发送" :disabled="loading"
+            @press-enter="send" allow-clear
+          >
+            <template #suffix>
+              <a-button v-if="loading" type="text" size="small" @click="stop" style="color:#ff4d4f">
+                <pause-circle-outlined /> 停止
+              </a-button>
+              <send-outlined v-else-if="text.trim()" style="color:#1677ff;cursor:pointer" @click="send" />
+            </template>
+          </a-input>
+        </div>
       </div>
     </div>
   </div>
@@ -52,23 +64,26 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, DeleteOutlined, PauseCircleOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, clearSession } from '../api'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined } from '@ant-design/icons-vue'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi } from '../api'
+import SessionSidebar from '../components/SessionSidebar.vue'
 
 const text = ref('')
 const loading = ref(false)
-const sessionId = ref('')
+const sessionsLoading = ref(false)
+const currentSessionId = ref(null)
+const sessions = ref([])
 const messages = ref([])
 const box = ref(null)
 const previewUrl = ref('')
 const abortController = ref(null)
+const sidebarCollapsed = ref(false)
 const tips = ['系统有哪些功能？', '如何创建一个新表单？', '字段验证怎么设置？', '什么是填报周期？']
 
-// 文档图片访问：后端返回 /ai/images/...（已含 context-path /ai），而 vite /proxy 的 target 也含 /ai，
-// 直接拼 /proxy 会变成 /proxy/ai/images → 双重 /ai → 404；需去掉 /ai 前缀再拼 /proxy
+// 文档图片访问
 const resolveImg = u => u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
 
-// 点击回答中的图片 → 灯箱预览大图（事件委托：消息区域内任意 img 均可放大）
+// 点击回答中的图片 → 灯箱预览
 const openPreview = e => {
   const t = e.target
   if (t && t.tagName && t.tagName.toLowerCase() === 'img') {
@@ -76,14 +91,38 @@ const openPreview = e => {
   }
 }
 
+// 初始化：恢复侧边栏状态 → 加载会话列表 → 选择最近会话或新建
 onMounted(async () => {
-  const sid = localStorage.getItem('ai_sid')
-  if (!sid) {
-    await newSessionId()
-    return
+  const saved = localStorage.getItem('ai_sidebar_collapsed')
+  if (saved === 'true') sidebarCollapsed.value = true
+
+  await loadSessions()
+  if (sessions.value.length > 0) {
+    await switchSession(sessions.value[0].id)
+  } else {
+    await createNewSession()
   }
-  sessionId.value = sid
-  // 恢复会话历史（含图片）
+})
+
+// 加载会话列表
+async function loadSessions() {
+  sessionsLoading.value = true
+  try {
+    const r = await listSessions()
+    if (r.success && Array.isArray(r.data)) {
+      sessions.value = r.data
+    }
+  } catch (e) {
+    message.error('加载会话列表失败: ' + (e.message || '未知错误'))
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+// 切换会话
+async function switchSession(sid) {
+  if (loading.value) return
+  currentSessionId.value = sid
   try {
     const r = await getHistory(sid)
     if (r.success && Array.isArray(r.data)) {
@@ -95,23 +134,57 @@ onMounted(async () => {
           images: Array.isArray(m.images) ? m.images : []
         }))
       scroll()
+    } else {
+      messages.value = []
     }
-  } catch (e) { /* 历史恢复失败不阻塞 */ }
-})
+  } catch (e) {
+    messages.value = []
+  }
+}
 
-async function newSessionId() {
+// 新建会话
+async function createNewSession() {
   try {
     const r = await newSession()
     if (r.success && r.data?.sessionId) {
-      sessionId.value = r.data.sessionId
-      localStorage.setItem('ai_sid', sessionId.value)
+      currentSessionId.value = r.data.sessionId
+      messages.value = []
     }
-  } catch (e) { message.error(e.message || '初始化会话失败') }
+  } catch (e) {
+    message.error('创建会话失败: ' + (e.message || '未知错误'))
+  }
+}
+
+// 删除会话
+async function handleDeleteSession(sid) {
+  try {
+    await deleteSessionApi(sid)
+    message.success('会话已删除')
+    if (sid === currentSessionId.value) {
+      // 删除的是当前会话，切换到下一个或新建
+      const remaining = sessions.value.filter(s => s.id !== sid)
+      if (remaining.length > 0) {
+        await switchSession(remaining[0].id)
+      } else {
+        await createNewSession()
+      }
+    }
+    await loadSessions()
+  } catch (e) {
+    message.error('删除失败: ' + (e.message || '未知错误'))
+  }
+}
+
+// 切换侧边栏折叠
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  localStorage.setItem('ai_sidebar_collapsed', String(sidebarCollapsed.value))
 }
 
 const send = () => {
   const q = text.value.trim()
   if (!q || loading.value) return
+  const isFirstMessage = messages.value.length === 0
   text.value = ''
   messages.value.push({ role: 'user', content: q })
   const idx = messages.value.length
@@ -119,11 +192,19 @@ const send = () => {
   loading.value = true
   abortController.value = new AbortController()
   let full = ''
-  sendQuestion(sessionId.value, q, {
+  sendQuestion(currentSessionId.value, q, {
     signal: abortController.value.signal,
     onToken: t => { full += t; messages.value[idx].content = full; scroll() },
     onImage: imgs => {
-      try { messages.value[idx].images = JSON.parse(imgs) } catch (e) { messages.value[idx].images = [] }
+      console.log('[Chat] onImage 收到:', imgs)
+      try {
+        const parsed = JSON.parse(imgs)
+        console.log('[Chat] onImage 解析后:', parsed, '类型:', typeof parsed, 'Array.isArray:', Array.isArray(parsed))
+        messages.value[idx].images = Array.isArray(parsed) ? parsed : []
+      } catch (e) {
+        console.warn('[Chat] onImage JSON.parse 失败:', e)
+        messages.value[idx].images = []
+      }
     },
     onDone: () => {
       if (messages.value[idx].content === '') messages.value[idx].content = '（已停止生成）'
@@ -131,6 +212,8 @@ const send = () => {
       loading.value = false
       abortController.value = null
       scroll()
+      // 首条消息后刷新会话列表（标题已由后端生成）
+      if (isFirstMessage) loadSessions()
     },
     onError: e => {
       messages.value[idx].content = '😅 ' + e
@@ -152,29 +235,19 @@ const stop = () => {
 
 const ask = q => { text.value = q; nextTick(send) }
 
-const clear = async () => {
-  if (loading.value) return
-  if (sessionId.value) {
-    try { await clearSession(sessionId.value) } catch (e) { /* 忽略 */ }
-  }
-  messages.value = []
-  await newSessionId()
-}
-
-/**
- * 安全渲染（零依赖）：
- * 1. [图片N] → 文档原图（img src 做属性转义，防注入）
- * 2. LLM 文本先 HTML 转义，再套 Markdown 子集（加粗/行内代码/标题/列表/链接）
- */
+// ==================== 安全渲染（零依赖） ====================
 const escapeHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
 
 const render = (t, images = []) => {
   if (!t) return ''
   let html = escapeHtml(t)
-  // 图片标记（转义后插入 img，src 属性转义）
+  // 图片标记
   html = html.replace(/\[图片\s*(\d+)\]/g, (m, n) => {
     const u = images[Number(n) - 1]
-    if (!u) return m
+    if (!u) {
+      console.warn('[图片] 渲染失败:', m, '索引', n, 'images长度', images.length, images)
+      return m
+    }
     const src = resolveImg(u).replace(/"/g, '&quot;')
     return `<div><img class="md-img" src="${src}" alt="文档图片"/></div>`
   })
@@ -186,7 +259,6 @@ const render = (t, images = []) => {
     .replace(/^## (.+)$/gm, '<h3>$1</h3>')
     .replace(/^# (.+)$/gm, '<h2>$1</h2>')
   html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>')
-  // 相邻 li 包成 ul
   html = html.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, '<ul>$1</ul>')
   html = html.replace(/\n/g, '<br/>')
   return html
@@ -196,28 +268,59 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 </script>
 
 <style scoped>
-.chat { display:flex;justify-content:center }
-.chat-box { width:100%;max-width:900px;height:calc(100vh - 112px);background:#fff;border-radius:8px;display:flex;flex-direction:column;overflow:hidden }
-.head { display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid #f0f0f0;font-weight:600 }
-.messages { flex:1;overflow-y:auto;padding:24px }
-.welcome { text-align:center;padding:60px 20px }
-.welcome h2 { margin:16px 0 8px }
-.welcome p { color:#888;margin-bottom:24px }
-.row { display:flex;gap:12px;margin-bottom:20px }
-.row.user { flex-direction:row-reverse }
-.bubble { max-width:70%;padding:12px 16px;border-radius:12px;line-height:1.6 }
-.bubble.user { background:#1677ff;color:#fff }
-.bubble.ai { background:#f5f5f5;color:#333 }
-.input { padding:16px 24px;border-top:1px solid #f0f0f0 }
-/* Markdown 内容图片：可点击放大 */
-.md :deep(img) { max-width:100%;max-height:320px;border:1px solid #e0e0e0;border-radius:6px;display:block;margin:8px 0;cursor:zoom-in }
+.chat-layout {
+  display: flex;
+  height: calc(100vh - 112px);
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.chat {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+}
+.chat-box {
+  width: 100%;
+  max-width: 900px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  border-bottom: 1px solid #f0f0f0;
+  font-weight: 600;
+}
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+.welcome {
+  text-align: center;
+  padding: 60px 20px;
+}
+.welcome h2 { margin: 16px 0 8px; }
+.welcome p { color: #888; margin-bottom: 24px; }
+.row { display: flex; gap: 12px; margin-bottom: 20px; }
+.row.user { flex-direction: row-reverse; }
+.bubble { max-width: 70%; padding: 12px 16px; border-radius: 12px; line-height: 1.6; }
+.bubble.user { background: #1677ff; color: #fff; }
+.bubble.ai { background: #f5f5f5; color: #333; }
+.input { padding: 16px 24px; border-top: 1px solid #f0f0f0; }
+.md :deep(img) { max-width: 100%; max-height: 320px; border: 1px solid #e0e0e0; border-radius: 6px; display: block; margin: 8px 0; cursor: zoom-in; }
 
-/* 图片点击放大灯箱 */
-.lightbox { position:fixed; inset:0; background:rgba(0,0,0,.78); display:flex;
-  align-items:center; justify-content:center; z-index:1000; cursor:zoom-out }
-.lightbox img { max-width:90vw; max-height:90vh; border-radius:4px;
-  box-shadow:0 4px 24px rgba(0,0,0,.4); cursor:default }
-.lightbox-close { position:fixed; top:16px; right:24px; font-size:36px; color:#fff;
-  cursor:pointer; line-height:1; opacity:.85; user-select:none }
-.lightbox-close:hover { opacity:1 }
+/* 图片灯箱 */
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.78); display: flex;
+  align-items: center; justify-content: center; z-index: 1000; cursor: zoom-out; }
+.lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 4px;
+  box-shadow: 0 4px 24px rgba(0,0,0,.4); cursor: default; }
+.lightbox-close { position: fixed; top: 16px; right: 24px; font-size: 36px; color: #fff;
+  cursor: pointer; line-height: 1; opacity: .85; user-select: none; }
+.lightbox-close:hover { opacity: 1; }
 </style>

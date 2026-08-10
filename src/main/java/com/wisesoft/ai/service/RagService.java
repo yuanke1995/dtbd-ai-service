@@ -15,6 +15,8 @@ import reactor.core.Disposable;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * RAG 问答服务
@@ -54,8 +56,11 @@ public class RagService {
      */
     public void chat(String sessionId, String question, SseEmitter emitter) {
         try {
+            // 0. 查询改写（优化检索精准度；默认关闭，失败静默降级为原始问题）
+            String retrievalQuery = rewriteQuery(question);
+
             SearchRequest searchRequest = SearchRequest.builder()
-                    .query(question)
+                    .query(retrievalQuery)
                     .topK(properties.getRetrieval().getTopK())
                     .similarityThreshold(properties.getRetrieval().getSimilarityThreshold())
                     .build();
@@ -63,32 +68,63 @@ public class RagService {
             // 1. 检索命中知识块
             List<Document> hits = vectorStore.similaritySearch(searchRequest);
 
-            // 2. 为命中块的图片编号，构建参考资料上下文（图片标记 [图片N] 紧跟所属内容）
-            Map<Integer, String> imgIndex = new LinkedHashMap<>(); // 编号(1起) -> 图片原始URL（签名在响应时动态生成，避免存库过期）
+            // 2. 为命中块的图片编号，构建参考资料上下文
+            //    知识块正文中已包含 [图片] 或 [图片：描述]，需替换为编号 [图片N]
+            //    避免 LLM 看到两套标记（无编号 + 有编号）导致回答中输出无编号的 [图片]
+            Map<Integer, String> imgIndex = new LinkedHashMap<>();
+            java.util.regex.Pattern imgPattern = java.util.regex.Pattern.compile("\\[图片(：.*?)?\\]");
             StringBuilder context = new StringBuilder();
             int docNo = 1;
             for (Document doc : hits) {
-                context.append("[").append(docNo++).append("] ").append(doc.getText()).append("\n");
+                String text = doc.getText();
                 List<String> urls = imagesOf(doc);
-                for (String url : urls) {
-                    int seq = imgIndex.size() + 1;
-                    imgIndex.put(seq, url);
-                    context.append("[图片").append(seq).append("]\n");
+
+                log.info("[RAG] chunk docId={} urls={} text有图片标记={}",
+                        doc.getId(), urls, imgPattern.matcher(text).find());
+
+                // 将正文中的 [图片] / [图片：xxx] 替换为全局编号 [图片N]
+                int imgIdxForChunk = 0;
+                java.util.regex.Matcher matcher = imgPattern.matcher(text);
+                StringBuffer sb = new StringBuffer();
+                while (matcher.find()) {
+                    if (imgIdxForChunk < urls.size()) {
+                        int globalSeq = imgIndex.size() + 1;
+                        imgIndex.put(globalSeq, urls.get(imgIdxForChunk));
+                        matcher.appendReplacement(sb, "[图片" + globalSeq + "]");
+                        imgIdxForChunk++;
+                    } else {
+                        matcher.appendReplacement(sb, matcher.group());
+                    }
+                }
+                matcher.appendTail(sb);
+                text = sb.toString();
+
+                context.append("[").append(docNo++).append("] ").append(text).append("\n");
+
+                // 如果正文中的 [图片] 数量少于 metadata 中的 URL 数量，剩余的补在末尾
+                for (int i = imgIdxForChunk; i < urls.size(); i++) {
+                    int globalSeq = imgIndex.size() + 1;
+                    imgIndex.put(globalSeq, urls.get(i));
+                    context.append("[图片").append(globalSeq).append("]\n");
                 }
             }
 
             // 3. SSE 先发图片 URL 列表（编号顺序，生产开启鉴权时动态签名）
             if (!imgIndex.isEmpty()) {
                 List<String> signedUrls = imgIndex.values().stream().map(imageUrlSigner::signUrl).toList();
+                log.info("[SSE] 发送 image 事件: imgIndex.size={}, signedUrls={}", imgIndex.size(), signedUrls);
                 sendSseEvent(emitter, "image", JSON.toJSONString(signedUrls), sessionId);
+            } else {
+                log.info("[SSE] 无图片，跳过 image 事件");
             }
 
             // 4. System 提示：角色 + 图片标记规则 + 对话历史
             StringBuilder system = new StringBuilder(
                     "你是\"小报\"，一个基于操作手册知识库回答系统使用问题的AI助手。"
                             + "回答应准确、简洁，优先依据参考资料。"
-                            + "参考资料中用 [图片N] 表示文档截图，回答时在描述对应内容的准确位置输出 [图片N]（例如\"操作步骤如图所示[图片1]\"），"
-                            + "不要把图片标记堆到回答结尾，也不要编造不存在的编号。");
+                            + "参考资料中用 [图片N] 表示文档截图，回答时在描述对应内容的准确位置输出 [图片N]（例如\"如图[图片1]所示，架构分为两层\"），"
+                            + "不要把图片标记堆到回答结尾，也不要编造不存在的编号。"
+                            + "注意：标点符号放在 [图片N] 前面，如\"如图：[图片1]\"，不要写成\"如图[图片1]：\"。");
             List<Map<String, Object>> history = sessionService.getRecentHistory(sessionId, 5);
             if (!history.isEmpty()) {
                 system.append("\n\n对话历史：\n");
@@ -143,16 +179,25 @@ public class RagService {
      * 获取知识块的图片 URL：优先 Redis metadata，缺失时按 doc.getId()（=knowledgeId）查 MySQL 兜底
      */
     private List<String> imagesOf(Document doc) {
-        List<String> urls = parseImages(doc.getMetadata().get("images"));
+        Object metaImages = doc.getMetadata().get("images");
+        List<String> urls = parseImages(metaImages);
+        String docId = String.valueOf(doc.getId());
         if (urls.isEmpty()) {
             try {
-                AiKnowledge k = knowledgeMapper.selectById(String.valueOf(doc.getId()));
-                if (k != null && k.getImages() != null && !k.getImages().isBlank()) {
+                AiKnowledge k = knowledgeMapper.selectById(docId);
+                if (k == null) {
+                    log.warn("[imagesOf] MySQL 未找到 knowledge: id={}", docId);
+                } else if (k.getImages() == null || k.getImages().isBlank()) {
+                    log.warn("[imagesOf] MySQL knowledge.images 为空: id={}", docId);
+                } else {
                     urls = parseImages(k.getImages());
+                    log.info("[imagesOf] MySQL 兜底成功: id={} urls={}", docId, urls);
                 }
             } catch (Exception e) {
-                log.warn("查询知识块图片失败: {}", e.getMessage());
+                log.warn("[imagesOf] MySQL 查询异常: id={} error={}", docId, e.getMessage());
             }
+        } else {
+            log.info("[imagesOf] metadata 命中: id={} urls={}", docId, urls);
         }
         return urls;
     }
@@ -199,6 +244,35 @@ public class RagService {
             emitter.complete();
         } catch (Exception e) {
             // 忽略
+        }
+    }
+
+    /**
+     * LLM 改写用户问题，优化检索精准度。
+     * 失败/超时/空结果时静默降级为原始问题。
+     */
+    private String rewriteQuery(String question) {
+        if (!properties.getQueryRewrite().isEnabled()) {
+            return question;
+        }
+        try {
+            String rewritten = CompletableFuture
+                    .supplyAsync(() -> chatClient.prompt()
+                            .system(properties.getQueryRewrite().getPrompt())
+                            .user(question)
+                            .call()
+                            .content())
+                    .get(properties.getQueryRewrite().getTimeoutMillis(), TimeUnit.MILLISECONDS);
+            if (rewritten == null || rewritten.isBlank()) {
+                log.debug("[rewrite] LLM 返回空，降级为原始问题: {}", question);
+                return question;
+            }
+            String trimmed = rewritten.trim();
+            log.info("[rewrite] {} -> {}", question, trimmed);
+            return trimmed;
+        } catch (Exception e) {
+            log.debug("[rewrite] 改写失败，降级为原始问题: {} error={}", question, e.getMessage());
+            return question;
         }
     }
 }

@@ -2,6 +2,7 @@ package com.wisesoft.ai.controller;
 
 import com.wisesoft.ai.dto.ChatRequest;
 import com.wisesoft.ai.dto.ResultJson;
+import com.wisesoft.ai.dto.SessionInfo;
 import com.wisesoft.ai.service.ImageUrlSigner;
 import com.wisesoft.ai.service.RagService;
 import com.wisesoft.ai.service.SessionService;
@@ -31,7 +32,6 @@ public class ChatController {
 
     @PostMapping("/chat")
     public SseEmitter chat(@RequestBody @Valid ChatRequest request) {
-        // 参数校验失败由全局异常处理返回 400（@NotBlank 空问题不再走 SSE error 事件）
         String question = request.getQuestion().trim();
 
         String sessionId = request.getSessionId();
@@ -42,6 +42,15 @@ public class ChatController {
         SseEmitter emitter = new SseEmitter(300000L);
         ragService.chat(sessionId, question, emitter);
         return emitter;
+    }
+
+    /**
+     * 列出所有会话（按更新时间倒序）
+     */
+    @GetMapping("/sessions")
+    public ResultJson listSessions() {
+        List<SessionInfo> sessions = sessionService.listSessions();
+        return ResultJson.ok(sessions);
     }
 
     @GetMapping("/session/{sessionId}")
@@ -60,10 +69,13 @@ public class ChatController {
         return ResultJson.ok(history);
     }
 
+    /**
+     * 删除会话（MySQL 软删除 + Redis 清理）
+     */
     @DeleteMapping("/session/{sessionId}")
-    public ResultJson clearSession(@PathVariable String sessionId) {
-        sessionService.clearSession(sessionId);
-        return ResultJson.ok("会话已清除");
+    public ResultJson deleteSession(@PathVariable String sessionId) {
+        sessionService.deleteSession(sessionId);
+        return ResultJson.ok("会话已删除");
     }
 
     @PostMapping("/session/new")

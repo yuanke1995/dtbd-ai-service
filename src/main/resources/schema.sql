@@ -37,3 +37,31 @@ CREATE TABLE IF NOT EXISTS `c_ai_knowledge` (
 -- 2026-08-04: 知识片段新增图片URL(JSON数组)字段
 ALTER TABLE `c_ai_knowledge`
     ADD COLUMN `images` VARCHAR(2000) DEFAULT NULL COMMENT '关联图片URL(JSON数组)' AFTER `content`;
+
+-- ============================================
+-- 2026-08-10: 会话持久化 & 历史回放
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS `c_ai_session` (
+    `id`            VARCHAR(50)  NOT NULL COMMENT '主键ID (UUID无横线)',
+    `title`         VARCHAR(200) DEFAULT NULL COMMENT '会话标题 (取自首条用户问题)',
+    `message_count` INT          DEFAULT 0 COMMENT '消息条数',
+    `create_time`   DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`   DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `deleted`       INT          DEFAULT 0 COMMENT '逻辑删除: 0=未删除, 1=已删除',
+    PRIMARY KEY (`id`),
+    KEY `idx_deleted_update` (`deleted`, `update_time` DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI会话表';
+
+CREATE TABLE IF NOT EXISTS `c_ai_message` (
+    `id`          VARCHAR(50)  NOT NULL COMMENT '主键ID (UUID无横线)',
+    `session_id`  VARCHAR(50)  NOT NULL COMMENT '所属会话ID',
+    `role`        VARCHAR(20)  NOT NULL COMMENT '角色: user / assistant',
+    `content`     TEXT         NOT NULL COMMENT '消息内容',
+    `images`      VARCHAR(2000) DEFAULT NULL COMMENT '关联图片URL (JSON数组字符串)',
+    `sequence`    INT          NOT NULL DEFAULT 0 COMMENT '消息序号 (会话内递增)',
+    `create_time` DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `deleted`     INT          DEFAULT 0 COMMENT '逻辑删除: 0=未删除, 1=已删除',
+    PRIMARY KEY (`id`),
+    KEY `idx_session_id` (`session_id`, `sequence`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI消息表';

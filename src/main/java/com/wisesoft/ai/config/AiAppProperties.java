@@ -20,6 +20,8 @@ public class AiAppProperties {
     private Images images = new Images();
     private Vision vision = new Vision();
 
+    private QueryRewrite queryRewrite = new QueryRewrite();
+
     /** 内部信任 token（dtbd-core 代理调用时携带；必须通过环境变量配置，无默认值） */
     private String trustedToken;
 
@@ -75,5 +77,15 @@ public class AiAppProperties {
         private int timeoutMillis = 30000;
         /** 描述 prompt */
         private String prompt = "请简要描述这张图片的内容，如果是界面截图请提取关键文字和界面元素，如果是流程图请说明流程要点，50字以内。";
+    }
+
+    @Data
+    public static class QueryRewrite {
+        /** 是否启用查询改写 */
+        private boolean enabled = false;
+        /** 改写超时时间(ms) */
+        private int timeoutMillis = 5000;
+        /** 改写 prompt */
+        private String prompt = "请将用户问题改写为一个更精准的检索关键词或短语。只需输出改写后的文本，不要解释。";
     }
 }
