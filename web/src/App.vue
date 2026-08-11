@@ -28,7 +28,7 @@ const onMenu = ({ key }) => router.push(key === 'documents' ? '/documents' : '/c
 </script>
 
 <style>
-body { margin:0 }
+html, body { margin: 0; overflow-x: hidden; }
 .header { display:flex;align-items:center }
 .logo { color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;margin-right:40px }
 .menu { flex:1;min-width:0 }

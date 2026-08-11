@@ -10,7 +10,7 @@
 | ORM | MyBatis-Plus 3.5.9 |
 | 数据库 | OceanBase（MySQL 协议） |
 | 向量库 | Redis Stack（RediSearch，docker 映射端口 **6380**） |
-| LLM | 阿里云 MaaS 网关（OpenAI 兼容，chat=`qwen-plus`，embedding=`text-embedding-v4`，图片理解=`qwen3.5-omni-plus`） |
+| LLM | 阿里云 MaaS 网关（OpenAI 兼容，chat=`qwen3.7-flash-2026-07-15`，embedding=`text-embedding-v4`，图片理解=`qwen3-vl:2b` 本地 Ollama） |
 | 前端 | Vue 3 + Vite 5 + Ant Design Vue 4（Node ≥ 18，建议 20/22） |
 | 文档解析 | Apache POI 5.2.3（段落/表格/内嵌图片） |
 
@@ -29,7 +29,7 @@ dtbd-ai-service/
 │   └── dto/                         # 数据传输对象
 ├── src/main/resources/
 │   ├── application.yml              # 配置
-│   └── schema.sql                   # 建表脚本 + 增量 ALTER
+│   └── schema.sql                   # 建表脚本（启动自动执行，幂等可重复运行）
 ├── data/images/{docId}/             # 文档提取的图片（运行时生成，静态映射 /ai/images/**）
 └── web/                             # 前端测试台（Node ≥ 18，见 .nvmrc）
     ├── package.json
@@ -47,10 +47,9 @@ docker run -d --name redis-stack -p 6380:6379 redis/redis-stack-server:latest
 ```
 > ⚠️ Spring AI M6 的 RedisVectorStore 自动配置强制要求 **Jedis** 客户端，项目已引入 `redis.clients:jedis`，且 `spring.data.redis.client-type: jedis`。
 
-**数据库**：使用现有 OceanBase 库 `dtbd_init`。首次部署需初始化两张表并加 `images` 列：
+**数据库**：使用现有 OceanBase 库 `dtbd_init`（库需预先存在）。表结构（`c_ai_document`/`c_ai_knowledge`/`c_ai_session`/`c_ai_message`）由应用启动时自动执行 `schema.sql` 创建（`spring.sql.init.mode=always`，全部 `CREATE TABLE IF NOT EXISTS`，重复启动安全）；也可手动执行：
 ```bash
 mysql -h172.168.10.65 -P2881 -uroot -p dtbd_init < src/main/resources/schema.sql
-# 若表已存在，执行 schema.sql 末尾的增量 ALTER（c_ai_knowledge 增加 images 列）
 ```
 
 ### 2. 配置环境变量
@@ -64,7 +63,9 @@ export AI_DEEPSEEK_KEY=sk-xxxx            # LLM/Embedding/视觉共用（MaaS �
 # ===== 可选 =====
 export REDIS_HOST=127.0.0.1
 export REDIS_PORT=6380
-export AI_VISION_MODEL=qwen3.5-omni-plus  # 图片描述模型（全模态）
+export AI_VISION_MODEL=qwen3-vl:2b  # 图片描述模型（全模态，本地 Ollama）
+export AI_VISION_BASE_URL=http://localhost:11434  # 视觉模型地址（不含 /v1，代码自动拼）
+export AI_VISION_THINK=false       # 关闭 qwen3 思考模式（提速且输出稳定）
 export AI_IMAGES_DIR=./data               # 图片存储目录
 export AI_IMAGES_AUTH_ENABLED=false       # 图片访问鉴权（生产建议 true，HMAC 签名 URL）
 export LOG_LEVEL_APP=info                 # 应用日志级别
@@ -106,14 +107,14 @@ npm run dev
 ### 5. 使用流程
 
 1. 打开前端 → **文档管理**，上传 `.docx` 操作手册（≤50MB）
-2. 系统自动解析：段落文字、表格内容、内嵌图片（每篇最多 20 张，经全模态模型生成文字描述）
+2. 系统自动解析：段落文字、表格内容、内嵌图片（全部提取，压缩后并发调用视觉模型生成描述）
 3. 切到 **智能问答** 提问，回答中会在对应位置插入文档截图，点击图片可全屏放大
 4. 重新上传同名文件会自动替换旧版本（含向量与图片清理）
 
 ## 核心功能
 
 - **RAG 问答**：手动检索 Top-K 知识块，构建上下文（含 `[图片N]` 位置标记），流式 SSE 输出
-- **图片处理链路**：docx 提取图片（栅格类型过滤 + 文档内去重）→ 存 `data/images/{docId}/` → 全模态模型转文字描述入分块 → 命中时 SSE 发 `image` 事件 → 前端渲染原图（点击灯箱放大）
+- **图片处理链路**：docx 提取图片（栅格类型过滤 + 文档内去重 + 最长边 768px 压缩）→ 存 `data/images/{docId}/` → 并发调用视觉模型转文字描述入分块 → 命中时 SSE 发 `image` 事件 → 前端渲染原图（点击灯箱放大）
 - **SSE 事件**：`image`（图片 URL 数组，先发）→ `token*` → `done` / `error`
 
 ## 与报表平台集成
@@ -160,14 +161,17 @@ ai-app:
     expire-minutes: 30
   images:
     dir: ./data            # 图片存储根目录（AI_IMAGES_DIR）
-    max-per-doc: 20        # 每篇文档最多提取图片数
+    max-width: 768         # 图片最长边像素，超过则等比压缩（0=不压缩；768 为速度/清晰度平衡点，视觉 token 约为 1280 的 1/3）
+    quality: 0.8           # JPEG 压缩质量（带透明通道自动转 PNG）
     url-prefix: /ai/images # 图片 URL 前缀（含 context-path）
   vision:
-    model: qwen3.5-omni-plus   # 图片描述模型（AI_VISION_MODEL，全模态）
-    base-url: <MaaS 网关 /compatible-mode>   # 注意：不含 /v1，代码内拼 /v1
-    api-key: ${AI_DEEPSEEK_KEY}
+    model: qwen3-vl:2b     # 图片描述模型（AI_VISION_MODEL，本地 Ollama）
+    base-url: http://localhost:11434  # 不含 /v1，代码自动拼（AI_VISION_BASE_URL）
+    api-key: ollama        # Ollama 不校验密钥，占位值；云端服务需真实 Key
     enabled: true
-    timeout-millis: 30000
+    timeout-millis: 60000  # 单张描述超时（本地 2B 模型实测约 29s）
+    concurrency: 4         # 描述并发度（Ollama 需设 OLLAMA_NUM_PARALLEL 才真正并行）
+    think: false           # 关闭 qwen3 思考模式，提速且输出稳定（AI_VISION_THINK）
   trusted-token: dtbd-ai-internal-token
 
 spring:
@@ -184,7 +188,7 @@ spring:
     openai:
       api-key: ${AI_DEEPSEEK_KEY}
       base-url: <MaaS 网关 /compatible-mode>   # 不含 /v1（Spring AI 自动补）
-      chat: { options: { model: qwen-plus, temperature: 0.3 } }
+      chat: { options: { model: qwen3.7-flash-2026-07-15, temperature: 0.3 } }
       embedding:
         base-url: <MaaS 网关 /compatible-mode>
         options: { model: text-embedding-v4 }
@@ -197,8 +201,8 @@ spring:
 
 ## 已知注意事项
 
-- **聊天模型必须用 `qwen-plus`**：该 MaaS 网关对 `qwen-max` 返回 DashScope 原生格式（`{"text":...}`），Spring AI 无法解析（表现为 0 token 无回答）；`qwen-plus` 返回标准 OpenAI 格式。
-- **base-url 不含 `/v1`**：Spring AI 会自动拼 `/v1/chat/completions`、`/v1/embeddings`；手写 HTTP 调用（如 VisionService）需自行拼 `/v1`。
+- **聊天模型**：当前使用 `qwen3.7-flash-2026-07-15`（与 application.yml 一致）。注意：该 MaaS 网关对部分模型（如 `qwen-max`）返回 DashScope 原生格式（`{"text":...}`），Spring AI 无法解析（表现为 0 token 无回答）；需使用返回标准 OpenAI 格式的模型（`qwen-plus`、`qwen3.7-flash` 已实测兼容）。
+- **base-url 不含 `/v1`**：Spring AI 会自动拼 `/v1/chat/completions`、`/v1/embeddings`；手写 HTTP 调用（VisionService）也会自动补 `/v1`（base-url 已以 `/v1` 结尾时不重复拼接）。
 - **图片访问路径**：后端返回 `/ai/images/...`（含 context-path），前端经 `/proxy` 代理时需去掉 `/ai` 前缀（vite 代理 target 已含 context-path），否则双重 `/ai` 404。
 - **M6 向量库 metadata 限制**：RedisVectorStore 检索返回的 Document 仅含相似度分数，自定义 metadata（如 images）需用 `doc.getId()`（=knowledgeId）查 MySQL 兜底。
 - **图片描述失败降级**：视觉模型调用失败时图片仍会提取保存，描述降级为 `[图片]` 占位，不影响上传与问答。

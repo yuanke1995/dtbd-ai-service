@@ -52,13 +52,20 @@ public class VisionService {
 
             Map<String, Object> body = new HashMap<>();
             body.put("model", properties.getVision().getModel());
+            // qwen3 系列默认思考模式：关闭以提速且输出稳定（实测 max_tokens 在思考模型下会导致空输出，保持 0 不发送）
+            if (properties.getVision().isThink() == false) {
+                body.put("think", false);
+            }
             body.put("messages", List.of(Map.of("role", "user", "content", List.of(
                     Map.of("type", "image_url", "image_url",
                             Map.of("url", "data:" + mime + ";base64," + base64)),
                     Map.of("type", "text", "text", properties.getVision().getPrompt())))));
 
             String resp = restClient.post()
-                    .uri("/v1/chat/completions")
+                    // 防御：base-url 已含 /v1（如 Ollama http://localhost:11434/v1）时不重复拼 /v1
+                    .uri(properties.getVision().getBaseUrl().endsWith("/v1")
+                            ? "/chat/completions"
+                            : "/v1/chat/completions")
                     .header("Authorization", "Bearer " + properties.getVision().getApiKey())
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(body)

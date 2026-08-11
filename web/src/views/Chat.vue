@@ -37,10 +37,18 @@
           </div>
         </div>
 
-        <!-- 图片点击放大灯箱 -->
-        <div v-if="previewUrl" class="lightbox" @click="previewUrl = ''">
-          <img :src="previewUrl" alt="大图预览" @click.stop />
-          <span class="lightbox-close" @click="previewUrl = ''">×</span>
+        <!-- 图片点击放大灯箱：滚轮缩放、拖动平移、双击重置、ESC 关闭 -->
+        <div v-if="previewUrl" class="lightbox" @click="close" @wheel.prevent="onWheel">
+          <img
+            :src="previewUrl" alt="大图预览" @click.stop
+            :class="{ dragging: !!dragState }"
+            :style="{ transform: 'translate(' + offset.x + 'px,' + offset.y + 'px) scale(' + zoom + ')' }"
+            @mousedown="onImgMouseDown" @mousemove="onImgMouseMove" @mouseup="onImgMouseUp" @mouseleave="onImgMouseUp"
+            @dblclick="onImgDblClick"
+          />
+          <span class="lightbox-close" @click.stop="close">×</span>
+          <span v-if="zoom !== 1" class="lightbox-hint">{{ Math.round(zoom * 100) }}%</span>
+          <span class="lightbox-tip">滚轮缩放 · 拖动平移 · 双击重置 · ESC 关闭</span>
         </div>
 
         <div class="input">
@@ -62,7 +70,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { RobotOutlined, SendOutlined, PauseCircleOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi } from '../api'
@@ -76,6 +84,9 @@ const sessions = ref([])
 const messages = ref([])
 const box = ref(null)
 const previewUrl = ref('')
+const zoom = ref(1)
+const offset = ref({ x: 0, y: 0 })
+const dragState = ref(null)
 const abortController = ref(null)
 const sidebarCollapsed = ref(false)
 const tips = ['系统有哪些功能？', '如何创建一个新表单？', '字段验证怎么设置？', '什么是填报周期？']
@@ -88,8 +99,62 @@ const openPreview = e => {
   const t = e.target
   if (t && t.tagName && t.tagName.toLowerCase() === 'img') {
     previewUrl.value = t.getAttribute('src')
+    zoom.value = 1
+    offset.value = { x: 0, y: 0 }
   }
 }
+
+// 灯箱：关闭（重置缩放与平移）
+const close = () => {
+  previewUrl.value = ''
+  zoom.value = 1
+  offset.value = { x: 0, y: 0 }
+  dragState.value = null
+}
+
+// 灯箱：滚轮缩放（25% ~ 800%）
+const onWheel = e => {
+  zoom.value = Math.min(8, Math.max(0.25, zoom.value + (e.deltaY < 0 ? 0.15 : -0.15)))
+}
+
+// 灯箱：拖动平移（放大后查看超出窗口的边缘）
+const onImgMouseDown = e => {
+  if (e.button !== 0) return
+  dragState.value = { startX: e.clientX, startY: e.clientY, ox: offset.value.x, oy: offset.value.y }
+  e.preventDefault()
+}
+const onImgMouseMove = e => {
+  if (!dragState.value) return
+  offset.value.x = dragState.value.ox + (e.clientX - dragState.value.startX)
+  offset.value.y = dragState.value.oy + (e.clientY - dragState.value.startY)
+}
+const onImgMouseUp = () => { dragState.value = null }
+
+// 双击重置视图
+const onImgDblClick = () => {
+  zoom.value = 1
+  offset.value = { x: 0, y: 0 }
+}
+
+// ESC 关闭灯箱
+const onKeydown = e => {
+  if (e.key === 'Escape') close()
+}
+watch(previewUrl, v => {
+  if (v) window.addEventListener('keydown', onKeydown)
+  else window.removeEventListener('keydown', onKeydown)
+})
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+
+// 窄窗口（<640px）自动折叠侧边栏：保证浏览器窗口可以任意缩小，不出现横向溢出
+const handleWindowResize = () => {
+  if (window.innerWidth < 640 && !sidebarCollapsed.value) {
+    sidebarCollapsed.value = true
+    localStorage.setItem('ai_sidebar_collapsed', 'true')
+  }
+}
+window.addEventListener('resize', handleWindowResize)
+onUnmounted(() => window.removeEventListener('resize', handleWindowResize))
 
 // 初始化：恢复侧边栏状态 → 加载会话列表 → 选择最近会话或新建
 onMounted(async () => {
@@ -241,15 +306,16 @@ const escapeHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/
 const render = (t, images = []) => {
   if (!t) return ''
   let html = escapeHtml(t)
-  // 图片标记
-  html = html.replace(/\[图片\s*(\d+)\]/g, (m, n) => {
+  // 图片标记：兼容 [图片N] 与 [图片N：描述] 两种格式；吸收标记后紧跟的标点/空白，
+  // 避免标点落在图片下一行；标记前的标点保留在文字末尾（如"如图：[图片1]"的冒号保留）
+  html = html.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？\s]*/g, (m, n) => {
     const u = images[Number(n) - 1]
     if (!u) {
       console.warn('[图片] 渲染失败:', m, '索引', n, 'images长度', images.length, images)
       return m
     }
     const src = resolveImg(u).replace(/"/g, '&quot;')
-    return `<div><img class="md-img" src="${src}" alt="文档图片"/></div>`
+    return `<div style="text-align:center"><img class="md-img" src="${src}" alt="文档图片"/></div>`
   })
   // Markdown 子集
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
@@ -317,10 +383,16 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 
 /* 图片灯箱 */
 .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.78); display: flex;
-  align-items: center; justify-content: center; z-index: 1000; cursor: zoom-out; }
+  align-items: center; justify-content: center; z-index: 1000; cursor: zoom-out; overflow: hidden; }
 .lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 4px;
-  box-shadow: 0 4px 24px rgba(0,0,0,.4); cursor: default; }
+  box-shadow: 0 4px 24px rgba(0,0,0,.4); cursor: grab; user-select: none;
+  transition: transform .12s ease; will-change: transform; }
+.lightbox img.dragging { cursor: grabbing; transition: none; }
 .lightbox-close { position: fixed; top: 16px; right: 24px; font-size: 36px; color: #fff;
   cursor: pointer; line-height: 1; opacity: .85; user-select: none; }
 .lightbox-close:hover { opacity: 1; }
+.lightbox-hint { position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+  color: #fff; font-size: 14px; background: rgba(0,0,0,.5); padding: 2px 10px; border-radius: 12px; user-select: none; }
+.lightbox-tip { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  color: rgba(255,255,255,.6); font-size: 12px; user-select: none; }
 </style>

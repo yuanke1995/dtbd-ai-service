@@ -24,6 +24,18 @@ import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+
+import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -34,6 +46,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 文档管理服务
@@ -54,6 +69,19 @@ public class DocumentService {
     private final VectorStore vectorStore;
     private final AiAppProperties properties;
     private final VisionService visionService;
+
+    /** 图片描述线程池（并发调用视觉模型，避免串行推理拖慢上传） */
+    private ExecutorService visionExecutor;
+
+    @PostConstruct
+    void initVisionExecutor() {
+        visionExecutor = Executors.newFixedThreadPool(Math.max(1, properties.getVision().getConcurrency()));
+    }
+
+    @PreDestroy
+    void shutdownVisionExecutor() {
+        visionExecutor.shutdown();
+    }
 
     /**
      * 上传并解析文档
@@ -195,7 +223,8 @@ public class DocumentService {
         int maxSize = properties.getChunk().getMaxSize();
         String title = "概述";
         StringBuilder content = new StringBuilder();
-        List<String> currentImages = new ArrayList<>();
+        // 当前分块待处理图片（描述异步并发生成，flush 时统一 join）
+        List<SavedImage> currentImages = new ArrayList<>();
         // checksum -> 已保存图片（文档内去重，复用 URL 与描述）
         Map<Long, SavedImage> imageCache = new HashMap<>();
         int[] imageCount = {0};
@@ -209,11 +238,7 @@ public class DocumentService {
                     int level = headingLevel(p);
                     if (level > 0 && level <= 3) {
                         // 遇标题 flush 当前块
-                        if (content.length() > 0 || !currentImages.isEmpty()) {
-                            chunks.add(new Chunk(title, content.toString(), new ArrayList<>(currentImages)));
-                            content = new StringBuilder();
-                            currentImages.clear();
-                        }
+                        flushChunk(title, content, currentImages, chunks);
                         title = text;
                         continue;
                     }
@@ -227,8 +252,7 @@ public class DocumentService {
                     // 段落内嵌图片（图片独立成段时 text 为空，也要进块）
                     for (XWPFRun run : p.getRuns()) {
                         for (XWPFPicture pic : run.getEmbeddedPictures()) {
-                            handlePicture(pic.getPictureData(), docId, content, currentImages,
-                                    imageCache, imageCount);
+                            handlePicture(pic.getPictureData(), docId, currentImages, imageCache, imageCount);
                         }
                     }
                 } else if (element.getElementType() == BodyElementType.TABLE) {
@@ -250,33 +274,26 @@ public class DocumentService {
                     }
                 }
 
-                // 通用超长 flush
-                if (content.length() > maxSize) {
-                    chunks.add(new Chunk(title, content.toString(), new ArrayList<>(currentImages)));
-                    content = new StringBuilder();
-                    currentImages.clear();
+                // 通用超长 flush（图片描述按平均 40 字估算计入长度，保持原有分块粒度）
+                if (content.length() + currentImages.size() * 40 > maxSize) {
+                    flushChunk(title, content, currentImages, chunks);
                 }
             }
-            if (content.length() > 0 || !currentImages.isEmpty()) {
-                chunks.add(new Chunk(title, content.toString(), new ArrayList<>(currentImages)));
-            }
+            flushChunk(title, content, currentImages, chunks);
         }
         return chunks;
     }
 
     /**
-     * 处理单张图片：类型过滤 → 去重 → 保存 → 视觉模型描述 → 追加进当前分块
+     * 处理单张图片：类型过滤 → 去重 → 压缩保存 → 异步并发生成描述。
+     * 描述提交到 visionExecutor 并发执行，分块 flush 时统一 join（保持文档顺序）。
      */
     private void handlePicture(XWPFPictureData data, String docId,
-                               StringBuilder content, List<String> currentImages,
+                               List<SavedImage> currentImages,
                                Map<Long, SavedImage> imageCache, int[] imageCount) {
         String ext = data.suggestFileExtension().toLowerCase();
         if (!ALLOWED_EXTS.contains(ext)) {
             log.debug("跳过不支持的图片类型: {}", ext);
-            return;
-        }
-        if (imageCount[0] >= properties.getImages().getMaxPerDoc()) {
-            log.warn("图片数量超过上限 {}，已跳过", properties.getImages().getMaxPerDoc());
             return;
         }
 
@@ -284,9 +301,12 @@ public class DocumentService {
         SavedImage saved = imageCache.get(checksum);
         if (saved == null) {
             try {
-                String url = persistImage(data.getData(), ext, docId, imageCount[0]);
-                String desc = visionService.describe(data.getData(), ext);
-                saved = new SavedImage(url, desc);
+                // 压缩后保存（减小存储 & 加速视觉推理），webp 等不可解码格式原样保留
+                CompressedImage ci = compress(data.getData(), ext);
+                String url = persistImage(ci.bytes(), ci.ext(), docId, imageCount[0]);
+                CompletableFuture<String> descFuture = CompletableFuture.supplyAsync(
+                        () -> visionService.describe(ci.bytes(), ci.ext()), visionExecutor);
+                saved = new SavedImage(url, descFuture);
                 imageCache.put(checksum, saved);
                 imageCount[0]++;
             } catch (IOException e) {
@@ -294,10 +314,70 @@ public class DocumentService {
                 return;
             }
         }
+        currentImages.add(saved);
+    }
 
-        currentImages.add(saved.url());
-        if (content.length() > 0) content.append("\n");
-        content.append(saved.desc().isBlank() ? "[图片]" : "[图片：" + saved.desc() + "]");
+    /**
+     * 图片压缩：等比缩放（最长边超过 max-width 时）+ 重编码。
+     * 带透明通道输出 PNG（无损，避免 JPEG 黑底），否则输出 JPEG（quality 控制）；
+     * ImageIO 无法解码的格式（如 webp）或压缩失败时原样返回。
+     */
+    private CompressedImage compress(byte[] original, String ext) {
+        try {
+            BufferedImage img = ImageIO.read(new ByteArrayInputStream(original));
+            if (img == null) return new CompressedImage(original, ext);
+
+            int maxWidth = properties.getImages().getMaxWidth();
+            if (maxWidth > 0 && img.getWidth() > maxWidth) {
+                int height = (int) Math.round(img.getHeight() * (double) maxWidth / img.getWidth());
+                int type = img.getType() == 0 ? BufferedImage.TYPE_INT_RGB : img.getType();
+                BufferedImage scaled = new BufferedImage(maxWidth, height, type);
+                Graphics2D g = scaled.createGraphics();
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                g.drawImage(img, 0, 0, maxWidth, height, null);
+                g.dispose();
+                img = scaled;
+            }
+
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            if (img.getColorModel().hasAlpha()) {
+                ImageIO.write(img, "png", out);
+                return new CompressedImage(out.toByteArray(), "png");
+            }
+            ImageWriter writer = ImageIO.getImageWritersByFormatName("jpg").next();
+            ImageWriteParam param = writer.getDefaultWriteParam();
+            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+            param.setCompressionQuality(properties.getImages().getQuality());
+            try (ImageOutputStream ios = ImageIO.createImageOutputStream(out)) {
+                writer.setOutput(ios);
+                writer.write(img);
+            } finally {
+                writer.dispose();
+            }
+            return new CompressedImage(out.toByteArray(), "jpg");
+        } catch (Exception e) {
+            log.debug("图片压缩失败，使用原图: {}", e.getMessage());
+            return new CompressedImage(original, ext);
+        }
+    }
+
+    /**
+     * flush 当前分块：join 并发描述结果并按文档顺序拼入内容，写入 chunk 列表。
+     * 完成后重置 content 与 currentImages，供下一分块复用。
+     */
+    private void flushChunk(String title, StringBuilder content, List<SavedImage> currentImages, List<Chunk> chunks) {
+        if (content.length() == 0 && currentImages.isEmpty()) return;
+        StringBuilder finalContent = new StringBuilder(content);
+        List<String> urls = new ArrayList<>(currentImages.size());
+        for (SavedImage img : currentImages) {
+            String desc = img.descFuture().join();
+            if (finalContent.length() > 0) finalContent.append("\n");
+            finalContent.append(desc.isBlank() ? "[图片]" : "[图片：" + desc + "]");
+            urls.add(img.url());
+        }
+        chunks.add(new Chunk(title, finalContent.toString(), urls));
+        content.setLength(0);
+        currentImages.clear();
     }
 
     /**
@@ -363,5 +443,8 @@ public class DocumentService {
 
     private record Chunk(String title, String content, List<String> images) {}
 
-    private record SavedImage(String url, String desc) {}
+    /** 已保存图片：URL + 异步生成的描述（flush 时 join） */
+    private record SavedImage(String url, CompletableFuture<String> descFuture) {}
+
+    private record CompressedImage(byte[] bytes, String ext) {}
 }

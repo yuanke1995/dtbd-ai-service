@@ -82,7 +82,7 @@ public class RagService {
                 log.info("[RAG] chunk docId={} urls={} text有图片标记={}",
                         doc.getId(), urls, imgPattern.matcher(text).find());
 
-                // 将正文中的 [图片] / [图片：xxx] 替换为全局编号 [图片N]
+                // 将正文中的 [图片] / [图片：xxx] 替换为全局编号 [图片N]，并保留描述供 LLM 识别对应内容
                 int imgIdxForChunk = 0;
                 java.util.regex.Matcher matcher = imgPattern.matcher(text);
                 StringBuffer sb = new StringBuffer();
@@ -90,7 +90,17 @@ public class RagService {
                     if (imgIdxForChunk < urls.size()) {
                         int globalSeq = imgIndex.size() + 1;
                         imgIndex.put(globalSeq, urls.get(imgIdxForChunk));
-                        matcher.appendReplacement(sb, "[图片" + globalSeq + "]");
+                        // 提取原始标记中的描述（若有）：[图片：评分组件截图] → 评分组件截图
+                        String raw = matcher.group();
+                        String desc = "";
+                        int colonIdx = raw.indexOf("：");
+                        if (colonIdx >= 0 && raw.length() > colonIdx + 2) {
+                            desc = raw.substring(colonIdx + 1, raw.length() - 1).trim();
+                        }
+                        String replacement = desc.isEmpty()
+                                ? "[图片" + globalSeq + "]"
+                                : "[图片" + globalSeq + "：" + desc + "]";
+                        matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
                         imgIdxForChunk++;
                     } else {
                         matcher.appendReplacement(sb, matcher.group());
@@ -124,7 +134,8 @@ public class RagService {
                             + "回答应准确、简洁，优先依据参考资料。"
                             + "参考资料中用 [图片N] 表示文档截图，回答时在描述对应内容的准确位置输出 [图片N]（例如\"如图[图片1]所示，架构分为两层\"），"
                             + "不要把图片标记堆到回答结尾，也不要编造不存在的编号。"
-                            + "注意：标点符号放在 [图片N] 前面，如\"如图：[图片1]\"，不要写成\"如图[图片1]：\"。");
+                            + "注意：插入 [图片N] 时，标记前后不要紧贴任何标点，[图片N] 应独立成行；"
+                            + "若句末需要标点，放在标记之前的文字末尾，如\"布局组件[图片1]\"，不要写成\"布局组件[图片1]、\"。");
             List<Map<String, Object>> history = sessionService.getRecentHistory(sessionId, 5);
             if (!history.isEmpty()) {
                 system.append("\n\n对话历史：\n");

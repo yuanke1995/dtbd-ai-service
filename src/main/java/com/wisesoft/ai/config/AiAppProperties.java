@@ -53,8 +53,10 @@ public class AiAppProperties {
     public static class Images {
         /** 图片存储根目录，默认 ./data（相对应用工作目录） */
         private String dir = "data";
-        /** 每篇文档最多提取图片数 */
-        private int maxPerDoc = 20;
+        /** 图片最长边像素，超过则等比缩小（0=不压缩） */
+        private int maxWidth = 1280;
+        /** JPEG 压缩质量（0~1） */
+        private float quality = 0.8f;
         /** 图片 URL 访问前缀（含 context-path /ai） */
         private String urlPrefix = "/ai/images";
         /** 图片访问鉴权开关（HMAC 签名 URL，生产开启） */
@@ -75,6 +77,13 @@ public class AiAppProperties {
         private boolean enabled = true;
         /** 单张图片描述超时(ms) */
         private int timeoutMillis = 30000;
+        /** 图片描述并发度（本地 Ollama 需设置 OLLAMA_NUM_PARALLEL 才能并行推理） */
+        private int concurrency = 4;
+        /**
+         * 关闭思考模式（qwen3 系列默认思考，关闭后提速且输出稳定）。
+         * 注意：max_tokens 在该思考模型下会导致空输出，本项目不发送 max_tokens
+         */
+        private boolean think = false;
         /** 描述 prompt */
         private String prompt = "请简要描述这张图片的内容，如果是界面截图请提取关键文字和界面元素，如果是流程图请说明流程要点，50字以内。";
     }
