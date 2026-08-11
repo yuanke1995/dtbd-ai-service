@@ -31,11 +31,50 @@
           <div v-for="(m,i) in messages" :key="i" class="row" :class="m.role">
             <a-avatar :style="{ background: m.role==='user'?'#87d068':'#1677ff', flexShrink:0 }">{{ m.role==='user'?'我':'AI' }}</a-avatar>
             <div class="bubble" :class="m.role">
-              <div class="md" v-html="render(m.content, m.images)"></div>
+              <div class="md" :data-msg-index="i" v-html="render(m.content, m.images)"></div>
               <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
+              <!-- 引用来源（回答中 [N] 角标点击查看原文片段） -->
+              <div v-if="m.role === 'ai' && m.sources && m.sources.length" class="src-chips">
+                <a-tag
+                  v-for="(s, si) in m.sources" :key="si" color="blue"
+                  style="cursor:pointer;margin:2px" @click="openSource(m.sources[si])"
+                >
+                  [{{ s.ref }}] {{ (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '') }}
+                </a-tag>
+              </div>
+              <!-- 相关推荐问题 -->
+              <div v-if="m.role === 'ai' && m.related && m.related.length" class="related">
+                <span class="related-label">猜你想问：</span>
+                <a-tag v-for="(q, qi) in m.related" :key="qi" color="green"
+                       style="cursor:pointer;margin:2px" @click="ask(q)">{{ q }}</a-tag>
+              </div>
+              <!-- 回答反馈 -->
+              <div v-if="m.role === 'ai' && m.messageId" class="fb-row">
+                <a-button size="small" type="text"
+                          :class="{ 'fb-active': m.fb === 1 }" @click="openFeedback(m, 1)">
+                  <like-outlined /> 有帮助
+                </a-button>
+                <a-button size="small" type="text"
+                          :class="{ 'fb-active': m.fb === 0 }" @click="openFeedback(m, 0)">
+                  <dislike-outlined /> 没帮助
+                </a-button>
+              </div>
             </div>
           </div>
         </div>
+
+        <!-- 引用来源详情弹窗 -->
+        <a-modal v-model:open="sourceVisible" :title="sourceTitle" :footer="null" width="620">
+          <p style="white-space:pre-wrap;margin:0;color:#333;line-height:1.7">{{ sourceSnippet }}</p>
+        </a-modal>
+
+        <!-- 回答反馈弹窗 -->
+        <a-modal v-model:open="feedbackVisible" title="反馈" :footer="null" width="440">
+          <a-textarea v-model:value="feedbackText" placeholder="可选：告诉我们哪里不满意（如回答不准确、图片不对等）" :rows="3" />
+          <a-button type="primary" style="margin-top:12px" :loading="feedbackSubmitting" @click="submitFeedback">
+            提交反馈
+          </a-button>
+        </a-modal>
 
         <!-- 图片点击放大灯箱：滚轮缩放、拖动平移、双击重置、ESC 关闭 -->
         <div v-if="previewUrl" class="lightbox" @click="close" @wheel.prevent="onWheel">
@@ -72,8 +111,8 @@
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi } from '../api'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined } from '@ant-design/icons-vue'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
 const text = ref('')
@@ -94,14 +133,58 @@ const tips = ['系统有哪些功能？', '如何创建一个新表单？', '字
 // 文档图片访问
 const resolveImg = u => u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
 
-// 点击回答中的图片 → 灯箱预览
+// 点击回答内容：引用角标 [N] → 来源详情；图片 → 灯箱预览（事件委托）
 const openPreview = e => {
   const t = e.target
+  if (t && t.classList && t.classList.contains('ref-sup')) {
+    const mdEl = t.closest('.md')
+    const msgIdx = mdEl ? Number(mdEl.dataset.msgIndex) : -1
+    const ref = Number(t.dataset.ref)
+    const src = messages.value[msgIdx]?.sources?.[ref - 1]
+    if (src) openSource(src)
+    return
+  }
   if (t && t.tagName && t.tagName.toLowerCase() === 'img') {
     previewUrl.value = t.getAttribute('src')
     zoom.value = 1
     offset.value = { x: 0, y: 0 }
   }
+}
+
+// 引用来源详情弹窗
+const sourceVisible = ref(false)
+const sourceTitle = ref('')
+const sourceSnippet = ref('')
+const openSource = s => {
+  if (!s) return
+  sourceTitle.value = (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '')
+  sourceSnippet.value = s.snippet || '（无原文片段）'
+  sourceVisible.value = true
+}
+
+// 回答反馈（👍👎 + 可选文本）
+const feedbackVisible = ref(false)
+const feedbackSubmitting = ref(false)
+const feedbackText = ref('')
+const feedbackTarget = ref(null) // { msg, rating }
+const openFeedback = (m, rating) => {
+  feedbackTarget.value = { msg: m, rating }
+  feedbackText.value = ''
+  feedbackVisible.value = true
+}
+const submitFeedback = async () => {
+  const t = feedbackTarget.value
+  if (!t || !t.msg.messageId) { message.warning('该回答不可反馈'); return }
+  feedbackSubmitting.value = true
+  try {
+    const r = await apiSubmitFeedback(t.msg.messageId, t.rating, feedbackText.value.trim())
+    if (r.success) {
+      t.msg.fb = t.rating
+      message.success('感谢反馈')
+      feedbackVisible.value = false
+    } else message.error(r.msg || '提交失败')
+  } catch (e) { message.error(e.message || '提交失败') }
+  finally { feedbackSubmitting.value = false }
 }
 
 // 灯箱：关闭（重置缩放与平移）
@@ -196,7 +279,9 @@ async function switchSession(sid) {
         .map(m => ({
           role: m.role === 'user' ? 'user' : 'ai',
           content: String(m.content || ''),
-          images: Array.isArray(m.images) ? m.images : []
+          images: Array.isArray(m.images) ? m.images : [],
+          sources: Array.isArray(m.sources) ? m.sources : [],
+          related: []
         }))
       scroll()
     } else {
@@ -253,7 +338,7 @@ const send = () => {
   text.value = ''
   messages.value.push({ role: 'user', content: q })
   const idx = messages.value.length
-  messages.value.push({ role: 'ai', content: '', images: [], loading: true })
+  messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], loading: true })
   loading.value = true
   abortController.value = new AbortController()
   let full = ''
@@ -261,19 +346,27 @@ const send = () => {
     signal: abortController.value.signal,
     onToken: t => { full += t; messages.value[idx].content = full; scroll() },
     onImage: imgs => {
-      console.log('[Chat] onImage 收到:', imgs)
       try {
         const parsed = JSON.parse(imgs)
-        console.log('[Chat] onImage 解析后:', parsed, '类型:', typeof parsed, 'Array.isArray:', Array.isArray(parsed))
         messages.value[idx].images = Array.isArray(parsed) ? parsed : []
       } catch (e) {
-        console.warn('[Chat] onImage JSON.parse 失败:', e)
         messages.value[idx].images = []
       }
     },
-    onDone: () => {
+    onDone: contentJson => {
+      // done 事件 content 为 {sources, related, messageId} JSON 字符串
+      let sources = [], related = [], messageId = null
+      try {
+        const p = JSON.parse(contentJson || '{}')
+        sources = Array.isArray(p.sources) ? p.sources : []
+        related = Array.isArray(p.related) ? p.related : []
+        messageId = p.messageId || null
+      } catch (e) { /* 旧版/停止生成：无负载 */ }
       if (messages.value[idx].content === '') messages.value[idx].content = '（已停止生成）'
       messages.value[idx].loading = false
+      messages.value[idx].sources = sources
+      messages.value[idx].related = related
+      messages.value[idx].messageId = messageId
       loading.value = false
       abortController.value = null
       scroll()
@@ -327,6 +420,8 @@ const render = (t, images = []) => {
   html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>')
   html = html.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, '<ul>$1</ul>')
   html = html.replace(/\n/g, '<br/>')
+  // 引用角标 [N] → 可点击上标（事件委托在 openPreview；仅纯数字防误伤 markdown 链接）
+  html = html.replace(/\[(\d+)\]/g, '<sup class="ref-sup" data-ref="$1">[$1]</sup>')
   return html
 }
 
@@ -380,6 +475,19 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .bubble.ai { background: #f5f5f5; color: #333; }
 .input { padding: 16px 24px; border-top: 1px solid #f0f0f0; }
 .md :deep(img) { max-width: 100%; max-height: 320px; border: 1px solid #e0e0e0; border-radius: 6px; display: block; margin: 8px 0; cursor: zoom-in; }
+/* 引用角标 [N] */
+.md :deep(.ref-sup) { color: #1677ff; font-size: 12px; cursor: pointer; user-select: none; }
+.md :deep(.ref-sup:hover) { text-decoration: underline; }
+/* 来源引用 chips */
+.src-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.src-chips :deep(.ant-tag) { font-size: 12px; }
+/* 相关推荐 */
+.related { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.related-label { font-size: 12px; color: #888; margin-right: 4px; }
+/* 回答反馈 */
+.fb-row { margin-top: 10px; display: flex; gap: 4px; opacity: .55; transition: opacity .2s; }
+.fb-row:hover { opacity: 1; }
+.fb-row :deep(.fb-active) { color: #1677ff; font-weight: 600; }
 
 /* 图片灯箱 */
 .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.78); display: flex;

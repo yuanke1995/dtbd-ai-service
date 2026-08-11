@@ -102,7 +102,7 @@ export function sendQuestion(sessionId, question, { onToken, onImage, onDone, on
               const d = JSON.parse(line.substring(5).trim())
               if (d.type === 'token') { onToken(d.content) }
               else if (d.type === 'image') { console.log('[SSE] 收到 image 事件:', d.content); onImage(d.content) }
-              else if (d.type === 'done') { onDone(); return }
+              else if (d.type === 'done') { onDone(d.content); return } // content 为 {sources,related} JSON 字符串
               else if (d.type === 'error') { onError(d.content); return }
               else { console.log('[SSE] 未知事件类型:', d.type, d) }
             } catch (e) { console.warn('[SSE] JSON 解析失败:', line, e) }
@@ -149,5 +149,30 @@ export function uploadDocument(file, description, onProgress) {
   return upload('/document/upload', fd, onProgress)
 }
 
+/** 批量上传（onProgress 接收 0-100 百分比） */
+export function uploadDocumentsBatch(files, onProgress) {
+  const fd = new FormData()
+  files.forEach(f => fd.append('file', f))
+  return upload('/document/upload/batch', fd, onProgress)
+}
+
+/** 文档启停用：status 0 生效 / 1 弃用 */
+export const updateDocumentStatus = (id, status) =>
+  request(`/document/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) })
+
+/** 文档重解析 */
+export const reparseDocument = id =>
+  request(`/document/${id}/reparse`, { method: 'POST' })
+
 /** 删除文档 */
 export const deleteDocument = id => request(`/document/${id}`, { method: 'DELETE' })
+
+/** 提交回答反馈（messageId 关联；rating 1=有帮助 0=没帮助） */
+export const submitFeedback = (messageId, rating, feedbackText) =>
+  request('/feedback', {
+    method: 'POST',
+    body: JSON.stringify({ messageId, rating, feedbackText: feedbackText || null })
+  })
+
+/** 看板统计 */
+export const getAnalytics = () => request('/analytics/summary')

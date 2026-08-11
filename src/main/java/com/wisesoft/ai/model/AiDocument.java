@@ -29,8 +29,11 @@ public class AiDocument {
     /** 分块数量 */
     private Integer chunkCount;
 
-    /** 状态: 0=生效, 1=已弃用 */
+    /** 状态: 0=生效, 1=已弃用, 2=解析中, 3=解析失败 */
     private Integer status;
+
+    /** 解析失败原因（status=3 时可见） */
+    private String failReason;
 
     /** 文件大小(字节) */
     private Long fileSize;

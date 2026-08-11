@@ -2,40 +2,23 @@ package com.wisesoft.ai.service;
 
 import com.alibaba.fastjson2.JSON;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.wisesoft.ai.common.BizException;
 import com.wisesoft.ai.config.AiAppProperties;
 import com.wisesoft.ai.mapper.AiDocumentMapper;
 import com.wisesoft.ai.mapper.AiKnowledgeMapper;
 import com.wisesoft.ai.model.AiDocument;
 import com.wisesoft.ai.model.AiKnowledge;
+import com.wisesoft.ai.model.Chunk;
+import com.wisesoft.ai.parser.DocumentParser;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.poi.xwpf.usermodel.BodyElementType;
-import org.apache.poi.xwpf.usermodel.IBodyElement;
-import org.apache.poi.xwpf.usermodel.XWPFDocument;
-import org.apache.poi.xwpf.usermodel.XWPFParagraph;
-import org.apache.poi.xwpf.usermodel.XWPFPicture;
-import org.apache.poi.xwpf.usermodel.XWPFPictureData;
-import org.apache.poi.xwpf.usermodel.XWPFRun;
-import org.apache.poi.xwpf.usermodel.XWPFTable;
-import org.apache.poi.xwpf.usermodel.XWPFTableCell;
-import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
-
-import javax.imageio.ImageIO;
-import javax.imageio.ImageWriteParam;
-import javax.imageio.ImageWriter;
-import javax.imageio.stream.ImageOutputStream;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -45,14 +28,14 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * 文档管理服务
- * 上传 Word → 解析分块（含图片提取/表格）→ Spring AI VectorStore 自动向量化并存 Redis → 元数据存 MySQL
+ * 上传（docx/pdf/xlsx）→ 异步解析分块 → 向量化存 Redis → 元数据存 MySQL
+ * 状态流转：2 解析中 → 0 生效 / 3 解析失败（fail_reason）
+ * 一致性：解析/向量失败主动补偿清理（删向量+MySQL+图片），避免孤儿数据
  *
  * @author yuanke
  */
@@ -61,119 +44,136 @@ import java.util.concurrent.Executors;
 @RequiredArgsConstructor
 public class DocumentService {
 
-    /** 允许提取的图片类型（浏览器与视觉模型可识别），EMF/WMF/PICT 等矢量图跳过 */
-    private static final Set<String> ALLOWED_EXTS = Set.of("png", "jpg", "jpeg", "gif", "bmp", "webp");
-
     private final AiDocumentMapper documentMapper;
     private final AiKnowledgeMapper knowledgeMapper;
     private final VectorStore vectorStore;
     private final AiAppProperties properties;
-    private final VisionService visionService;
+    private final DocumentMetaCache documentMetaCache;
+    private final List<DocumentParser> parsers;
 
-    /** 图片描述线程池（并发调用视觉模型，避免串行推理拖慢上传） */
-    private ExecutorService visionExecutor;
+    /** 解析线程池（并发 2：避免多文档同时解析打爆 embedding/Ollama） */
+    private ExecutorService parseExecutor;
 
     @PostConstruct
-    void initVisionExecutor() {
-        visionExecutor = Executors.newFixedThreadPool(Math.max(1, properties.getVision().getConcurrency()));
+    void init() {
+        parseExecutor = Executors.newFixedThreadPool(2);
     }
 
     @PreDestroy
-    void shutdownVisionExecutor() {
-        visionExecutor.shutdown();
+    void shutdown() {
+        parseExecutor.shutdown();
     }
 
     /**
-     * 上传并解析文档
-     * 一致性策略：MySQL 写入与 Redis 向量写入不做跨库事务；
-     * 任一步失败均主动补偿清理（删 MySQL 记录 + 删向量 + 删图片目录），避免孤儿数据
+     * 上传文档：校验格式 → 同名替换 → 源文件落盘 → 建记录(解析中) → 异步解析
      */
     public AiDocument upload(MultipartFile file, String description) throws Exception {
         String fileName = file.getOriginalFilename();
-        if (fileName == null || !fileName.toLowerCase().endsWith(".docx")) {
-            throw new com.wisesoft.ai.common.BizException("仅支持 .docx 格式的 Word 文档");
+        if (fileName == null || fileName.isBlank()) {
+            throw new BizException("文件名为空");
+        }
+        String ext = extOf(fileName);
+        DocumentParser parser = parsers.stream()
+                .filter(p -> p.supports(ext))
+                .findFirst()
+                .orElseThrow(() -> new BizException("不支持的文件格式: ." + ext + "（支持 docx/pdf/xlsx）"));
+        if (file.isEmpty()) {
+            throw new BizException("请选择文件");
         }
 
         // 同名文档先替换
         deprecateExisting(fileName);
 
-        // 文档记录
+        // 源文件落盘（异步解析需要；重解析复用）
         AiDocument doc = new AiDocument();
         doc.setFileName(fileName);
-        doc.setFileType("docx");
+        doc.setFileType(ext);
         doc.setFileSize(file.getSize());
-        doc.setStatus(0);
+        doc.setStatus(2); // 解析中
         doc.setDescription(description);
         documentMapper.insert(doc);
+        documentMetaCache.invalidate(doc.getId());
 
+        Path source = saveSourceFile(file, doc.getId(), fileName);
+        final DocumentParser fp = parser;
+        parseExecutor.submit(() -> processUpload(doc.getId(), fileName, source, fp));
+        return doc;
+    }
+
+    /**
+     * 异步解析核心：解析 → MySQL 元数据 + 向量 → 状态置 0；失败置 3 + 原因 + 补偿清理
+     */
+    private void processUpload(String docId, String fileName, Path source, DocumentParser parser) {
+        AiDocument doc = documentMapper.selectById(docId);
+        if (doc == null) return;
         List<Document> aiDocs = new ArrayList<>();
         try {
-            // 解析分块（段落/表格/图片按文档顺序）
-            List<Chunk> chunks = parseDocx(file, doc.getId());
-            doc.setChunkCount(chunks.size());
-            documentMapper.updateById(doc);
+            byte[] bytes = Files.readAllBytes(source);
+            List<Chunk> chunks = parser.parse(bytes, fileName, docId);
+            if (chunks.isEmpty()) {
+                throw new BizException("文档未解析出任何内容");
+            }
 
             // 构建 Spring AI Document 列表（VectorStore 会自动向量化）
             for (int i = 0; i < chunks.size(); i++) {
                 Chunk chunk = chunks.get(i);
-
-                // 存 MySQL 元数据
                 AiKnowledge knowledge = new AiKnowledge();
-                knowledge.setDocId(doc.getId());
-                knowledge.setTitle(chunk.title);
-                knowledge.setContent(chunk.content);
-                knowledge.setImages(chunk.images.isEmpty() ? null : JSON.toJSONString(chunk.images));
+                knowledge.setDocId(docId);
+                knowledge.setTitle(chunk.title());
+                knowledge.setContent(chunk.content());
+                knowledge.setImages(chunk.images().isEmpty() ? null : JSON.toJSONString(chunk.images()));
                 knowledge.setChunkIndex(i);
                 knowledgeMapper.insert(knowledge);
                 knowledge.setVectorId(knowledge.getId());
                 knowledgeMapper.updateById(knowledge);
 
-                // 构建向量文档，metadata 带 docId 与 images 便于删除/返回
-                // 注意：Spring AI M6 RedisVectorStore 会丢弃 List 类型 metadata 值，images 必须存 JSON 字符串
                 Map<String, Object> metadata = new HashMap<>();
-                metadata.put("docId", doc.getId());
-                metadata.put("title", chunk.title);
+                metadata.put("docId", docId);
+                metadata.put("title", chunk.title());
                 metadata.put("knowledgeId", knowledge.getId());
-                if (!chunk.images.isEmpty()) {
-                    metadata.put("images", JSON.toJSONString(chunk.images));
+                if (!chunk.images().isEmpty()) {
+                    metadata.put("images", JSON.toJSONString(chunk.images()));
                 }
                 aiDocs.add(new Document(knowledge.getId(),
-                        chunk.title + "\n" + chunk.content, metadata));
+                        chunk.title() + "\n" + chunk.content(), metadata));
             }
 
-            // 写入向量库（embedding 接口单次请求上限 10 条，需分批向量化）
+            // 写入向量库（embedding 接口单次请求上限 10 条，需分批）
             if (!aiDocs.isEmpty()) {
                 int batchSize = 10;
                 for (int i = 0; i < aiDocs.size(); i += batchSize) {
                     int end = Math.min(i + batchSize, aiDocs.size());
                     vectorStore.add(aiDocs.subList(i, end));
-                    log.info("Vectorized chunks {}-{} / {}", i + 1, end, aiDocs.size());
+                    log.info("[{}] 向量化 {}-{} / {}", docId, i + 1, end, aiDocs.size());
                 }
             }
-            return doc;
+
+            doc.setChunkCount(chunks.size());
+            doc.setStatus(0);
+            doc.setFailReason(null);
+            documentMapper.updateById(doc);
+            log.info("[{}] 解析成功: {} chunks", docId, chunks.size());
         } catch (Exception e) {
-            // 补偿清理：删已写入向量 + 删 MySQL 记录 + 删图片目录
-            log.error("文档上传失败，执行补偿清理: {}", e.getMessage());
+            log.error("[{}] 解析失败: {}", docId, e.getMessage());
+            // 补偿清理：删已写向量 + MySQL 元数据 + 图片目录（保留记录置失败状态）
             try {
                 List<String> vectorIds = aiDocs.stream().map(Document::getId).toList();
-                if (!vectorIds.isEmpty()) {
-                    vectorStore.delete(vectorIds);
-                }
+                if (!vectorIds.isEmpty()) vectorStore.delete(vectorIds);
             } catch (Exception ex) {
-                log.warn("补偿删除向量失败: {}", ex.getMessage());
+                log.warn("[{}] 补偿删除向量失败: {}", docId, ex.getMessage());
             }
-            knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, doc.getId()));
-            documentMapper.deleteById(doc.getId());
-            cleanupImages(doc.getId());
-            throw e;
+            knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+            cleanupImages(docId);
+            doc.setStatus(3);
+            doc.setFailReason(truncate(e.getMessage()));
+            documentMapper.updateById(doc);
         }
     }
 
     /**
-     * 删除文档（向量/MySQL/图片分别清理；删除操作不跨库强事务，任一失败记录日志不中断）
+     * 删除文档（向量/MySQL/图片分别清理）
      */
     public void delete(String docId) {
-        // 删除向量
         List<AiKnowledge> chunks = knowledgeMapper.selectList(
                 new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
         if (!chunks.isEmpty()) {
@@ -184,13 +184,11 @@ public class DocumentService {
                 log.warn("Failed to delete vectors: {}", e.getMessage());
             }
         }
-
-        // 删除 MySQL
         knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
         documentMapper.deleteById(docId);
-
-        // 清理图片文件
+        documentMetaCache.invalidate(docId);
         cleanupImages(docId);
+        cleanupSourceFile(docId);
     }
 
     /**
@@ -199,6 +197,42 @@ public class DocumentService {
     public List<AiDocument> list() {
         return documentMapper.selectList(
                 new LambdaQueryWrapper<AiDocument>().orderByDesc(AiDocument::getCreateTime));
+    }
+
+    /**
+     * 启停用文档（仅改 MySQL status + 缓存；向量保留，检索侧按 status 过滤实现即时生效）
+     */
+    public void updateStatus(String docId, int status) {
+        AiDocument doc = documentMapper.selectById(docId);
+        if (doc == null) throw new BizException("文档不存在");
+        if (status != 0 && status != 1) throw new BizException("非法状态");
+        doc.setStatus(status);
+        documentMapper.updateById(doc);
+        documentMetaCache.invalidate(docId);
+    }
+
+    /**
+     * 重解析（复用源文件重新走解析流程）
+     */
+    public void reparse(String docId) {
+        AiDocument doc = documentMapper.selectById(docId);
+        if (doc == null) throw new BizException("文档不存在");
+        Path source = sourceFile(docId, doc.getFileName());
+        if (!Files.exists(source)) throw new BizException("源文件缺失，无法重解析（请重新上传）");
+        DocumentParser parser = parsers.stream().filter(p -> p.supports(doc.getFileType()))
+                .findFirst().orElse(null);
+        if (parser == null) throw new BizException("不支持的文件格式");
+
+        // 清理旧向量与元数据（保留记录）
+        deleteVectorsAndKnowledge(docId);
+        cleanupImages(docId);
+        doc.setStatus(2);
+        doc.setFailReason(null);
+        documentMapper.updateById(doc);
+        documentMetaCache.invalidate(docId);
+
+        final DocumentParser fp = parser;
+        parseExecutor.submit(() -> processUpload(docId, doc.getFileName(), source, fp));
     }
 
     /**
@@ -216,184 +250,49 @@ public class DocumentService {
         }
     }
 
-    // ==================== Word 解析 ====================
-
-    private List<Chunk> parseDocx(MultipartFile file, String docId) throws IOException {
-        List<Chunk> chunks = new ArrayList<>();
-        int maxSize = properties.getChunk().getMaxSize();
-        String title = "概述";
-        StringBuilder content = new StringBuilder();
-        // 当前分块待处理图片（描述异步并发生成，flush 时统一 join）
-        List<SavedImage> currentImages = new ArrayList<>();
-        // checksum -> 已保存图片（文档内去重，复用 URL 与描述）
-        Map<Long, SavedImage> imageCache = new HashMap<>();
-        int[] imageCount = {0};
-
-        try (XWPFDocument document = new XWPFDocument(file.getInputStream())) {
-            for (IBodyElement element : document.getBodyElements()) {
-                if (element.getElementType() == BodyElementType.PARAGRAPH) {
-                    XWPFParagraph p = (XWPFParagraph) element;
-                    String text = p.getText().trim();
-
-                    int level = headingLevel(p);
-                    if (level > 0 && level <= 3) {
-                        // 遇标题 flush 当前块
-                        flushChunk(title, content, currentImages, chunks);
-                        title = text;
-                        continue;
-                    }
-
-                    // 正文文本
-                    if (!text.isEmpty()) {
-                        if (content.length() > 0) content.append("\n");
-                        content.append(text);
-                    }
-
-                    // 段落内嵌图片（图片独立成段时 text 为空，也要进块）
-                    for (XWPFRun run : p.getRuns()) {
-                        for (XWPFPicture pic : run.getEmbeddedPictures()) {
-                            handlePicture(pic.getPictureData(), docId, currentImages, imageCache, imageCount);
-                        }
-                    }
-                } else if (element.getElementType() == BodyElementType.TABLE) {
-                    // 表格：行×列提取文本
-                    XWPFTable table = (XWPFTable) element;
-                    StringBuilder tableText = new StringBuilder();
-                    for (XWPFTableRow row : table.getRows()) {
-                        for (XWPFTableCell cell : row.getTableCells()) {
-                            String ct = cell.getTextRecursively().trim();
-                            if (!ct.isEmpty()) {
-                                if (tableText.length() > 0) tableText.append(" | ");
-                                tableText.append(ct);
-                            }
-                        }
-                    }
-                    if (tableText.length() > 0) {
-                        if (content.length() > 0) content.append("\n");
-                        content.append(tableText);
-                    }
-                }
-
-                // 通用超长 flush（图片描述按平均 40 字估算计入长度，保持原有分块粒度）
-                if (content.length() + currentImages.size() * 40 > maxSize) {
-                    flushChunk(title, content, currentImages, chunks);
-                }
-            }
-            flushChunk(title, content, currentImages, chunks);
-        }
-        return chunks;
-    }
-
-    /**
-     * 处理单张图片：类型过滤 → 去重 → 压缩保存 → 异步并发生成描述。
-     * 描述提交到 visionExecutor 并发执行，分块 flush 时统一 join（保持文档顺序）。
-     */
-    private void handlePicture(XWPFPictureData data, String docId,
-                               List<SavedImage> currentImages,
-                               Map<Long, SavedImage> imageCache, int[] imageCount) {
-        String ext = data.suggestFileExtension().toLowerCase();
-        if (!ALLOWED_EXTS.contains(ext)) {
-            log.debug("跳过不支持的图片类型: {}", ext);
-            return;
-        }
-
-        long checksum = data.getChecksum();
-        SavedImage saved = imageCache.get(checksum);
-        if (saved == null) {
+    private void deleteVectorsAndKnowledge(String docId) {
+        List<AiKnowledge> chunks = knowledgeMapper.selectList(
+                new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+        if (!chunks.isEmpty()) {
+            List<String> vectorIds = chunks.stream().map(AiKnowledge::getVectorId).toList();
             try {
-                // 压缩后保存（减小存储 & 加速视觉推理），webp 等不可解码格式原样保留
-                CompressedImage ci = compress(data.getData(), ext);
-                String url = persistImage(ci.bytes(), ci.ext(), docId, imageCount[0]);
-                CompletableFuture<String> descFuture = CompletableFuture.supplyAsync(
-                        () -> visionService.describe(ci.bytes(), ci.ext()), visionExecutor);
-                saved = new SavedImage(url, descFuture);
-                imageCache.put(checksum, saved);
-                imageCount[0]++;
-            } catch (IOException e) {
-                log.warn("图片保存失败: {}", e.getMessage());
-                return;
+                vectorStore.delete(vectorIds);
+            } catch (Exception e) {
+                log.warn("删除向量失败: {}", e.getMessage());
             }
         }
-        currentImages.add(saved);
+        knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
     }
 
-    /**
-     * 图片压缩：等比缩放（最长边超过 max-width 时）+ 重编码。
-     * 带透明通道输出 PNG（无损，避免 JPEG 黑底），否则输出 JPEG（quality 控制）；
-     * ImageIO 无法解码的格式（如 webp）或压缩失败时原样返回。
-     */
-    private CompressedImage compress(byte[] original, String ext) {
-        try {
-            BufferedImage img = ImageIO.read(new ByteArrayInputStream(original));
-            if (img == null) return new CompressedImage(original, ext);
+    // ==================== 文件管理 ====================
 
-            int maxWidth = properties.getImages().getMaxWidth();
-            if (maxWidth > 0 && img.getWidth() > maxWidth) {
-                int height = (int) Math.round(img.getHeight() * (double) maxWidth / img.getWidth());
-                int type = img.getType() == 0 ? BufferedImage.TYPE_INT_RGB : img.getType();
-                BufferedImage scaled = new BufferedImage(maxWidth, height, type);
-                Graphics2D g = scaled.createGraphics();
-                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-                g.drawImage(img, 0, 0, maxWidth, height, null);
-                g.dispose();
-                img = scaled;
-            }
-
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            if (img.getColorModel().hasAlpha()) {
-                ImageIO.write(img, "png", out);
-                return new CompressedImage(out.toByteArray(), "png");
-            }
-            ImageWriter writer = ImageIO.getImageWritersByFormatName("jpg").next();
-            ImageWriteParam param = writer.getDefaultWriteParam();
-            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-            param.setCompressionQuality(properties.getImages().getQuality());
-            try (ImageOutputStream ios = ImageIO.createImageOutputStream(out)) {
-                writer.setOutput(ios);
-                writer.write(img);
-            } finally {
-                writer.dispose();
-            }
-            return new CompressedImage(out.toByteArray(), "jpg");
-        } catch (Exception e) {
-            log.debug("图片压缩失败，使用原图: {}", e.getMessage());
-            return new CompressedImage(original, ext);
-        }
-    }
-
-    /**
-     * flush 当前分块：join 并发描述结果并按文档顺序拼入内容，写入 chunk 列表。
-     * 完成后重置 content 与 currentImages，供下一分块复用。
-     */
-    private void flushChunk(String title, StringBuilder content, List<SavedImage> currentImages, List<Chunk> chunks) {
-        if (content.length() == 0 && currentImages.isEmpty()) return;
-        StringBuilder finalContent = new StringBuilder(content);
-        List<String> urls = new ArrayList<>(currentImages.size());
-        for (SavedImage img : currentImages) {
-            String desc = img.descFuture().join();
-            if (finalContent.length() > 0) finalContent.append("\n");
-            finalContent.append(desc.isBlank() ? "[图片]" : "[图片：" + desc + "]");
-            urls.add(img.url());
-        }
-        chunks.add(new Chunk(title, finalContent.toString(), urls));
-        content.setLength(0);
-        currentImages.clear();
-    }
-
-    /**
-     * 保存图片到 data/images/{docId}/{seq}.{ext}，返回访问 URL
-     */
-    private String persistImage(byte[] bytes, String ext, String docId, int seq) throws IOException {
-        Path dir = Paths.get(properties.getImages().getDir(), "images", docId);
+    private Path saveSourceFile(MultipartFile file, String docId, String fileName) throws IOException {
+        Path dir = Paths.get(properties.getImages().getDir(), "files", docId);
         Files.createDirectories(dir);
-        String filename = seq + "." + ext;
-        Files.write(dir.resolve(filename), bytes);
-        return properties.getImages().getUrlPrefix() + "/" + docId + "/" + filename;
+        Path target = dir.resolve(sanitize(fileName));
+        file.transferTo(target.toFile());
+        return target;
     }
 
-    /**
-     * 清理文档图片目录（删除文档或上传失败时调用）
-     */
+    private Path sourceFile(String docId, String fileName) {
+        return Paths.get(properties.getImages().getDir(), "files", docId, sanitize(fileName));
+    }
+
+    private void cleanupSourceFile(String docId) {
+        Path dir = Paths.get(properties.getImages().getDir(), "files", docId);
+        if (!Files.exists(dir)) return;
+        try (var stream = Files.walk(dir)) {
+            stream.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException ignored) {
+                }
+            });
+        } catch (IOException e) {
+            log.warn("清理源文件目录失败: {}", e.getMessage());
+        }
+    }
+
     private void cleanupImages(String docId) {
         Path dir = Paths.get(properties.getImages().getDir(), "images", docId);
         if (!Files.exists(dir)) return;
@@ -409,42 +308,18 @@ public class DocumentService {
         }
     }
 
-    /**
-     * 检测段落标题层级。
-     * 优先级：样式名 → 大纲级别 → 0（正文）
-     * 大量中文文档使用大纲级别（outlineLvl）而非 Heading 样式来定义标题层级，
-     * 因此在样式名检测不到时，继续检测大纲级别避免标题全部 fallback 到"概述"。
-     */
-    private int headingLevel(XWPFParagraph p) {
-        // 1. 样式名检测（heading1-3 / 标题1-3）
-        String style = p.getStyle();
-        if (style != null) {
-            String s = style.toLowerCase();
-            if (s.contains("heading1") || s.contains("标题1") || s.equals("1")) return 1;
-            if (s.contains("heading2") || s.contains("标题2") || s.equals("2")) return 2;
-            if (s.contains("heading3") || s.contains("标题3") || s.equals("3")) return 3;
-        }
-
-        // 2. 大纲级别检测（outlineLvl 0-2 映射为标题 1-3）
-        try {
-            var pPr = p.getCTP().getPPr();
-            if (pPr != null && pPr.isSetOutlineLvl()) {
-                int outlineLvl = pPr.getOutlineLvl().getVal().intValue();
-                if (outlineLvl >= 0 && outlineLvl <= 2) {
-                    return outlineLvl + 1;
-                }
-            }
-        } catch (Exception ignored) {
-            // 兼容性：部分文档 CTSimpleField 等非标准结构可能导致 getCTP 抛异常
-        }
-
-        return 0;
+    private String extOf(String fileName) {
+        int idx = fileName.lastIndexOf('.');
+        return idx < 0 ? "" : fileName.substring(idx + 1).toLowerCase();
     }
 
-    private record Chunk(String title, String content, List<String> images) {}
+    /** 文件名清洗（防路径穿越） */
+    private String sanitize(String fileName) {
+        return fileName.replaceAll("[\\\\/:*?\"<>|]", "_");
+    }
 
-    /** 已保存图片：URL + 异步生成的描述（flush 时 join） */
-    private record SavedImage(String url, CompletableFuture<String> descFuture) {}
-
-    private record CompressedImage(byte[] bytes, String ext) {}
+    private String truncate(String s) {
+        if (s == null) return "未知错误";
+        return s.length() > 200 ? s.substring(0, 200) : s;
+    }
 }

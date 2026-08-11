@@ -1,6 +1,7 @@
 package com.wisesoft.ai.model;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
@@ -43,4 +44,18 @@ public class AiKnowledge {
 
     @TableLogic
     private Integer deleted;
+
+    // ===== 关键词检索临时统计（非表字段） =====
+
+    /** 命中的词元数 */
+    @TableField(exist = false)
+    private Integer hitTerms;
+
+    /** 总词元数 */
+    @TableField(exist = false)
+    private Integer totalTerms;
+
+    /** 标题是否命中 */
+    @TableField(exist = false)
+    private boolean titleHit;
 }

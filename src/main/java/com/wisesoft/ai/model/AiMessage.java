@@ -32,6 +32,9 @@ public class AiMessage {
     /** 关联图片URL (JSON数组字符串) */
     private String images;
 
+    /** 引用来源 (JSON数组字符串: [{ref,knowledgeId,docId,fileName,title,snippet}]) */
+    private String sources;
+
     /** 消息序号 (会话内递增) */
     private Integer sequence;
 

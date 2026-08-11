@@ -136,11 +136,12 @@ public class SessionService {
     }
 
     /**
-     * 追加消息（MySQL 持久化 → Redis 缓存）
+     * 追加消息（MySQL 持久化 → Redis 缓存），返回消息 ID（用于反馈关联）
      *
-     * @param images 该轮回答关联的图片 URL 列表（可为空）
+     * @param images   该轮回答关联的图片 URL 列表（可为空）
+     * @param sources  引用来源 JSON 数组字符串（可为空），如 [{"ref":1,"knowledgeId":..,"docId":..,"fileName":..,"title":..,"snippet":..}]
      */
-    public void appendMessage(String sessionId, String role, String content, List<String> images) {
+    public String appendMessage(String sessionId, String role, String content, List<String> images, String sources) {
         // 1. MySQL 持久化
         try {
             // 获取下一序号
@@ -152,6 +153,7 @@ public class SessionService {
             msg.setRole(role);
             msg.setContent(content);
             msg.setImages(images != null && !images.isEmpty() ? JSON.toJSONString(images) : null);
+            msg.setSources(sources);
             msg.setSequence(nextSeq);
             messageMapper.insert(msg);
 
@@ -169,6 +171,7 @@ public class SessionService {
                 }
             }
             sessionMapper.updateById(update);
+            return msg.getId();
         } catch (Exception e) {
             log.warn("MySQL 追加消息失败 (session={}): {}", sessionId, e.getMessage());
         }
@@ -181,6 +184,12 @@ public class SessionService {
             if (images != null && !images.isEmpty()) {
                 redisMsg.put("images", images);
             }
+            if (sources != null && !sources.isBlank()) {
+                try {
+                    redisMsg.put("sources", JSON.parseArray(sources, Map.class));
+                } catch (Exception ignored) {
+                }
+            }
             String json = objectMapper.writeValueAsString(redisMsg);
             int max = properties.getSession().getMaxHistory() * 2;
             long expireSeconds = properties.getSession().getExpireMinutes() * 60L;
@@ -189,6 +198,7 @@ public class SessionService {
         } catch (Exception e) {
             log.warn("Redis 追加消息失败 (session={}): {}", sessionId, e.getMessage());
         }
+        return null;
     }
 
     /**
@@ -220,6 +230,13 @@ public class SessionService {
                         map.put("images", JSON.parseArray(m.getImages(), String.class));
                     } catch (Exception e) {
                         // images 解析失败忽略
+                    }
+                }
+                if (m.getSources() != null && !m.getSources().isBlank()) {
+                    try {
+                        map.put("sources", JSON.parseArray(m.getSources(), Map.class));
+                    } catch (Exception e) {
+                        // sources 解析失败忽略
                     }
                 }
                 return map;
@@ -307,6 +324,10 @@ public class SessionService {
                     msg.setRole(role);
                     msg.setContent(content);
                     msg.setImages(imagesJson);
+                    Object sourcesObj = m.get("sources");
+                    if (sourcesObj != null) {
+                        msg.setSources(JSON.toJSONString(sourcesObj));
+                    }
                     msg.setSequence(++seq);
                     messageMapper.insert(msg);
 

@@ -8,6 +8,7 @@
       <a-menu theme="dark" mode="horizontal" :selected-keys="[activeKey]" @click="onMenu" class="menu">
         <a-menu-item key="chat">智能问答</a-menu-item>
         <a-menu-item key="documents">文档管理</a-menu-item>
+        <a-menu-item key="dashboard">数据看板</a-menu-item>
       </a-menu>
     </a-layout-header>
     <a-layout-content class="content">
@@ -23,8 +24,12 @@ import { RobotOutlined } from '@ant-design/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
-const activeKey = computed(() => route.path === '/documents' ? 'documents' : 'chat')
-const onMenu = ({ key }) => router.push(key === 'documents' ? '/documents' : '/chat')
+const activeKey = computed(() => {
+  if (route.path === '/documents') return 'documents'
+  if (route.path === '/dashboard') return 'dashboard'
+  return 'chat'
+})
+const onMenu = ({ key }) => router.push(key === 'documents' ? '/documents' : key === 'dashboard' ? '/dashboard' : '/chat')
 </script>
 
 <style>
