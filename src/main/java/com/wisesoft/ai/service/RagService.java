@@ -35,6 +35,8 @@ public class RagService {
     /** 引用摘要截断长度 */
     private static final int SNIPPET_LEN = 80;
 
+    private static final Pattern relatedPattern = Pattern.compile("<related>([\\s\\S]*?)</related>");
+
     private final ChatClient chatClient;
     private final SessionService sessionService;
     private final AiAppProperties properties;
@@ -148,7 +150,10 @@ public class RagService {
                     "你是\"小报\"，一个基于操作手册知识库回答系统使用问题的AI助手。"
                             + "回答应准确、简洁，优先依据参考资料。"
                             + "参考资料中以 [1][2] 编号标注来源，回答引用了某个资料时，在对应句末用 [N] 标注（如\"评分组件支持自定义总分[1]\"）。"
-                            + "参考资料中用 [图片N] 表示文档截图，回答时在描述对应内容的准确位置输出 [图片N]（例如\"如图[图片1]所示，架构分为两层\"），"
+                            + "参考资料中图片标记格式为 [图片N：图片内容描述]（冒号后是这张截图的实际内容）。"
+                            + "回答需要配图时，必须严格根据描述选择与内容匹配的编号：例如回答\"评分组件\"时，只能选择描述里含有\"评分/五星/星级\"等词的 [图片N]，"
+                            + "绝不能使用描述与回答内容无关的编号（如描述是下拉列表、日期、JSON 数据的图片）。"
+                            + "选定后把 [图片N] 输出在描述对应内容的准确位置（例如\"如图[图片8]所示，评分组件支持自定义总分\"），"
                             + "不要把图片标记堆到回答结尾，也不要编造不存在的编号。"
                             + "注意：插入 [图片N] 时，标记前后不要紧贴任何标点，[图片N] 应独立成行；"
                             + "若句末需要标点，放在标记之前的文字末尾，如\"布局组件[图片1]\"，不要写成\"布局组件[图片1]、\"。"
@@ -165,16 +170,45 @@ public class RagService {
                     ? question
                     : question + "\n\n参考资料：\n" + context;
 
-            // 5. 异步流式生成
+            // 5. 异步流式生成（缓冲过滤 <related> 块：跨 token 分割也能正确剥离，前端不会看到标签原文）
             StringBuilder fullResponse = new StringBuilder();
+            StringBuilder relatedBlock = new StringBuilder();
+            StringBuilder emitBuf = new StringBuilder();   // 未发送缓冲（含尾部 19 字符滑动窗口，捕获跨 token 的标签片段）
             Disposable disposable = chatClient.prompt()
                     .system(system.toString())
                     .user(user)
                     .stream()
                     .content()
                     .doOnNext(token -> {
-                        fullResponse.append(token);
-                        sendSseEvent(emitter, "token", token, sessionId);
+                        emitBuf.append(token);
+                        String bufStr = emitBuf.toString();
+                        // 存在未完整闭合的 related 块（开始/闭合标签被跨 token 切分也覆盖）：继续缓冲不下发
+                        if (containsUnclosedRelated(bufStr)) {
+                            if (bufStr.length() > 3000) {
+                                // 异常兜底：模型未闭合标签，直接按原文发送（extractRelated 兜底清理）
+                                String raw = bufStr;
+                                emitBuf.setLength(0);
+                                fullResponse.append(raw);
+                                sendSseEvent(emitter, "token", raw, sessionId);
+                            }
+                            return;
+                        }
+                        // 剥离完整 related 块，收集推荐内容
+                        java.util.regex.Matcher rm = relatedPattern.matcher(bufStr);
+                        while (rm.find()) {
+                            relatedBlock.append(rm.group(1)).append("\n");
+                        }
+                        String clean = bufStr.replaceAll("<related>[\\s\\S]*?</related>", "");
+                        // 尾部保留 19 字符滑动窗口（可能是不完整标签片段），其余下发
+                        emitBuf.setLength(0);
+                        int keep = Math.min(19, clean.length());
+                        String sendPart = clean.substring(0, clean.length() - keep);
+                        String tailKeep = clean.substring(clean.length() - keep);
+                        emitBuf.append(tailKeep);
+                        if (!sendPart.isEmpty()) {
+                            fullResponse.append(sendPart);
+                            sendSseEvent(emitter, "token", sendPart, sessionId);
+                        }
                     })
                     .doOnError(error -> {
                         log.error("Stream error: {}", error.getMessage());
@@ -182,8 +216,21 @@ public class RagService {
                         completeEmitter(emitter);
                     })
                     .doOnComplete(() -> {
-                        // 剥离 <related> 块，得到推荐问题与最终回答
-                        List<String> related = extractRelated(fullResponse);
+                        // 下发缓冲尾部（可能残留滑动窗口），并剥离可能的不完整标签
+                        if (emitBuf.length() > 0) {
+                            String rest = emitBuf.toString().replaceAll("<related>[\\s\\S]*?</related>", "")
+                                    .replaceAll("<related[\\s\\S]*$", "");
+                            emitBuf.setLength(0);
+                            if (!rest.isEmpty()) {
+                                fullResponse.append(rest);
+                                sendSseEvent(emitter, "token", rest, sessionId);
+                            }
+                        }
+                        // 相关推荐：优先用流式收集的块内容；兜底再对完整回答剥离一次（防 </related> 缺失等异常）
+                        List<String> related = parseRelatedBlock(relatedBlock);
+                        if (related.isEmpty()) {
+                            related = extractRelated(fullResponse);
+                        }
                         String answer = fullResponse.toString();
 
                         // 记录对话历史（含图片与引用来源），拿到消息ID供前端反馈
@@ -220,7 +267,52 @@ public class RagService {
     }
 
     /**
-     * 从回答中提取并剥离 <related> 块，返回推荐问题列表
+     * 判断字符串中是否存在未完整闭合的 related 块（开始/闭合标签的跨 token 片段也算）
+     */
+    private boolean containsUnclosedRelated(String s) {
+        if (s.contains("</related>")) {
+            // 已有关闭标签：剔除完整块后，剩余部分若还有 related 痕迹则视为未闭合
+            String rest = s.replaceAll("<related>[\\s\\S]*?</related>", "");
+            return rest.contains("<related") || isRelatedStart(rest) || isRelatedEndStart(rest);
+        }
+        return s.contains("<related") || isRelatedStart(s) || isRelatedEndStart(s);
+    }
+
+    /**
+     * 判断字符串末尾是否为 <related> 标签的部分前缀（捕获跨 token 分割的开始标签）
+     */
+    private boolean isRelatedStart(String s) {
+        int lt = s.lastIndexOf('<');
+        if (lt < 0) return false;
+        String tail = s.substring(lt);
+        return tail.length() < "<related>".length() && "<related>".startsWith(tail);
+    }
+
+    /**
+     * 判断字符串末尾是否为 </related> 标签的部分前缀（捕获跨 token 分割的闭合标签）
+     */
+    private boolean isRelatedEndStart(String s) {
+        int lt = s.lastIndexOf('<');
+        if (lt < 0) return false;
+        String tail = s.substring(lt);
+        return tail.length() < "</related>".length() && "</related>".startsWith(tail);
+    }
+
+    /**
+     * 解析流式收集的 <related> 块内容（已去标签）为推荐问题列表
+     */
+    private List<String> parseRelatedBlock(StringBuilder block) {
+        List<String> related = new ArrayList<>();
+        if (block == null || block.length() == 0) return related;
+        for (String q : block.toString().split("[|\n]")) {
+            String t = q.trim();
+            if (!t.isEmpty()) related.add(t);
+        }
+        return related;
+    }
+
+    /**
+     * 从回答中提取并剥离 <related> 块，返回推荐问题列表（兜底用）
      */
     private List<String> extractRelated(StringBuilder sb) {
         List<String> related = new ArrayList<>();

@@ -86,7 +86,9 @@ public class RerankService {
             log.info("[Rerank] 候选 {} 条重排完成", candidates.size());
             return ranked;
         } catch (Exception e) {
-            log.debug("Ollama rerank 不可用，回退规则排序: {}", e.getMessage());
+            // 失败记忆：标记不支持，避免每个请求都重试（Ollama 官方至今无 /api/rerank）
+            rerankSupported = false;
+            log.debug("Ollama rerank 不可用，回退规则排序（已记忆禁用）: {}", e.getMessage());
             return candidates;
         }
     }

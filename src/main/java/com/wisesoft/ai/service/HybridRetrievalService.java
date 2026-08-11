@@ -86,9 +86,12 @@ public class HybridRetrievalService {
             double hitRate = k.getHitTerms() / (double) Math.max(1, k.getTotalTerms());
             double score = KEYWORD_WEIGHT * hitRate
                     + (k.isTitleHit() ? TITLE_BONUS : 0);
+            // merge 时保留非空 docId（向量 metadata 可能被 M6 丢弃导致 docId 为空，关键词版是正确的）
             merged.merge(k.getId(), buildHit(k, score), (oldHit, newHit) ->
-                    new Hit(oldHit.knowledgeId(), oldHit.docId(), oldHit.title(), oldHit.content(),
-                            oldHit.images(), Math.max(oldHit.score(), newHit.score())));
+                    new Hit(oldHit.knowledgeId(),
+                            oldHit.docId() == null || oldHit.docId().isBlank() ? newHit.docId() : oldHit.docId(),
+                            oldHit.title(), oldHit.content(), oldHit.images(),
+                            Math.max(oldHit.score(), newHit.score())));
         }
 
         List<Hit> result = new ArrayList<>(merged.values());
@@ -147,15 +150,19 @@ public class HybridRetrievalService {
         String docId = md.get("docId") == null ? "" : String.valueOf(md.get("docId"));
         String title = md.get("title") == null ? "" : String.valueOf(md.get("title"));
         List<String> images = imagesFromMd(md);
-        // M6 RedisVectorStore 可能丢弃 metadata（含 images），按 knowledgeId 查 MySQL 兜底
-        if (images.isEmpty() && kid != null) {
+        // M6 RedisVectorStore 可能丢弃 metadata（docId/title/images 均可能为空），按 knowledgeId 查 MySQL 兜底
+        if (kid != null && (docId.isEmpty() || title.isEmpty() || images.isEmpty())) {
             try {
                 AiKnowledge k = knowledgeMapper.selectById(kid);
-                if (k != null && k.getImages() != null && !k.getImages().isBlank()) {
-                    images = com.alibaba.fastjson2.JSON.parseArray(k.getImages(), String.class);
+                if (k != null) {
+                    if (docId.isEmpty()) docId = String.valueOf(k.getDocId());
+                    if (title.isEmpty()) title = k.getTitle();
+                    if (images.isEmpty() && k.getImages() != null && !k.getImages().isBlank()) {
+                        images = com.alibaba.fastjson2.JSON.parseArray(k.getImages(), String.class);
+                    }
                 }
             } catch (Exception e) {
-                log.warn("查询知识块图片失败: {}", e.getMessage());
+                log.warn("查询知识块元数据失败: {}", e.getMessage());
             }
         }
         return new Hit(kid, docId, title, doc.getText(), images, score);
