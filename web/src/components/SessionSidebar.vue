@@ -1,11 +1,19 @@
 <template>
   <div class="session-sidebar" :class="{ collapsed }">
-    <div class="sidebar-inner">
-      <!-- 头部：新建对话 -->
+    <!-- 展开态：新建对话 + 会话列表 -->
+    <div v-if="!collapsed" class="sidebar-inner">
+      <!-- 头部：新建对话 + 收起按钮 -->
       <div class="sidebar-header">
-        <a-button type="primary" block @click="$emit('new')" :disabled="loading">
-          <plus-outlined /> 新建对话
-        </a-button>
+        <div class="header-row">
+          <a-button type="primary" block @click="$emit('new')" :disabled="loading">
+            <plus-outlined /> 新建对话
+          </a-button>
+          <a-tooltip title="收起侧边栏">
+            <a-button type="text" class="collapse-btn" @click="$emit('toggle-collapse')">
+              <menu-fold-outlined />
+            </a-button>
+          </a-tooltip>
+        </div>
       </div>
 
       <!-- 会话列表 -->
@@ -41,10 +49,18 @@
       </div>
     </div>
 
-    <!-- 折叠/展开手柄 -->
-    <div class="toggle-handle" @click="$emit('toggle-collapse')" :title="collapsed ? '展开侧边栏' : '收起侧边栏'">
-      <menu-fold-outlined v-if="!collapsed" />
-      <menu-unfold-outlined v-else />
+    <!-- 折叠态：小图标条（新建 + 展开） -->
+    <div v-else class="collapsed-bar">
+      <a-tooltip title="新建对话" placement="right">
+        <a-button type="text" class="cb-btn" @click="$emit('new')" :disabled="loading">
+          <plus-outlined />
+        </a-button>
+      </a-tooltip>
+      <a-tooltip title="展开会话列表" placement="right">
+        <a-button type="text" class="cb-btn" @click="$emit('toggle-collapse')">
+          <menu-unfold-outlined />
+        </a-button>
+      </a-tooltip>
     </div>
   </div>
 </template>
@@ -89,8 +105,28 @@ const formatTime = (t) => {
   position: relative;
 }
 .session-sidebar.collapsed {
-  width: 0;
-  min-width: 0;
+  width: 48px;
+  min-width: 48px;
+}
+/* 折叠态小图标条 */
+.collapsed-bar {
+  width: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 10px;
+  gap: 4px;
+}
+.cb-btn {
+  width: 36px;
+  height: 36px;
+  font-size: 16px;
+  color: #555;
+  border-radius: 8px;
+}
+.cb-btn:hover {
+  background: #f0f0f0 !important;
+  color: #1677ff !important;
 }
 .sidebar-inner {
   width: 260px;
@@ -103,10 +139,41 @@ const formatTime = (t) => {
   padding: 12px;
   border-bottom: 1px solid #e8e8e8;
 }
+.header-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.collapse-btn {
+  color: #888;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.collapse-btn:hover {
+  color: #1677ff !important;
+  background: #f0f0f0 !important;
+}
 .session-list {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 8px;
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: #d9d9d9 transparent;
+}
+/* 细滚动条（Webkit/Chrome/Edge）：默认淡色，hover 深色 */
+.session-list::-webkit-scrollbar {
+  width: 6px;
+}
+.session-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.session-list::-webkit-scrollbar-thumb {
+  background: #d9d9d9;
+  border-radius: 3px;
+}
+.session-list::-webkit-scrollbar-thumb:hover {
+  background: #bfbfbf;
 }
 .empty {
   text-align: center;
@@ -161,32 +228,5 @@ const formatTime = (t) => {
 }
 .delete-icon:hover {
   color: #ff4d4f;
-}
-.toggle-handle {
-  position: absolute;
-  right: -28px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 28px;
-  height: 48px;
-  background: #fafafa;
-  border: 1px solid #e8e8e8;
-  border-left: none;
-  border-radius: 0 6px 6px 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  color: #888;
-  font-size: 14px;
-  z-index: 10;
-  transition: color 0.15s;
-}
-.toggle-handle:hover {
-  color: #1677ff;
-  background: #f0f0f0;
-}
-.session-sidebar.collapsed .toggle-handle {
-  right: -28px;
 }
 </style>
