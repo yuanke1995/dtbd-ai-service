@@ -41,41 +41,60 @@ public class VisionService {
 
     /**
      * 生成图片文字描述；任何失败返回 ""（降级，不中断主流程）
+     * 失败自动重试 retryCount 次（Ollama 偶发 500/超时）
      */
     public String describe(byte[] imageBytes, String ext) {
         if (!properties.getVision().isEnabled() || imageBytes == null || imageBytes.length == 0) {
             return "";
         }
-        try {
-            String mime = mimeOf(ext);
-            String base64 = Base64.getEncoder().encodeToString(imageBytes);
-
-            Map<String, Object> body = new HashMap<>();
-            body.put("model", properties.getVision().getModel());
-            // qwen3 系列默认思考模式：关闭以提速且输出稳定（实测 max_tokens 在思考模型下会导致空输出，保持 0 不发送）
-            if (properties.getVision().isThink() == false) {
-                body.put("think", false);
+        int retry = Math.max(0, properties.getVision().getRetryCount());
+        Exception lastErr = null;
+        for (int attempt = 0; attempt <= retry; attempt++) {
+            try {
+                String desc = callOnce(imageBytes, ext);
+                if (desc != null && !desc.isBlank()) return desc;
+                // 空响应：模型偶发空输出，重试一次
+                if (attempt < retry) log.warn("图片描述为空，第 {} 次重试", attempt + 1);
+            } catch (Exception e) {
+                lastErr = e;
+                if (attempt < retry) log.warn("图片描述失败(第 {} 次)，重试: {}", attempt + 1, e.getMessage());
             }
-            body.put("messages", List.of(Map.of("role", "user", "content", List.of(
-                    Map.of("type", "image_url", "image_url",
-                            Map.of("url", "data:" + mime + ";base64," + base64)),
-                    Map.of("type", "text", "text", properties.getVision().getPrompt())))));
-
-            String resp = restClient.post()
-                    // 防御：base-url 已含 /v1（如 Ollama http://localhost:11434/v1）时不重复拼 /v1
-                    .uri(properties.getVision().getBaseUrl().endsWith("/v1")
-                            ? "/chat/completions"
-                            : "/v1/chat/completions")
-                    .header("Authorization", "Bearer " + properties.getVision().getApiKey())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(body)
-                    .retrieve()
-                    .body(String.class);
-            return parseContent(resp);
-        } catch (Exception e) {
-            log.warn("图片描述失败: {}", e.getMessage());
-            return "";
         }
+        log.warn("图片描述最终失败: {}", lastErr == null ? "空响应" : lastErr.getMessage());
+        return "";
+    }
+
+    private String callOnce(byte[] imageBytes, String ext) {
+        String mime = mimeOf(ext);
+        String base64 = Base64.getEncoder().encodeToString(imageBytes);
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("model", properties.getVision().getModel());
+        // qwen3 系列默认思考模式：关闭以提速且输出稳定（实测 max_tokens 在思考模型下会导致空输出，保持 0 不发送）
+        if (!properties.getVision().isThink()) {
+            body.put("think", false);
+        }
+        // Ollama 支持 keep_alive 保持模型常驻，避免每个文档解析都重新加载模型（云端服务不支持需配置为 0）
+        int keepAlive = properties.getVision().getKeepAliveMinutes();
+        if (keepAlive > 0) {
+            body.put("keep_alive", keepAlive + "m");
+        }
+        body.put("messages", List.of(Map.of("role", "user", "content", List.of(
+                Map.of("type", "image_url", "image_url",
+                        Map.of("url", "data:" + mime + ";base64," + base64)),
+                Map.of("type", "text", "text", properties.getVision().getPrompt())))));
+
+        String resp = restClient.post()
+                // 防御：base-url 已含 /v1（如 Ollama http://localhost:11434/v1）时不重复拼 /v1
+                .uri(properties.getVision().getBaseUrl().endsWith("/v1")
+                        ? "/chat/completions"
+                        : "/v1/chat/completions")
+                .header("Authorization", "Bearer " + properties.getVision().getApiKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body)
+                .retrieve()
+                .body(String.class);
+        return parseContent(resp);
     }
 
     /**

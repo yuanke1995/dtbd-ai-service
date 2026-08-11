@@ -12,9 +12,21 @@
       <a-progress v-if="uploading" :percent="uploadPercent" size="small" style="margin-top:8px" />
     </template>
 
+    <!-- 批量操作栏 -->
+    <div v-if="selectedKeys.length" class="batch-bar">
+      <span>已选 {{ selectedKeys.length }} 项：</span>
+      <a-button size="small" type="primary" @click="batchStatus(0)">批量启用</a-button>
+      <a-button size="small" @click="batchStatus(1)">批量弃用</a-button>
+      <a-popconfirm title="确定删除选中的文档？知识库将同步移除" @confirm="batchDelete">
+        <a-button size="small" danger>批量删除</a-button>
+      </a-popconfirm>
+      <a-button size="small" type="text" @click="selectedKeys = []">取消选择</a-button>
+    </div>
+
     <a-table
       :columns="cols" :data-source="list" :loading="loading" row-key="id"
       :pagination="{ pageSize: 10 }"
+      :row-selection="{ selectedRowKeys: selectedKeys, onChange: k => selectedKeys = k }"
       :locale="{ emptyText: '暂无文档，点击右上角上传 .docx / .pdf / .xlsx' }"
     >
       <template #bodyCell="{ column, record, text }">
@@ -25,6 +37,7 @@
           <a-tag v-else color="red" style="cursor:pointer"
                  @click="showFailReason(record)">解析失败</a-tag>
         </template>
+        <template v-else-if="column.key === 'hitCount'">{{ text || 0 }}</template>
         <template v-else-if="column.key === 'fileSize'">{{ fmtSize(text) }}</template>
         <template v-else-if="column.key === 'createTime'">{{ fmtTime(text) }}</template>
         <template v-else-if="column.key === 'action'">
@@ -47,7 +60,8 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { UploadOutlined, DeleteOutlined } from '@ant-design/icons-vue'
-import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocument, deleteDocument } from '../api'
+import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocument, deleteDocument,
+         batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats } from '../api'
 
 const MAX_SIZE = 50 * 1024 * 1024 // 与后端 multipart 限制一致
 const ALLOWED = ['docx', 'pdf', 'xlsx']
@@ -57,6 +71,7 @@ const cols = [
   { title: '类型', dataIndex: 'fileType', key: 'fileType', width: 70 },
   { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true },
   { title: '知识片段数', dataIndex: 'chunkCount', key: 'chunkCount', width: 110 },
+  { title: '命中次数', dataIndex: 'hitCount', key: 'hitCount', width: 90 },
   { title: '文件大小', dataIndex: 'fileSize', key: 'fileSize', width: 110 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 100 },
   { title: '上传时间', dataIndex: 'createTime', key: 'createTime', width: 170 },
@@ -70,6 +85,7 @@ const uploadPercent = ref(0)
 const deletingId = ref('')
 const reparsingId = ref('')
 const desc = ref('')
+const selectedKeys = ref([])
 let pollTimer = null
 
 onMounted(fetchList)
@@ -78,9 +94,10 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 async function fetchList() {
   loading.value = true
   try {
-    const r = await listDocuments()
+    const [r, stats] = await Promise.all([listDocuments(), getDocumentStats()])
     if (r.success) {
-      list.value = r.data || []
+      const hitMap = (stats && stats.success && stats.data) ? stats.data : {}
+      list.value = (r.data || []).map(d => ({ ...d, hitCount: hitMap[d.id] || 0 }))
       // 有解析中的文档则轮询（直到全部完成）
       if (list.value.some(d => d.status === 2)) startPolling()
       else stopPolling()
@@ -145,6 +162,24 @@ async function toggleStatus(record, status) {
   } catch (e) { message.error(e.message || '操作失败') }
 }
 
+async function batchStatus(status) {
+  if (!selectedKeys.value.length) return
+  try {
+    const r = await batchUpdateDocumentStatus(selectedKeys.value, status)
+    if (r.success) { message.success(`已${status === 0 ? '启用' : '弃用'} ${selectedKeys.value.length} 个文档`); selectedKeys.value = []; fetchList() }
+    else message.error(r.msg || '操作失败')
+  } catch (e) { message.error(e.message || '操作失败') }
+}
+
+async function batchDelete() {
+  if (!selectedKeys.value.length) return
+  try {
+    const r = await batchDeleteDocuments(selectedKeys.value)
+    if (r.success) { message.success(`已删除 ${selectedKeys.value.length} 个文档`); selectedKeys.value = []; fetchList() }
+    else message.error(r.msg || '操作失败')
+  } catch (e) { message.error(e.message || '操作失败') }
+}
+
 async function reparse(id) {
   reparsingId.value = id
   try {
@@ -179,3 +214,12 @@ const fmtTime = t => {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
 }
 </script>
+
+<style scoped>
+.batch-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; margin-bottom: 10px;
+  background: #e6f4ff; border: 1px solid #91caff; border-radius: 6px;
+  font-size: 13px; color: #0958d9;
+}
+</style>

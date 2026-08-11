@@ -89,4 +89,34 @@ public class DocumentController {
         documentService.reparse(id);
         return ResultJson.ok("已重新提交解析");
     }
+
+    /**
+     * 批量删除：body {"ids":[".."]}
+     */
+    @PostMapping("/batch/delete")
+    public ResultJson batchDelete(@RequestBody Map<String, List<String>> body) {
+        documentService.batchDelete(body.getOrDefault("ids", List.of()));
+        return ResultJson.ok("删除成功");
+    }
+
+    /**
+     * 批量启停用：body {"ids":[".."],"status":0|1}
+     */
+    @PostMapping("/batch/status")
+    public ResultJson batchStatus(@RequestBody Map<String, Object> body) {
+        Object idsObj = body.get("ids");
+        List<String> ids = idsObj instanceof List<?> list
+                ? list.stream().map(String::valueOf).toList() : List.of();
+        int status = body.get("status") == null ? 0 : Integer.parseInt(String.valueOf(body.get("status")));
+        documentService.batchUpdateStatus(ids, status);
+        return ResultJson.ok("操作成功");
+    }
+
+    /**
+     * 文档命中次数统计（问答日志聚合）：返回 {docId: count}
+     */
+    @GetMapping("/stats")
+    public ResultJson stats() {
+        return ResultJson.ok(documentService.statsHitCounts());
+    }
 }

@@ -176,3 +176,17 @@ export const submitFeedback = (messageId, rating, feedbackText) =>
 
 /** 看板统计 */
 export const getAnalytics = () => request('/analytics/summary')
+
+/** 知识块详情（引用溯源全文） */
+export const getKnowledgeDetail = id => request(`/knowledge/${id}`)
+
+/** 批量删除文档 */
+export const batchDeleteDocuments = ids =>
+  request('/document/batch/delete', { method: 'POST', body: JSON.stringify({ ids }) })
+
+/** 批量启停用文档 */
+export const batchUpdateDocumentStatus = (ids, status) =>
+  request('/document/batch/status', { method: 'POST', body: JSON.stringify({ ids, status }) })
+
+/** 文档命中次数统计（{docId: count}） */
+export const getDocumentStats = () => request('/document/stats')

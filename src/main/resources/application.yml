@@ -88,7 +88,9 @@ ai-app:
     expire-minutes: 30
   # 文档图片提取
   images:
-    dir: ${AI_IMAGES_DIR:./data}
+    # 数据根目录（源文件/图片落盘）。必须是稳定绝对路径：
+    # 相对路径在 Tomcat/war 部署下会解析到临时解压目录（重启即清空导致上传失败）
+    dir: ${AI_IMAGES_DIR:D:/workspace/dtbd-ai-service/data}
     # 图片压缩：最长边像素，超过则等比缩小（0=不压缩）。
     # 768 是"识别速度"与"截图文字清晰度"的平衡点：视觉 token 数约为 1280 的 1/3，推理显著提速
     max-width: 768
@@ -107,10 +109,14 @@ ai-app:
     # Ollama 不校验密钥，此处为占位值；如换回云端服务需改为真实 API Key
     api-key: ${AI_VISION_API_KEY:ollama}
     enabled: true
-    # 单张图片描述超时（本地 Ollama 2B 模型实测约 29s，默认 60s 防降级）
-    timeout-millis: 60000
-    # 图片描述并发度（Ollama 服务端默认单请求串行推理，真正并行需设置 OLLAMA_NUM_PARALLEL，如 4）
-    concurrency: 4
+    # 单张图片描述超时（本地 2B 模型约 29s；文档图多时排队+推理可能超 60s，放宽到 180s 防误降级）
+    timeout-millis: 180000
+    # 图片描述并发度（本机 4GB 显存建议 2，避免并发压垮 Ollama 导致 500/超时）
+    concurrency: 2
+    # 单图失败重试次数（Ollama 偶发 500/超时，重试 1 次显著降低"无描述"降级）
+    retry-count: 1
+    # keep_alive 保持 qwen3-vl 常驻内存，避免每次文档解析都要重新加载模型（云端服务不支持需设 0）
+    keep-alive-minutes: 30
     # 关闭思考模式（qwen3 系列默认思考，关闭后提速且输出稳定）
     think: ${AI_VISION_THINK:false}
   # 查询改写（默认关闭，开启后会对用户提问做 LLM 优化后再检索）

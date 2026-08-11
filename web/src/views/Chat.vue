@@ -64,14 +64,13 @@
         </div>
 
         <!-- 引用来源详情弹窗（灯箱打开时禁用 ESC 关闭：ESC 优先关灯箱） -->
-        <a-modal v-model:open="sourceVisible" :title="sourceTitle" :footer="null" width="680"
+        <a-modal v-model:open="sourceVisible" :title="sourceTitle" :footer="null" width="720"
                  :keyboard="!previewUrl" :mask-closable="!previewUrl">
-          <p style="white-space:pre-wrap;margin:0;color:#333;line-height:1.7">{{ sourceSnippet }}</p>
-          <!-- 来源关联文档截图（点击放大灯箱，多图可左右切换） -->
-          <div v-if="sourceImages.length" class="src-imgs">
-            <img v-for="(u, ui) in sourceImages" :key="ui" :src="resolveImg(u)"
-                 class="src-img" :alt="'来源图片' + (ui + 1)" @click="openPreviewFromSource(ui, sourceImages)" />
-          </div>
+          <a-spin v-if="sourceLoading" style="display:block;margin:40px auto" />
+          <template v-else>
+            <!-- 知识块全文（溯源；内嵌图片点击可灯箱放大并左右切换） -->
+            <div class="src-content" v-html="render(prepKnowledgeContent(sourceContent || sourceSnippet, sourceImages), sourceImages)"></div>
+          </template>
         </a-modal>
 
         <!-- 回答反馈弹窗 -->
@@ -124,7 +123,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback } from '../api'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
 const text = ref('')
@@ -160,11 +159,14 @@ const openPreview = e => {
     return
   }
   if (t && t.tagName && t.tagName.toLowerCase() === 'img') {
-    // 消息内图片：data-seq 定位序号，同一消息的全部图片作切换列表
+    // 图片点击：优先消息内 data-seq 定位；引用弹窗全文内（无 .md 上下文）用当前来源图片作切换列表
     const mdEl = t.closest('.md')
     const msgIdx = mdEl ? Number(mdEl.dataset.msgIndex) : -1
     const seq = Number(t.dataset.seq || 0)
-    const imgs = messages.value[msgIdx]?.images
+    let imgs = messages.value[msgIdx]?.images
+    if ((!Array.isArray(imgs) || !imgs.length) && sourceVisible.value && sourceImages.value.length) {
+      imgs = sourceImages.value
+    }
     if (Array.isArray(imgs) && imgs.length) {
       previewList.value = imgs.map(resolveImg)
       previewIndex.value = seq > 0 && seq <= imgs.length ? seq - 1 : 0
@@ -182,21 +184,36 @@ const sourceVisible = ref(false)
 const sourceTitle = ref('')
 const sourceSnippet = ref('')
 const sourceImages = ref([])
-const openSource = s => {
+const sourceContent = ref('')      // 知识块全文（异步加载）
+const sourceLoading = ref(false)
+// 知识块原文：把无编号的 [图片]/[图片：描述] 按 images 顺序编号，供 render() 渲染
+const prepKnowledgeContent = (content, images) => {
+  if (!content) return ''
+  if (!images.length) return content.replace(/\[图片(?:[：:][^\]]*)?\]/g, '')
+  let i = 0
+  return content.replace(/\[图片(?:[：:][^\]]*)?\]/g, () => {
+    i++
+    return i <= images.length ? `[图片${i}]` : '[图片]'
+  })
+}
+const openSource = async s => {
   if (!s) return
   sourceTitle.value = (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '')
   sourceSnippet.value = s.snippet || '（无原文片段）'
   sourceImages.value = Array.isArray(s.images) ? s.images : [] // 旧消息 sources 无 images，兼容为空
+  sourceContent.value = ''
+  sourceLoading.value = true
   sourceVisible.value = true
+  try {
+    const r = await getKnowledgeDetail(s.knowledgeId)
+    if (r.success && r.data) {
+      sourceContent.value = r.data.content || ''
+      if (Array.isArray(r.data.images)) sourceImages.value = r.data.images
+      if (r.data.title) sourceTitle.value = (s.fileName || '未知文档') + ' §' + r.data.title
+    }
+  } catch (e) { /* 接口失败：回退显示 snippet */ }
+  finally { sourceLoading.value = false }
 }
-// 引用弹窗内图片 → 灯箱放大（多图列表 + 当前下标，可左右切换）
-const openPreviewFromSource = (index, images) => {
-  previewList.value = (Array.isArray(images) && images.length) ? images.map(resolveImg) : []
-  previewIndex.value = index || 0
-  zoom.value = 1
-  offset.value = { x: 0, y: 0 }
-}
-
 // 灯箱切换：重置缩放/平移，到头禁用（不循环）
 const resetView = () => { zoom.value = 1; offset.value = { x: 0, y: 0 } }
 const prev = () => { if (previewIndex.value > 0) { previewIndex.value--; resetView() } }
@@ -524,11 +541,11 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 /* 来源引用 chips */
 .src-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
 .src-chips :deep(.ant-tag) { font-size: 12px; }
-/* 引用弹窗内来源图片 */
-.src-imgs { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
-.src-img { width: 180px; max-height: 150px; object-fit: cover; border: 1px solid #e0e0e0;
-  border-radius: 6px; cursor: zoom-in; transition: transform .15s; }
-.src-img:hover { transform: scale(1.03); }
+/* 引用弹窗知识块全文 */
+.src-content { max-height: 45vh; overflow-y: auto; color: #333; line-height: 1.7; font-size: 14px;
+  padding-right: 6px; scrollbar-width: thin; }
+.src-content :deep(img) { max-width: 100%; max-height: 260px; border: 1px solid #e0e0e0;
+  border-radius: 6px; display: block; margin: 8px 0; cursor: zoom-in; }
 /* 相关推荐 */
 .related { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .related-label { font-size: 12px; color: #888; margin-right: 4px; }

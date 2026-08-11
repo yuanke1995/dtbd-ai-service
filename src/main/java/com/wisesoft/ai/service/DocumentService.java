@@ -49,6 +49,7 @@ public class DocumentService {
     private final VectorStore vectorStore;
     private final AiAppProperties properties;
     private final DocumentMetaCache documentMetaCache;
+    private final com.wisesoft.ai.mapper.AiQaLogMapper qaLogMapper;
     private final List<DocumentParser> parsers;
 
     /** 解析线程池（并发 2：避免多文档同时解析打爆 embedding/Ollama） */
@@ -94,7 +95,15 @@ public class DocumentService {
         documentMapper.insert(doc);
         documentMetaCache.invalidate(doc.getId());
 
-        Path source = saveSourceFile(file, doc.getId(), fileName);
+        Path source;
+        try {
+            source = saveSourceFile(file, doc.getId(), fileName);
+        } catch (Exception e) {
+            // 补偿：源文件落盘失败时清理刚插入的记录，避免残留"解析中"脏数据
+            log.warn("源文件落盘失败，清理记录: {} error={}", doc.getId(), e.getMessage());
+            documentMapper.deleteById(doc.getId());
+            throw e;
+        }
         final DocumentParser fp = parser;
         parseExecutor.submit(() -> processUpload(doc.getId(), fileName, source, fp));
         return doc;
@@ -212,6 +221,57 @@ public class DocumentService {
     }
 
     /**
+     * 批量删除文档（任一失败不中断，继续处理其余）
+     */
+    public void batchDelete(List<String> ids) {
+        if (ids == null || ids.isEmpty()) return;
+        for (String id : ids) {
+            try {
+                delete(id);
+            } catch (Exception e) {
+                log.warn("批量删除失败: id={} error={}", id, e.getMessage());
+            }
+        }
+        documentMetaCache.invalidateAll();
+    }
+
+    /**
+     * 批量启停用（ids 非空；任一失败不中断）
+     */
+    public void batchUpdateStatus(List<String> ids, int status) {
+        if (ids == null || ids.isEmpty()) return;
+        for (String id : ids) {
+            try {
+                updateStatus(id, status);
+            } catch (Exception e) {
+                log.warn("批量启停用失败: id={} error={}", id, e.getMessage());
+            }
+        }
+        documentMetaCache.invalidateAll();
+    }
+
+    /**
+     * 文档命中次数统计：从问答日志 hit_doc_ids 聚合，返回 {docId: count}
+     */
+    public Map<String, Long> statsHitCounts() {
+        Map<String, Long> counts = new HashMap<>();
+        try {
+            var logs = qaLogMapper.selectList(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<com.wisesoft.ai.model.AiQaLog>()
+                    .isNotNull(com.wisesoft.ai.model.AiQaLog::getHitDocIds)
+                    .select(com.wisesoft.ai.model.AiQaLog::getHitDocIds));
+            for (var log : logs) {
+                if (log.getHitDocIds() == null || log.getHitDocIds().isBlank()) continue;
+                for (String id : log.getHitDocIds().split(",")) {
+                    if (!id.isBlank()) counts.merge(id.trim(), 1L, Long::sum);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("统计文档命中次数失败: {}", e.getMessage());
+        }
+        return counts;
+    }
+
+    /**
      * 重解析（复用源文件重新走解析流程）
      */
     public void reparse(String docId) {
@@ -236,17 +296,17 @@ public class DocumentService {
     }
 
     /**
-     * 将同名生效文档标记弃用并清理向量
+     * 同名文档清理：删除旧的生效/解析中/失败记录（避免同名重传残留脏数据），弃用记录保留
      */
     private void deprecateExisting(String fileName) {
-        AiDocument existing = documentMapper.selectOne(
+        List<AiDocument> existing = documentMapper.selectList(
                 new LambdaQueryWrapper<AiDocument>()
                         .eq(AiDocument::getFileName, fileName)
-                        .eq(AiDocument::getStatus, 0)
-                        .last("limit 1"));
-        if (existing != null) {
-            log.info("Replacing existing document: {}", fileName);
-            delete(existing.getId());
+                        .in(AiDocument::getStatus, 0, 2, 3)
+                        .last("limit 10"));
+        for (AiDocument doc : existing) {
+            log.info("Replacing existing document: {} ({})", fileName, doc.getId());
+            delete(doc.getId());
         }
     }
 

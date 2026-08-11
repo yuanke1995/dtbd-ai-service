@@ -1,8 +1,11 @@
 package com.wisesoft.ai.controller;
 
+import com.alibaba.fastjson2.JSON;
 import com.wisesoft.ai.dto.ChatRequest;
 import com.wisesoft.ai.dto.ResultJson;
 import com.wisesoft.ai.dto.SessionInfo;
+import com.wisesoft.ai.mapper.AiKnowledgeMapper;
+import com.wisesoft.ai.model.AiKnowledge;
 import com.wisesoft.ai.service.ImageUrlSigner;
 import com.wisesoft.ai.service.RagService;
 import com.wisesoft.ai.service.SessionService;
@@ -12,6 +15,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -29,6 +33,7 @@ public class ChatController {
     private final RagService ragService;
     private final SessionService sessionService;
     private final ImageUrlSigner imageUrlSigner;
+    private final AiKnowledgeMapper knowledgeMapper;
 
     @PostMapping("/chat")
     public SseEmitter chat(@RequestBody @Valid ChatRequest request) {
@@ -81,5 +86,25 @@ public class ChatController {
     @PostMapping("/session/new")
     public ResultJson newSession() {
         return ResultJson.ok(Map.of("sessionId", sessionService.createSession()));
+    }
+
+    /**
+     * 知识块详情（引用溯源：来源弹窗展示知识块全文）
+     */
+    @GetMapping("/knowledge/{knowledgeId}")
+    public ResultJson knowledgeDetail(@PathVariable String knowledgeId) {
+        AiKnowledge k = knowledgeMapper.selectById(knowledgeId);
+        if (k == null) {
+            return ResultJson.error(404, "知识块不存在");
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", k.getId());
+        m.put("docId", k.getDocId());
+        m.put("title", k.getTitle());
+        m.put("content", k.getContent());
+        m.put("chunkIndex", k.getChunkIndex());
+        m.put("images", (k.getImages() == null || k.getImages().isBlank())
+                ? List.of() : JSON.parseArray(k.getImages(), String.class));
+        return ResultJson.ok(m);
     }
 }
