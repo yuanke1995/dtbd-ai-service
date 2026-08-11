@@ -127,6 +127,7 @@ public class RagService {
                 src.put("fileName", documentMetaCache.getFileName(hit.docId()));
                 src.put("title", hit.title());
                 src.put("snippet", snippet(hit.content()));
+                src.put("images", hit.images()); // 关联文档截图（原始URL，前端经 /proxy 访问）
                 sources.add(src);
 
                 context.append("[").append(docNo++).append("] ").append(text).append("\n");

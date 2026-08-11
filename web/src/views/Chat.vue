@@ -63,9 +63,15 @@
           </div>
         </div>
 
-        <!-- 引用来源详情弹窗 -->
-        <a-modal v-model:open="sourceVisible" :title="sourceTitle" :footer="null" width="620">
+        <!-- 引用来源详情弹窗（灯箱打开时禁用 ESC 关闭：ESC 优先关灯箱） -->
+        <a-modal v-model:open="sourceVisible" :title="sourceTitle" :footer="null" width="680"
+                 :keyboard="!previewUrl" :mask-closable="!previewUrl">
           <p style="white-space:pre-wrap;margin:0;color:#333;line-height:1.7">{{ sourceSnippet }}</p>
+          <!-- 来源关联文档截图（点击放大灯箱，多图可左右切换） -->
+          <div v-if="sourceImages.length" class="src-imgs">
+            <img v-for="(u, ui) in sourceImages" :key="ui" :src="resolveImg(u)"
+                 class="src-img" :alt="'来源图片' + (ui + 1)" @click="openPreviewFromSource(ui, sourceImages)" />
+          </div>
         </a-modal>
 
         <!-- 回答反馈弹窗 -->
@@ -76,7 +82,7 @@
           </a-button>
         </a-modal>
 
-        <!-- 图片点击放大灯箱：滚轮缩放、拖动平移、双击重置、ESC 关闭 -->
+        <!-- 图片点击放大灯箱：多图左右切换、滚轮缩放、拖动平移、双击重置、ESC 关闭 -->
         <div v-if="previewUrl" class="lightbox" @click="close" @wheel.prevent="onWheel">
           <img
             :src="previewUrl" alt="大图预览" @click.stop
@@ -85,9 +91,15 @@
             @mousedown="onImgMouseDown" @mousemove="onImgMouseMove" @mouseup="onImgMouseUp" @mouseleave="onImgMouseUp"
             @dblclick="onImgDblClick"
           />
+          <!-- 上一张/下一张（多图时显示，到头禁用） -->
+          <button v-if="previewList.length > 1" class="lightbox-prev" :disabled="previewIndex === 0"
+                  @click.stop="prev" aria-label="上一张">‹</button>
+          <button v-if="previewList.length > 1" class="lightbox-next" :disabled="previewIndex === previewList.length - 1"
+                  @click.stop="next" aria-label="下一张">›</button>
+          <span v-if="previewList.length > 1" class="lightbox-count">{{ previewIndex + 1 }} / {{ previewList.length }}</span>
           <span class="lightbox-close" @click.stop="close">×</span>
           <span v-if="zoom !== 1" class="lightbox-hint">{{ Math.round(zoom * 100) }}%</span>
-          <span class="lightbox-tip">滚轮缩放 · 拖动平移 · 双击重置 · ESC 关闭</span>
+          <span class="lightbox-tip">滚轮缩放 · 拖动平移 · 双击重置 · ESC 关闭<span v-if="previewList.length > 1"> · ← → 切换</span></span>
         </div>
 
         <div class="input">
@@ -109,7 +121,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback } from '../api'
@@ -122,7 +134,10 @@ const currentSessionId = ref(null)
 const sessions = ref([])
 const messages = ref([])
 const box = ref(null)
-const previewUrl = ref('')
+// 灯箱多图状态：previewList（resolveImg 后 URL）+ previewIndex；previewUrl 为 computed
+const previewList = ref([])
+const previewIndex = ref(0)
+const previewUrl = computed(() => previewList.value[previewIndex.value] || '')
 const zoom = ref(1)
 const offset = ref({ x: 0, y: 0 })
 const dragState = ref(null)
@@ -145,7 +160,18 @@ const openPreview = e => {
     return
   }
   if (t && t.tagName && t.tagName.toLowerCase() === 'img') {
-    previewUrl.value = t.getAttribute('src')
+    // 消息内图片：data-seq 定位序号，同一消息的全部图片作切换列表
+    const mdEl = t.closest('.md')
+    const msgIdx = mdEl ? Number(mdEl.dataset.msgIndex) : -1
+    const seq = Number(t.dataset.seq || 0)
+    const imgs = messages.value[msgIdx]?.images
+    if (Array.isArray(imgs) && imgs.length) {
+      previewList.value = imgs.map(resolveImg)
+      previewIndex.value = seq > 0 && seq <= imgs.length ? seq - 1 : 0
+    } else {
+      previewList.value = [t.getAttribute('src')]
+      previewIndex.value = 0
+    }
     zoom.value = 1
     offset.value = { x: 0, y: 0 }
   }
@@ -155,12 +181,26 @@ const openPreview = e => {
 const sourceVisible = ref(false)
 const sourceTitle = ref('')
 const sourceSnippet = ref('')
+const sourceImages = ref([])
 const openSource = s => {
   if (!s) return
   sourceTitle.value = (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '')
   sourceSnippet.value = s.snippet || '（无原文片段）'
+  sourceImages.value = Array.isArray(s.images) ? s.images : [] // 旧消息 sources 无 images，兼容为空
   sourceVisible.value = true
 }
+// 引用弹窗内图片 → 灯箱放大（多图列表 + 当前下标，可左右切换）
+const openPreviewFromSource = (index, images) => {
+  previewList.value = (Array.isArray(images) && images.length) ? images.map(resolveImg) : []
+  previewIndex.value = index || 0
+  zoom.value = 1
+  offset.value = { x: 0, y: 0 }
+}
+
+// 灯箱切换：重置缩放/平移，到头禁用（不循环）
+const resetView = () => { zoom.value = 1; offset.value = { x: 0, y: 0 } }
+const prev = () => { if (previewIndex.value > 0) { previewIndex.value--; resetView() } }
+const next = () => { if (previewIndex.value < previewList.value.length - 1) { previewIndex.value++; resetView() } }
 
 // 回答反馈（👍👎 + 可选文本）
 const feedbackVisible = ref(false)
@@ -189,7 +229,8 @@ const submitFeedback = async () => {
 
 // 灯箱：关闭（重置缩放与平移）
 const close = () => {
-  previewUrl.value = ''
+  previewList.value = []
+  previewIndex.value = 0
   zoom.value = 1
   offset.value = { x: 0, y: 0 }
   dragState.value = null
@@ -219,9 +260,11 @@ const onImgDblClick = () => {
   offset.value = { x: 0, y: 0 }
 }
 
-// ESC 关闭灯箱
+// ESC 关闭灯箱，← → 切换图片
 const onKeydown = e => {
   if (e.key === 'Escape') close()
+  else if (e.key === 'ArrowLeft') prev()
+  else if (e.key === 'ArrowRight') next()
 }
 watch(previewUrl, v => {
   if (v) window.addEventListener('keydown', onKeydown)
@@ -408,7 +451,7 @@ const render = (t, images = []) => {
       return m
     }
     const src = resolveImg(u).replace(/"/g, '&quot;')
-    return `<div style="text-align:center"><img class="md-img" src="${src}" alt="文档图片"/></div>`
+    return `<div style="text-align:center"><img class="md-img" src="${src}" alt="文档图片" data-seq="${n}"/></div>`
   })
   // Markdown 子集
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
@@ -481,6 +524,11 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 /* 来源引用 chips */
 .src-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
 .src-chips :deep(.ant-tag) { font-size: 12px; }
+/* 引用弹窗内来源图片 */
+.src-imgs { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+.src-img { width: 180px; max-height: 150px; object-fit: cover; border: 1px solid #e0e0e0;
+  border-radius: 6px; cursor: zoom-in; transition: transform .15s; }
+.src-img:hover { transform: scale(1.03); }
 /* 相关推荐 */
 .related { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .related-label { font-size: 12px; color: #888; margin-right: 4px; }
@@ -489,9 +537,9 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .fb-row:hover { opacity: 1; }
 .fb-row :deep(.fb-active) { color: #1677ff; font-weight: 600; }
 
-/* 图片灯箱 */
+/* 图片灯箱（z-index 须高于 antd modal 默认 1000，避免被引用/反馈弹窗盖住） */
 .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.78); display: flex;
-  align-items: center; justify-content: center; z-index: 1000; cursor: zoom-out; overflow: hidden; }
+  align-items: center; justify-content: center; z-index: 2000; cursor: zoom-out; overflow: hidden; }
 .lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 4px;
   box-shadow: 0 4px 24px rgba(0,0,0,.4); cursor: grab; user-select: none;
   transition: transform .12s ease; will-change: transform; }
@@ -503,4 +551,22 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
   color: #fff; font-size: 14px; background: rgba(0,0,0,.5); padding: 2px 10px; border-radius: 12px; user-select: none; }
 .lightbox-tip { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
   color: rgba(255,255,255,.6); font-size: 12px; user-select: none; }
+/* 灯箱上一张/下一张切换按钮 */
+.lightbox-prev, .lightbox-next {
+  position: fixed; top: 50%; transform: translateY(-50%);
+  width: 44px; height: 44px; border-radius: 50%;
+  border: 1px solid rgba(255,255,255,.35);
+  background: rgba(0,0,0,.4); color: #fff;
+  font-size: 26px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .15s, opacity .15s; z-index: 2001; user-select: none;
+}
+.lightbox-prev { left: 16px; }
+.lightbox-next { right: 16px; }
+.lightbox-prev:hover:not(:disabled), .lightbox-next:hover:not(:disabled) { background: rgba(0,0,0,.7); }
+.lightbox-prev:disabled, .lightbox-next:disabled { opacity: .25; cursor: not-allowed; }
+/* 灯箱图片计数 */
+.lightbox-count { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
+  color: rgba(255,255,255,.75); font-size: 13px;
+  background: rgba(0,0,0,.45); padding: 2px 12px; border-radius: 12px; user-select: none; }
 </style>
