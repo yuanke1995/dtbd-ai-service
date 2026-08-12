@@ -193,3 +193,9 @@ export const batchUpdateDocumentStatus = (ids, status) =>
 
 /** 文档命中次数统计（{docId: count}） */
 export const getDocumentStats = () => request('/document/stats')
+
+/** 模型配置：获取全量（分组 + editable 标记） */
+export const getConfig = () => request('/config')
+
+/** 模型配置：保存可编辑项 {"chat":{...},"vision":{...}} */
+export const saveConfig = payload => request('/config', { method: 'PUT', body: JSON.stringify(payload) })

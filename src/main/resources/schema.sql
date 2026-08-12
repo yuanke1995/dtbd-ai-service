@@ -93,3 +93,10 @@ CREATE TABLE IF NOT EXISTS `c_ai_qa_feedback` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_message` (`message_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI问答反馈表';
+CREATE TABLE IF NOT EXISTS `c_ai_config` (
+    `config_key`    VARCHAR(64)   NOT NULL COMMENT '配置键（chat.model/chat.temperature/vision.model/...）',
+    `config_value`  VARCHAR(512)  NOT NULL COMMENT '配置值',
+    `remark`        VARCHAR(255)  DEFAULT NULL COMMENT '说明',
+    `update_time`   DATETIME      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`config_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI模型配置表';

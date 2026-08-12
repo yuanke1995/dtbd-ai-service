@@ -26,10 +26,12 @@ import java.util.Map;
 public class VisionService {
 
     private final AiAppProperties properties;
+    private final ConfigService configService;
     private final RestClient restClient;
 
-    public VisionService(AiAppProperties properties) {
+    public VisionService(AiAppProperties properties, ConfigService configService) {
         this.properties = properties;
+        this.configService = configService;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(10000);
         factory.setReadTimeout(properties.getVision().getTimeoutMillis());
@@ -69,7 +71,8 @@ public class VisionService {
         String base64 = Base64.getEncoder().encodeToString(imageBytes);
 
         Map<String, Object> body = new HashMap<>();
-        body.put("model", properties.getVision().getModel());
+        // 模型配置界面：视觉模型名/提示词动态读 DB（保存即生效）
+        body.put("model", configService.get("vision.model"));
         // qwen3 系列默认思考模式：关闭以提速且输出稳定（实测 max_tokens 在思考模型下会导致空输出，保持 0 不发送）
         if (!properties.getVision().isThink()) {
             body.put("think", false);
@@ -82,7 +85,7 @@ public class VisionService {
         body.put("messages", List.of(Map.of("role", "user", "content", List.of(
                 Map.of("type", "image_url", "image_url",
                         Map.of("url", "data:" + mime + ";base64," + base64)),
-                Map.of("type", "text", "text", properties.getVision().getPrompt())))));
+                Map.of("type", "text", "text", configService.get("vision.prompt"))))));
 
         String resp = restClient.post()
                 // 防御：base-url 已含 /v1（如 Ollama http://localhost:11434/v1）时不重复拼 /v1

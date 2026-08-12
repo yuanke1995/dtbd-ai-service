@@ -4,6 +4,7 @@ import com.alibaba.fastjson2.JSON;
 import com.wisesoft.ai.config.AiAppProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.core.Disposable;
@@ -47,6 +48,7 @@ public class RagService {
     private final DocumentMetaCache documentMetaCache;
     private final QaLogService qaLogService;
     private final UserImageService userImageService;
+    private final ConfigService configService;
 
     public RagService(ChatClient.Builder chatClientBuilder,
                       SessionService sessionService,
@@ -56,7 +58,8 @@ public class RagService {
                       RerankService rerankService,
                       DocumentMetaCache documentMetaCache,
                       QaLogService qaLogService,
-                      UserImageService userImageService) {
+                      UserImageService userImageService,
+                      ConfigService configService) {
         this.chatClient = chatClientBuilder.build();
         this.sessionService = sessionService;
         this.properties = properties;
@@ -66,6 +69,7 @@ public class RagService {
         this.documentMetaCache = documentMetaCache;
         this.qaLogService = qaLogService;
         this.userImageService = userImageService;
+        this.configService = configService;
     }
 
     /**
@@ -201,6 +205,11 @@ public class RagService {
             Disposable disposable = chatClient.prompt()
                     .system(system.toString())
                     .user(user)
+                    // 模型配置界面：per-request 动态覆盖模型名与温度（保存即生效）
+                    .options(OpenAiChatOptions.builder()
+                            .model(configService.get("chat.model"))
+                            .temperature(configService.getDouble("chat.temperature"))
+                            .build())
                     .stream()
                     .content()
                     .doOnNext(token -> {
@@ -394,6 +403,10 @@ public class RagService {
                     .supplyAsync(() -> chatClient.prompt()
                             .system(properties.getQueryRewrite().getPrompt())
                             .user(question)
+                            .options(OpenAiChatOptions.builder()
+                                    .model(configService.get("chat.model"))
+                                    .temperature(configService.getDouble("chat.temperature"))
+                                    .build())
                             .call()
                             .content())
                     .get(properties.getQueryRewrite().getTimeoutMillis(), TimeUnit.MILLISECONDS);

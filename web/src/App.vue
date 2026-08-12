@@ -10,6 +10,7 @@
           <a-menu-item key="chat">智能问答</a-menu-item>
           <a-menu-item key="documents">文档管理</a-menu-item>
           <a-menu-item key="dashboard">数据看板</a-menu-item>
+          <a-menu-item key="settings">系统设置</a-menu-item>
         </a-menu>
       </a-layout-header>
       <a-layout-content class="content">
@@ -35,9 +36,13 @@ const router = useRouter()
 const activeKey = computed(() => {
   if (route.path === '/documents') return 'documents'
   if (route.path === '/dashboard') return 'dashboard'
+  if (route.path === '/settings') return 'settings'
   return 'chat'
 })
-const onMenu = ({ key }) => router.push(key === 'documents' ? '/documents' : key === 'dashboard' ? '/dashboard' : '/chat')
+const onMenu = ({ key }) => {
+  const map = { chat: '/chat', documents: '/documents', dashboard: '/dashboard', settings: '/settings' }
+  router.push(map[key] || '/chat')
+}
 </script>
 
 <style>
