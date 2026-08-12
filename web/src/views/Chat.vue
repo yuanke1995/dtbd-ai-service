@@ -32,6 +32,10 @@
           <div v-for="(m,i) in messages" :key="i" class="row" :class="m.role">
             <a-avatar :style="{ background: m.role==='user'?'#87d068':'#1677ff', flexShrink:0 }">{{ m.role==='user'?'我':'AI' }}</a-avatar>
             <div class="bubble" :class="m.role">
+              <!-- 用户消息编辑（问题回填输入框重发） -->
+              <a-tooltip v-if="m.role === 'user'" title="编辑此问题重新发送" placement="top">
+                <edit-outlined class="msg-edit-btn" @click="editMessage(i)" />
+              </a-tooltip>
               <!-- 用户上传图片（本地 dataUrl 预览 / 历史 URL） -->
               <div v-if="m.role === 'user' && m.images && m.images.length" class="msg-imgs">
                 <img v-for="(u, ui) in m.images" :key="ui" :src="resolveImg(u)"
@@ -54,8 +58,12 @@
                 <a-tag v-for="(q, qi) in m.related" :key="qi" color="green"
                        style="cursor:pointer;margin:2px" @click="ask(q)">{{ q }}</a-tag>
               </div>
-              <!-- 回答反馈 -->
+              <!-- 回答操作：重新生成 + 反馈 -->
               <div v-if="m.role === 'ai' && m.messageId" class="fb-row">
+                <a-button size="small" type="text" :disabled="loading"
+                          @click="regenerate(i)">
+                  <reload-outlined /> 重新生成
+                </a-button>
                 <a-button size="small" type="text"
                           :class="{ 'fb-active': m.fb === 1 }" @click="openFeedback(m, 1)">
                   <like-outlined /> 有帮助
@@ -117,6 +125,7 @@
           </div>
           <div class="input-box">
             <a-textarea
+              ref="textareaRef"
               v-model:value="text"
               placeholder="请输入问题，Enter 发送，Shift+Enter 换行"
               :disabled="loading"
@@ -143,12 +152,17 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import MarkdownIt from 'markdown-it'
+import DOMPurify from 'dompurify'
+import hljs from 'highlight.js/lib/common'
+import 'highlight.js/styles/github.css'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined } from '@ant-design/icons-vue'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
 const text = ref('')
+const textareaRef = ref(null)
 const loading = ref(false)
 const sessionsLoading = ref(false)
 const currentSessionId = ref(null)
@@ -480,16 +494,24 @@ const send = () => {
   const q = text.value.trim()
   const imgs = pendingImages.value.map(p => p.dataUrl)
   if ((!q && !imgs.length) || loading.value) return
-  const isFirstMessage = messages.value.length === 0
   text.value = ''
   pendingImages.value = []
   messages.value.push({ role: 'user', content: q, images: imgs })
-  const idx = messages.value.length
-  messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], loading: true })
+  streamAnswer(q, imgs, null, messages.value.length === 1)
+}
+
+// 统一流式回答：replaceIdx 为 null 追加新 AI 消息；否则替换该条（重新生成）
+const streamAnswer = (question, imgs, replaceIdx, isFirstMessage) => {
+  const idx = replaceIdx ?? messages.value.length
+  if (replaceIdx == null) {
+    messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], loading: true })
+  } else {
+    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], loading: true, messageId: null, fb: 0 }
+  }
   loading.value = true
   abortController.value = new AbortController()
   let full = ''
-  sendQuestion(currentSessionId.value, q, imgs, {
+  sendQuestion(currentSessionId.value, question, imgs, {
     signal: abortController.value.signal,
     onToken: t => { full += t; messages.value[idx].content = full; scroll() },
     onImage: imgs => {
@@ -531,6 +553,37 @@ const send = () => {
   })
 }
 
+// 重新生成：找到该回答对应的用户问题，重新流式回答（替换本条）
+const regenerate = mi => {
+  if (loading.value) return
+  for (let i = mi - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'user') {
+      // 仅本地 dataUrl 图片可重发（历史 URL 图跳过，避免后端无法处理）
+      const imgs = (messages.value[i].images || []).filter(u => u.startsWith('data:'))
+      streamAnswer(messages.value[i].content, imgs, mi, false)
+      return
+    }
+  }
+  message.warning('未找到对应的问题')
+}
+
+// 编辑问题：回填输入框（回显本地图片）+ 重新发送
+const editMessage = mi => {
+  const m = messages.value[mi]
+  if (!m || m.role !== 'user') return
+  text.value = m.content
+  // 回显本地图片（dataUrl）到待发送区；历史 URL 图跳过（后端仅处理 data:）
+  const localImgs = (m.images || []).filter(u => u.startsWith('data:'))
+  if (localImgs.length) {
+    pendingImages.value = [...pendingImages.value, ...localImgs.map(u => ({ dataUrl: u }))]
+  }
+  const urlCount = (m.images || []).length - localImgs.length
+  nextTick(() => textareaRef.value?.focus())
+  message.info(urlCount > 0
+    ? `已回填文字并回显 ${localImgs.length} 张图片（${urlCount} 张历史图片需重新上传）`
+    : '已回填到输入框，修改后按 Enter 发送')
+}
+
 const stop = () => {
   if (abortController.value) {
     abortController.value.abort()
@@ -540,36 +593,72 @@ const stop = () => {
 
 const ask = q => { text.value = q; nextTick(send) }
 
-// ==================== 安全渲染（零依赖） ====================
-const escapeHtml = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+// ==================== Markdown 渲染（markdown-it + DOMPurify + highlight.js） ====================
+// 安全：html:false（不渲染原始 HTML）+ DOMPurify 白名单双保险
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true,                 // 单换行即换行，贴近原手写行为
+  langPrefix: 'hljs language-', // 代码块带 hljs 类才能着色
+  highlight(str, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      try { return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value } catch (e) { /* 落空走兜底 */ }
+    }
+    return md.utils.escapeHtml(str) // 兜底必须手动转义（markdown-it 不自动转义 highlight 返回值）
+  }
+})
+// 降级标题：h1→h2 ... h6 封顶（保持原手写 #→h2 行为，h1 留给页面）
+md.renderer.rules.heading_open = t => `<h${Math.min(+t[0].tag[1] + 1, 6)}>`
+md.renderer.rules.heading_close = t => `</h${Math.min(+t[0].tag[1] + 1, 6)}>`
 
 const render = (t, images = []) => {
   if (!t) return ''
-  let html = escapeHtml(t)
-  // 图片标记：兼容 [图片N] 与 [图片N：描述] 两种格式；吸收标记后紧跟的标点/空白，
-  // 避免标点落在图片下一行；标记前的标点保留在文字末尾（如"如图：[图片1]"的冒号保留）
-  html = html.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？\s]*/g, (m, n) => {
+  // ① 预处理：图片标记 [图片N：描述]/[图片N] → markdown 图片占位（保留位置/顺序）
+  const pre = t.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？\s]*/g, '![img](__AI_IMG_$1__)')
+  // ② 渲染 + 消毒
+  let html = DOMPurify.sanitize(md.render(pre))
+  // ③ DOM 后处理（sanitize 之后新建元素不受白名单限制）
+  const box = document.createElement('div')
+  box.innerHTML = html
+  // 图片：占位 → 真实 src + 居中 + data-seq；图片缺失保留原文 [图片N]
+  box.querySelectorAll('img[src^="__AI_IMG_"]').forEach(img => {
+    const n = (img.getAttribute('src') || '').replace('__AI_IMG_', '')
     const u = images[Number(n) - 1]
-    if (!u) {
-      console.warn('[图片] 渲染失败:', m, '索引', n, 'images长度', images.length, images)
-      return m
-    }
-    const src = resolveImg(u).replace(/"/g, '&quot;')
-    return `<div style="text-align:center"><img class="md-img" src="${src}" alt="文档图片" data-seq="${n}"/></div>`
+    if (!u) { img.replaceWith(document.createTextNode(`[图片${n}]`)); return }
+    const wrap = document.createElement('div')
+    wrap.style.textAlign = 'center'
+    const real = document.createElement('img')
+    real.className = 'md-img'
+    real.src = resolveImg(u)
+    real.alt = '文档图片'
+    real.dataset.seq = n
+    wrap.appendChild(real)
+    img.replaceWith(wrap)
   })
-  // Markdown 子集
-  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-  html = html.replace(/`([^`]+)`/g, '<code style="background:#f0f0f0;padding:1px 4px;border-radius:3px">$1</code>')
-  html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>')
-    .replace(/^## (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^# (.+)$/gm, '<h2>$1</h2>')
-  html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>')
-  html = html.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, '<ul>$1</ul>')
-  html = html.replace(/\n/g, '<br/>')
-  // 引用角标 [N] → 可点击上标（事件委托在 openPreview；仅纯数字防误伤 markdown 链接）
-  html = html.replace(/\[(\d+)\]/g, '<sup class="ref-sup" data-ref="$1">[$1]</sup>')
-  return html
+  // 引用角标：[N] → sup（TreeWalker 跳过 pre/code/a，防误伤代码块/链接内的 [1]）
+  const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT)
+  const targets = []
+  while (walker.nextNode()) {
+    const node = walker.currentNode
+    if (node.nodeValue && /\[\d+\]/.test(node.nodeValue) && !node.parentElement.closest('pre,code,a')) targets.push(node)
+  }
+  for (const node of targets) {
+    const frag = document.createDocumentFragment()
+    node.nodeValue.split(/(\[\d+\])/).forEach(part => {
+      const m = part.match(/^\[(\d+)\]$/)
+      if (m) {
+        const sup = document.createElement('sup')
+        sup.className = 'ref-sup'
+        sup.dataset.ref = m[1]
+        sup.textContent = part
+        frag.appendChild(sup)
+      } else if (part) {
+        frag.appendChild(document.createTextNode(part))
+      }
+    })
+    node.parentNode.replaceChild(frag, node)
+  }
+  return box.innerHTML
 }
 
 const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.value.scrollHeight })
@@ -634,6 +723,20 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .msg-img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px;
   border: 1px solid rgba(255,255,255,.35); cursor: zoom-in; }
 .msg-img:hover { opacity: .85; }
+/* 用户消息编辑按钮（hover 显示，气泡右上角） */
+.bubble.user { position: relative; }
+.msg-edit-btn {
+  position: absolute; top: 6px; right: 8px;
+  z-index: 1;                        /* 浮在图片缩略图之上 */
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.35);       /* 半透明圆底，图片上仍清晰可见 */
+  border-radius: 50%;
+  color: #fff; font-size: 12px; cursor: pointer;
+  opacity: 0; transition: opacity .15s;
+}
+.bubble.user:hover .msg-edit-btn { opacity: 1; }
+.msg-edit-btn:hover { color: #fff; }
 /* 多行自适应输入框：随内容增高（1~6 行），右侧留出发送/停止按钮位 */
 .input-area {
   resize: none;
@@ -658,6 +761,22 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .md :deep(img) { max-width: 100%; max-height: 320px; border: 1px solid #e0e0e0; border-radius: 6px; display: block; margin: 8px 0; cursor: zoom-in; }
 /* 引用角标 [N] */
 .md :deep(.ref-sup) { color: #1677ff; font-size: 12px; cursor: pointer; user-select: none; }
+/* Markdown 完整渲染样式 */
+.md :deep(p) { margin: 6px 0; }
+.md :deep(h2), .md :deep(h3), .md :deep(h4), .md :deep(h5) { margin: 12px 0 6px; font-weight: 600; }
+.md :deep(h2) { font-size: 17px; } .md :deep(h3) { font-size: 15px; } .md :deep(h4) { font-size: 14px; }
+.md :deep(code) { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+.md :deep(pre) { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 8px 0; }
+.md :deep(pre code) { background: none; padding: 0; display: block; white-space: pre; }
+.md :deep(table) { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px; }
+.md :deep(th), .md :deep(td) { border: 1px solid #e0e0e0; padding: 6px 10px; text-align: left; word-break: break-word; }
+.md :deep(th) { background: #fafafa; font-weight: 600; white-space: nowrap; }
+.md :deep(blockquote) { margin: 8px 0; padding: 6px 12px; border-left: 3px solid #d9d9d9; color: #666; background: #fafafa; border-radius: 0 4px 4px 0; }
+.md :deep(ul), .md :deep(ol) { margin: 4px 0; padding-left: 20px; }
+.md :deep(li) { margin: 2px 0; }
+.md :deep(li.ul-item.d1) { margin-left: 16px; list-style-type: circle; }
+.md :deep(li.ul-item.d2) { margin-left: 32px; list-style-type: square; }
+.md :deep(hr) { border: none; border-top: 1px solid #e8e8e8; margin: 10px 0; }
 .md :deep(.ref-sup:hover) { text-decoration: underline; }
 /* 来源引用 chips */
 .src-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
