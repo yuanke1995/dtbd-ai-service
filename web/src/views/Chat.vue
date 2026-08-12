@@ -32,6 +32,11 @@
           <div v-for="(m,i) in messages" :key="i" class="row" :class="m.role">
             <a-avatar :style="{ background: m.role==='user'?'#87d068':'#1677ff', flexShrink:0 }">{{ m.role==='user'?'我':'AI' }}</a-avatar>
             <div class="bubble" :class="m.role">
+              <!-- 用户上传图片（本地 dataUrl 预览 / 历史 URL） -->
+              <div v-if="m.role === 'user' && m.images && m.images.length" class="msg-imgs">
+                <img v-for="(u, ui) in m.images" :key="ui" :src="resolveImg(u)"
+                     class="msg-img" :alt="'上传图片' + (ui + 1)" @click="openPreviewFromMsg(m, ui)" />
+              </div>
               <div class="md" :data-msg-index="i" v-html="render(m.content, m.images)"></div>
               <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
               <!-- 引用来源（回答中 [N] 角标点击查看原文片段） -->
@@ -103,6 +108,13 @@
         </div>
 
         <div class="input">
+          <!-- 待发送图片预览（点击可放大查看） -->
+          <div v-if="pendingImages.length" class="pending-imgs">
+            <div v-for="(p, pi) in pendingImages" :key="pi" class="pending-img">
+              <img :src="p.dataUrl" alt="待发送图片" @click="previewPendingImage(pi)" />
+              <span class="pending-del" @click.stop="removePendingImage(pi)">×</span>
+            </div>
+          </div>
           <div class="input-box">
             <a-textarea
               v-model:value="text"
@@ -113,12 +125,16 @@
               @keydown.enter.exact.prevent="send"
             />
             <div class="input-suffix">
+              <a-tooltip title="上传图片（最多 5 张，随问题一起发送）">
+                <picture-outlined style="color:#888;cursor:pointer;margin-right:10px" @click="pickImages" />
+              </a-tooltip>
               <a-button v-if="loading" type="text" size="small" @click="stop" style="color:#ff4d4f">
                 <pause-circle-outlined />
               </a-button>
-              <send-outlined v-else-if="text.trim()" style="color:#1677ff;cursor:pointer" @click="send" />
+              <send-outlined v-else-if="text.trim() || pendingImages.length" style="color:#1677ff;cursor:pointer" @click="send" />
             </div>
           </div>
+          <input ref="fileInput" type="file" accept="image/*" multiple style="display:none" @change="onFilesChange" />
         </div>
       </div>
     </div>
@@ -128,7 +144,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined } from '@ant-design/icons-vue'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
@@ -150,8 +166,8 @@ const abortController = ref(null)
 const sidebarCollapsed = ref(false)
 const tips = ['系统有哪些功能？', '如何创建一个新表单？', '字段验证怎么设置？', '什么是填报周期？']
 
-// 文档图片访问
-const resolveImg = u => u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
+// 文档图片访问：data URL（用户上传预览）原样返回；http 原样；其余走 /proxy
+const resolveImg = u => u.startsWith('data:') ? u : u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
 
 // 点击回答内容：引用角标 [N] → 来源详情；图片 → 灯箱预览（事件委托）
 const openPreview = e => {
@@ -410,18 +426,70 @@ function toggleSidebar() {
   localStorage.setItem('ai_sidebar_collapsed', String(sidebarCollapsed.value))
 }
 
+// 用户上传图片：压缩为 data URL（最长边 1280，JPEG 0.85），最多 5 张
+const pendingImages = ref([])
+const fileInput = ref(null)
+const pickImages = () => { if (pendingImages.value.length >= 5) { message.warning('最多上传 5 张图片'); return } fileInput.value?.click() }
+const onFilesChange = e => {
+  const files = Array.from(e.target.files || [])
+  e.target.value = ''
+  for (const f of files) {
+    if (pendingImages.value.length >= 5) { message.warning('最多上传 5 张图片'); break }
+    if (!f.type.startsWith('image/')) { message.warning(`跳过非图片文件: ${f.name}`); continue }
+    compressImage(f).then(dataUrl => pendingImages.value.push({ dataUrl })).catch(() => message.error(`图片处理失败: ${f.name}`))
+  }
+}
+const compressImage = file => new Promise((resolve, reject) => {
+  const img = new Image()
+  const url = URL.createObjectURL(file)
+  img.onload = () => {
+    const max = 1280
+    let { width, height } = img
+    if (width > max || height > max) {
+      const ratio = Math.min(max / width, max / height)
+      width = Math.round(width * ratio); height = Math.round(height * ratio)
+    }
+    const canvas = document.createElement('canvas')
+    canvas.width = width; canvas.height = height
+    canvas.getContext('2d').drawImage(img, 0, 0, width, height)
+    URL.revokeObjectURL(url)
+    resolve(canvas.toDataURL('image/jpeg', 0.85))
+  }
+  img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片加载失败')) }
+  img.src = url
+})
+const removePendingImage = i => pendingImages.value.splice(i, 1)
+// 待发送预览图 → 灯箱放大（所有待发送图可左右切换）
+const previewPendingImage = pi => {
+  if (!pendingImages.value.length) return
+  previewList.value = pendingImages.value.map(p => p.dataUrl)
+  previewIndex.value = pi
+  zoom.value = 1
+  offset.value = { x: 0, y: 0 }
+}
+// 用户气泡图片 → 灯箱（该消息全部图片可切换）
+const openPreviewFromMsg = (m, index) => {
+  if (!m.images || !m.images.length) return
+  previewList.value = m.images.map(resolveImg)
+  previewIndex.value = index || 0
+  zoom.value = 1
+  offset.value = { x: 0, y: 0 }
+}
+
 const send = () => {
   const q = text.value.trim()
-  if (!q || loading.value) return
+  const imgs = pendingImages.value.map(p => p.dataUrl)
+  if ((!q && !imgs.length) || loading.value) return
   const isFirstMessage = messages.value.length === 0
   text.value = ''
-  messages.value.push({ role: 'user', content: q })
+  pendingImages.value = []
+  messages.value.push({ role: 'user', content: q, images: imgs })
   const idx = messages.value.length
   messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], loading: true })
   loading.value = true
   abortController.value = new AbortController()
   let full = ''
-  sendQuestion(currentSessionId.value, q, {
+  sendQuestion(currentSessionId.value, q, imgs, {
     signal: abortController.value.signal,
     onToken: t => { full += t; messages.value[idx].content = full; scroll() },
     onImage: imgs => {
@@ -554,6 +622,18 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .bubble.ai { background: #f5f5f5; color: #333; }
 .input { padding: 12px 24px 16px; border-top: 1px solid #f0f0f0; }
 .input-box { position: relative; }
+/* 待发送图片预览 */
+.pending-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.pending-img { position: relative; }
+.pending-img img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid #e0e0e0; cursor: zoom-in; }
+.pending-del { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%;
+  background: rgba(0,0,0,.55); color: #fff; font-size: 12px; line-height: 18px; text-align: center; cursor: pointer; }
+.pending-del:hover { background: #ff4d4f; }
+/* 用户气泡内图片 */
+.msg-imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.msg-img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px;
+  border: 1px solid rgba(255,255,255,.35); cursor: zoom-in; }
+.msg-img:hover { opacity: .85; }
 /* 多行自适应输入框：随内容增高（1~6 行），右侧留出发送/停止按钮位 */
 .input-area {
   resize: none;

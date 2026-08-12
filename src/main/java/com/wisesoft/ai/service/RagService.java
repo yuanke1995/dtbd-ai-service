@@ -14,6 +14,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * RAG 问答服务
@@ -45,6 +46,7 @@ public class RagService {
     private final RerankService rerankService;
     private final DocumentMetaCache documentMetaCache;
     private final QaLogService qaLogService;
+    private final UserImageService userImageService;
 
     public RagService(ChatClient.Builder chatClientBuilder,
                       SessionService sessionService,
@@ -53,7 +55,8 @@ public class RagService {
                       HybridRetrievalService hybridRetrievalService,
                       RerankService rerankService,
                       DocumentMetaCache documentMetaCache,
-                      QaLogService qaLogService) {
+                      QaLogService qaLogService,
+                      UserImageService userImageService) {
         this.chatClient = chatClientBuilder.build();
         this.sessionService = sessionService;
         this.properties = properties;
@@ -62,16 +65,31 @@ public class RagService {
         this.rerankService = rerankService;
         this.documentMetaCache = documentMetaCache;
         this.qaLogService = qaLogService;
+        this.userImageService = userImageService;
     }
 
     /**
-     * 处理用户问题，通过 SSE 流式返回
+     * 处理用户问题（可含上传图片），通过 SSE 流式返回
      */
-    public void chat(String sessionId, String question, SseEmitter emitter) {
+    public void chat(String sessionId, String question, List<String> userImages, SseEmitter emitter) {
         long startTime = System.currentTimeMillis();
         try {
+            // 0. 用户上传图片：并行保存+视觉描述（用于上下文与检索召回）
+            List<UserImageService.UserImage> userImgs = userImageService.process(userImages);
+            String imgDescText = userImgs.isEmpty() ? "" : userImgs.stream()
+                    .map(i -> "- " + (i.desc().isBlank() ? "（图片内容无法识别）" : i.desc()))
+                    .collect(Collectors.joining("\n"));
+
             // 0. 查询改写（优化检索精准度；默认关闭，失败静默降级为原始问题）
             String retrievalQuery = rewriteQuery(question);
+            // 图片描述参与检索：识别界面时描述含组件名，能显著提升召回
+            if (!userImgs.isEmpty()) {
+                String descJoin = userImgs.stream().map(UserImageService.UserImage::desc)
+                        .filter(d -> !d.isBlank()).collect(Collectors.joining(" "));
+                if (!descJoin.isBlank()) {
+                    retrievalQuery = question + " " + descJoin;
+                }
+            }
 
             // 1. 混合检索（向量 + 关键词）→ 重排
             List<HybridRetrievalService.Hit> hits = hybridRetrievalService.search(retrievalQuery);
@@ -167,9 +185,14 @@ public class RagService {
                 }
             }
 
+            // 用户上传图片描述拼入问题（主 LLM 结合图片内容回答）
+            StringBuilder userQuestion = new StringBuilder(question);
+            if (!imgDescText.isBlank()) {
+                userQuestion.append("\n\n用户上传了图片，图片内容描述如下（请结合图片内容回答问题）：\n").append(imgDescText);
+            }
             String user = context.length() == 0
-                    ? question
-                    : question + "\n\n参考资料：\n" + context;
+                    ? userQuestion.toString()
+                    : userQuestion + "\n\n参考资料：\n" + context;
 
             // 5. 异步流式生成（缓冲过滤 <related> 块：跨 token 分割也能正确剥离，前端不会看到标签原文）
             StringBuilder fullResponse = new StringBuilder();
@@ -236,7 +259,9 @@ public class RagService {
 
                         // 记录对话历史（含图片与引用来源），拿到消息ID供前端反馈
                         String sourcesJson = sources.isEmpty() ? null : JSON.toJSONString(sources);
-                        sessionService.appendMessage(sessionId, "user", question, null, null);
+                        List<String> userImgUrls = userImgs.stream().map(UserImageService.UserImage::url).toList();
+                        sessionService.appendMessage(sessionId, "user", question,
+                                userImgUrls.isEmpty() ? null : userImgUrls, null);
                         String messageId = sessionService.appendMessage(sessionId, "assistant", answer,
                                 new ArrayList<>(imgIndex.values()), sourcesJson);
 

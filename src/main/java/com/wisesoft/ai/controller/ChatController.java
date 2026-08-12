@@ -45,7 +45,7 @@ public class ChatController {
         }
 
         SseEmitter emitter = new SseEmitter(300000L);
-        ragService.chat(sessionId, question, emitter);
+        ragService.chat(sessionId, question, request.getImages(), emitter);
         return emitter;
     }
 

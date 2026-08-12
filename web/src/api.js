@@ -75,11 +75,11 @@ function upload(path, formData, onProgress) {
  * 流式聊天（SSE）
  * signal 用于停止生成（AbortController.abort()）
  */
-export function sendQuestion(sessionId, question, { onToken, onImage, onDone, onError, signal }) {
+export function sendQuestion(sessionId, question, images = [], { onToken, onImage, onDone, onError, signal }) {
   fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ sessionId, question }),
+    body: JSON.stringify({ sessionId, question, images }),
     signal
   }).then(res => {
     if (!res.ok) {
