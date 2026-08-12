@@ -208,6 +208,29 @@ public class SessionService {
         redisTemplate.delete(KEY_PREFIX + sessionId);
     }
 
+    /**
+     * 清空所有会话（软删全部会话+消息 + Redis 清理）
+     */
+    public void clearAll() {
+        try {
+            // 逻辑删除所有会话（@TableLogic 自动转 UPDATE deleted=1）
+            sessionMapper.delete(new LambdaQueryWrapper<AiSession>().eq(AiSession::getDeleted, 0));
+            // 逻辑删除所有消息
+            messageMapper.delete(new LambdaQueryWrapper<AiMessage>().eq(AiMessage::getDeleted, 0));
+        } catch (Exception e) {
+            log.warn("清空会话 MySQL 操作失败: {}", e.getMessage());
+        }
+        try {
+            // 清理所有 Redis 会话 key
+            Set<String> keys = redisTemplate.keys(KEY_PREFIX + "*");
+            if (keys != null && !keys.isEmpty()) {
+                redisTemplate.delete(keys);
+            }
+        } catch (Exception e) {
+            log.warn("清空会话 Redis 清理失败: {}", e.getMessage());
+        }
+    }
+
     // ==================== 私有方法 ====================
 
     /**

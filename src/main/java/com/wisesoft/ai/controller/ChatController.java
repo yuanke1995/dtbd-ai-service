@@ -83,6 +83,15 @@ public class ChatController {
         return ResultJson.ok("会话已删除");
     }
 
+    /**
+     * 清空所有会话
+     */
+    @DeleteMapping("/sessions")
+    public ResultJson clearAllSessions() {
+        sessionService.clearAll();
+        return ResultJson.ok("所有会话已清空");
+    }
+
     @PostMapping("/session/new")
     public ResultJson newSession() {
         return ResultJson.ok(Map.of("sessionId", sessionService.createSession()));

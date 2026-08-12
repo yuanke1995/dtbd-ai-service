@@ -8,6 +8,7 @@
       :loading="sessionsLoading"
       @select="switchSession"
       @delete="handleDeleteSession"
+      @clear="handleClearAll"
       @new="createNewSession"
       @toggle-collapse="toggleSidebar"
     />
@@ -102,17 +103,22 @@
         </div>
 
         <div class="input">
-          <a-input
-            v-model:value="text" placeholder="请输入问题，回车发送" :disabled="loading"
-            @press-enter="send" allow-clear
-          >
-            <template #suffix>
+          <div class="input-box">
+            <a-textarea
+              v-model:value="text"
+              placeholder="请输入问题，Enter 发送，Shift+Enter 换行"
+              :disabled="loading"
+              :auto-size="{ minRows: 1, maxRows: 6 }"
+              class="input-area"
+              @keydown.enter.exact.prevent="send"
+            />
+            <div class="input-suffix">
               <a-button v-if="loading" type="text" size="small" @click="stop" style="color:#ff4d4f">
-                <pause-circle-outlined /> 停止
+                <pause-circle-outlined />
               </a-button>
               <send-outlined v-else-if="text.trim()" style="color:#1677ff;cursor:pointer" @click="send" />
-            </template>
-          </a-input>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -123,7 +129,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail } from '../api'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
 const text = ref('')
@@ -385,6 +391,19 @@ async function handleDeleteSession(sid) {
   }
 }
 
+// 清空所有对话（sidebar 已二次确认）
+async function handleClearAll() {
+  try {
+    await clearAllSessionsApi()
+    messages.value = []
+    currentSessionId.value = null
+    sessions.value = []
+    message.success('所有对话已清空')
+  } catch (e) {
+    message.error('清空失败: ' + (e.message || '未知错误'))
+  }
+}
+
 // 切换侧边栏折叠
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
@@ -533,7 +552,29 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .bubble { max-width: 70%; padding: 12px 16px; border-radius: 12px; line-height: 1.6; }
 .bubble.user { background: #1677ff; color: #fff; }
 .bubble.ai { background: #f5f5f5; color: #333; }
-.input { padding: 16px 24px; border-top: 1px solid #f0f0f0; }
+.input { padding: 12px 24px 16px; border-top: 1px solid #f0f0f0; }
+.input-box { position: relative; }
+/* 多行自适应输入框：随内容增高（1~6 行），右侧留出发送/停止按钮位 */
+.input-area {
+  resize: none;
+  padding: 6px 44px 6px 12px;
+  font-size: 14px;
+  line-height: 1.6;
+  border-radius: 8px;
+}
+.input-area:focus { border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22,119,255,.1); }
+.input-suffix {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  line-height: 1;
+}
+.input-suffix :deep(.ant-btn) { padding: 0; }
+.input-suffix .anticon-send { color: #1677ff; }
+.input-suffix .anticon-send:hover { opacity: .8; }
 .md :deep(img) { max-width: 100%; max-height: 320px; border: 1px solid #e0e0e0; border-radius: 6px; display: block; margin: 8px 0; cursor: zoom-in; }
 /* 引用角标 [N] */
 .md :deep(.ref-sup) { color: #1677ff; font-size: 12px; cursor: pointer; user-select: none; }

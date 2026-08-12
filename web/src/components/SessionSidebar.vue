@@ -2,12 +2,20 @@
   <div class="session-sidebar" :class="{ collapsed }">
     <!-- 展开态：新建对话 + 会话列表 -->
     <div v-if="!collapsed" class="sidebar-inner">
-      <!-- 头部：新建对话 + 收起按钮 -->
+      <!-- 头部：新建对话 + 清空 + 收起按钮 -->
       <div class="sidebar-header">
         <div class="header-row">
           <a-button type="primary" block @click="$emit('new')" :disabled="loading">
             <plus-outlined /> 新建对话
           </a-button>
+          <a-tooltip title="清空所有对话">
+            <a-popconfirm title="确定清空所有对话？此操作不可恢复" ok-text="清空" cancel-text="取消"
+                          placement="bottomRight" @confirm="$emit('clear')" @click.stop>
+              <a-button type="text" class="collapse-btn">
+                <clear-outlined />
+              </a-button>
+            </a-popconfirm>
+          </a-tooltip>
           <a-tooltip title="收起侧边栏">
             <a-button type="text" class="collapse-btn" @click="$emit('toggle-collapse')">
               <menu-fold-outlined />
@@ -49,24 +57,33 @@
       </div>
     </div>
 
-    <!-- 折叠态：小图标条（新建 + 展开） -->
+    <!-- 折叠态：小图标条（展开 + 新建 + 对话） -->
     <div v-else class="collapsed-bar">
+      <a-tooltip title="展开会话列表" placement="right">
+        <a-button type="text" class="cb-btn" @click="$emit('toggle-collapse')">
+          <menu-unfold-outlined />
+        </a-button>
+      </a-tooltip>
       <a-tooltip title="新建对话" placement="right">
         <a-button type="text" class="cb-btn" @click="$emit('new')" :disabled="loading">
           <plus-outlined />
         </a-button>
       </a-tooltip>
-      <a-tooltip title="展开会话列表" placement="right">
-        <a-button type="text" class="cb-btn" @click="$emit('toggle-collapse')">
-          <menu-unfold-outlined />
-        </a-button>
+      <a-tooltip :title="`会话列表（共 ${sessions.length} 条）`" placement="right">
+        <div class="cb-badge" @click="$emit('toggle-collapse')">
+          <a-badge :count="sessions.length" :overflow-count="99" size="small">
+            <a-button type="text" class="cb-btn" style="pointer-events:none">
+              <comment-outlined />
+            </a-button>
+          </a-badge>
+        </div>
       </a-tooltip>
     </div>
   </div>
 </template>
 
 <script setup>
-import { PlusOutlined, DeleteOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, DeleteOutlined, MenuFoldOutlined, MenuUnfoldOutlined, ClearOutlined, CommentOutlined } from '@ant-design/icons-vue'
 
 defineProps({
   sessions: { type: Array, default: () => [] },
@@ -75,7 +92,7 @@ defineProps({
   loading: { type: Boolean, default: false }
 })
 
-defineEmits(['select', 'delete', 'new', 'toggle-collapse'])
+defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear'])
 
 const formatTime = (t) => {
   if (!t) return ''
@@ -120,6 +137,10 @@ const formatTime = (t) => {
 .cb-btn {
   width: 36px;
   height: 36px;
+  padding: 0 !important;            /* 覆盖 antd 按钮默认 padding，图标严格居中 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 16px;
   color: #555;
   border-radius: 8px;
@@ -127,6 +148,24 @@ const formatTime = (t) => {
 .cb-btn:hover {
   background: #f0f0f0 !important;
   color: #1677ff !important;
+}
+/* 折叠态对话图标（含条数角标） */
+.cb-badge {
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 2px;
+}
+.cb-badge:hover {
+  background: #f0f0f0;
+}
+.cb-badge :deep(.ant-badge) { display: block; }
+.cb-badge :deep(.ant-badge-count) {
+  box-shadow: none;
+  font-size: 10px;
+  /* 角标默认突出在右上角外，内收使其落在 hover 圆角范围内 */
+  transform: translate(20%, -20%) !important;
+  right: 6px;
+  top: 4px;
 }
 .sidebar-inner {
   width: 260px;

@@ -94,9 +94,14 @@ public class DocxParser implements DocumentParser {
                     }
 
                     // 段落内嵌图片（图片独立成段时 text 为空，也要进块）
+                    // 占位符 [图片] 立即写入原文位置，flush 时按序替换为 [图片：描述]
                     for (XWPFRun run : p.getRuns()) {
                         for (XWPFPicture pic : run.getEmbeddedPictures()) {
                             handlePicture(pic.getPictureData(), docId, currentImages, imageCache, imageCount);
+                            if (content.length() > 0 && content.charAt(content.length() - 1) != '\n') {
+                                content.append("\n");
+                            }
+                            content.append("[图片]");
                         }
                     }
                 } else if (element.getElementType() == BodyElementType.TABLE) {
@@ -202,69 +207,33 @@ public class DocxParser implements DocumentParser {
     }
 
     /**
-     * flush 当前分块：join 并发描述结果并按文档顺序拼入内容
+     * flush 当前分块：join 并发描述结果，并将 content 中 [图片] 占位按序替换为 [图片：描述]
+     * （占位在解析时写入原文位置，因此图文天然交错）
      */
     private void flushChunk(String title, StringBuilder content, List<SavedImage> currentImages, List<Chunk> chunks) {
         if (content.length() == 0 && currentImages.isEmpty()) return;
-        StringBuilder finalContent = new StringBuilder(content);
-        List<String> urls = new ArrayList<>(currentImages.size());
-        List<String> imgMarks = new ArrayList<>(currentImages.size());
-        for (SavedImage img : currentImages) {
-            String desc = img.descFuture().join();
-            imgMarks.add(desc.isBlank() ? "[图片]" : "[图片：" + desc + "]");
-            urls.add(img.url());
-        }
-        if (!imgMarks.isEmpty()) {
-            // 图文交错：图片标记堆在块末尾时，尝试按"图表 NNN"题注顺序配对插入（模拟原文图文混排）
-            String reordered = interleaveWithCaptions(finalContent.toString(), imgMarks);
-            if (reordered != null) {
-                finalContent.setLength(0);
-                finalContent.append(reordered);
-            } else {
-                if (finalContent.length() > 0) finalContent.append("\n");
-                finalContent.append(String.join("\n", imgMarks));
+        String finalContent = content.toString();
+        if (!currentImages.isEmpty()) {
+            StringBuilder out = new StringBuilder();
+            Matcher m = Pattern.compile("\\[图片]").matcher(finalContent);
+            int imgIdx = 0;
+            while (m.find() && imgIdx < currentImages.size()) {
+                SavedImage img = currentImages.get(imgIdx++);
+                String desc = img.descFuture().join();
+                m.appendReplacement(out, desc.isBlank()
+                        ? "[图片]"
+                        : "[图片：" + Matcher.quoteReplacement(desc) + "]");
             }
+            m.appendTail(out);
+            if (imgIdx != currentImages.size()) {
+                log.warn("图片占位与图片数不一致: 占位{} 图片{}", imgIdx, currentImages.size());
+            }
+            finalContent = out.toString();
         }
-        chunks.add(new Chunk(title, finalContent.toString(), urls));
+        chunks.add(new Chunk(title, finalContent,
+                currentImages.stream().map(SavedImage::url).toList()));
         content.setLength(0);
         currentImages.clear();
-    }
-
-    /**
-     * 图文交错后处理（仅 docx 题注式文档）：
-     * 正文末尾是连续图片标记堆，且前面存在等量"图表 NNN"题注时，
-     * 将第 i 张图片标记插入第 i 个题注之后，形成"题注+图"的原文结构。
-     * 任何结构不匹配（题注数≠图片数/图片不在末尾）都返回 null，保持原顺序，绝不破坏内容。
-     */
-    private String interleaveWithCaptions(String text, List<String> imgMarks) {
-        if (imgMarks.isEmpty()) return null;
-        // 1. 剥离末尾连续图片标记堆
-        Matcher tailM = Pattern.compile("(?:\\n?\\[图片(?:[：:][^\\]]*)?\\])+$").matcher(text);
-        if (!tailM.find()) return null; // 图片不在末尾，无需重排
-        String head = text.substring(0, tailM.start());
-        List<String> marks = new ArrayList<>();
-        Matcher mm = Pattern.compile("\\[图片(?:[：:][^\\]]*)?\\]").matcher(tailM.group());
-        while (mm.find()) marks.add(mm.group());
-        if (marks.size() != imgMarks.size()) return null; // 与当前块图片数不一致，放弃
-        // 2. 统计并定位前面的"图表 NNN"题注（插入点取题注整行末尾，保留题注文字如"图表 117评分"）
-        List<Integer> capEnds = new ArrayList<>();
-        Matcher cm = Pattern.compile("图表\\s*\\d+").matcher(head);
-        while (cm.find()) {
-            int end = cm.end();
-            int nl = head.indexOf('\n', end);
-            capEnds.add(nl < 0 ? head.length() : nl);
-        }
-        if (capEnds.size() != marks.size()) return null; // 题注数≠图片数，放弃
-        // 3. 第 i 张图插到第 i 个题注后
-        StringBuilder sb = new StringBuilder(head.length() + marks.size() * 20);
-        int prev = 0;
-        for (int i = 0; i < capEnds.size(); i++) {
-            int pos = capEnds.get(i);
-            sb.append(head, prev, pos).append("\n").append(marks.get(i));
-            prev = pos;
-        }
-        sb.append(head.substring(prev));
-        return sb.toString();
     }
 
     /**

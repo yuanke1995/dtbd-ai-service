@@ -138,6 +138,9 @@ export const listSessions = () => request('/sessions')
 /** 删除会话（MySQL 软删除 + Redis 清理） */
 export const deleteSessionApi = sid => request(`/session/${sid}`, { method: 'DELETE' })
 
+/** 清空所有会话 */
+export const clearAllSessionsApi = () => request('/sessions', { method: 'DELETE' })
+
 /** 文档列表 */
 export const listDocuments = () => request('/document/list')
 
