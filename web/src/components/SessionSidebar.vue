@@ -5,7 +5,7 @@
       <!-- 头部：新建对话 + 清空 + 收起按钮 -->
       <div class="sidebar-header">
         <div class="header-row">
-          <a-button type="primary" block @click="$emit('new')" :disabled="loading">
+          <a-button type="primary" block @click="$emit('new')" :disabled="loading || creating">
             <plus-outlined /> 新建对话
           </a-button>
           <a-tooltip title="清空所有对话">
@@ -65,7 +65,7 @@
         </a-button>
       </a-tooltip>
       <a-tooltip title="新建对话" placement="right">
-        <a-button type="text" class="cb-btn" @click="$emit('new')" :disabled="loading">
+        <a-button type="text" class="cb-btn" @click="$emit('new')" :disabled="loading || creating">
           <plus-outlined />
         </a-button>
       </a-tooltip>
@@ -89,7 +89,8 @@ defineProps({
   sessions: { type: Array, default: () => [] },
   currentSessionId: { type: String, default: null },
   collapsed: { type: Boolean, default: false },
-  loading: { type: Boolean, default: false }
+  loading: { type: Boolean, default: false },
+  creating: { type: Boolean, default: false }   // 新建对话进行中（防重复点击）
 })
 
 defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear'])

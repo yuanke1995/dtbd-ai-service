@@ -2,10 +2,11 @@
   <div class="chat-layout">
     <!-- 左侧会话列表 -->
     <SessionSidebar
-      :sessions="sessions"
+      :sessions="visibleSessions"
       :current-session-id="currentSessionId"
       :collapsed="sidebarCollapsed"
       :loading="sessionsLoading"
+      :creating="creatingSession"
       @select="switchSession"
       @delete="handleDeleteSession"
       @clear="handleClearAll"
@@ -473,16 +474,35 @@ async function switchSession(sid) {
   }
 }
 
-// 新建会话
+// 会话列表显示：隐藏空会话（新建的空对话不展示，发消息后自动显示到顶部）
+const visibleSessions = computed(() => sessions.value.filter(s => (s.messageCount ?? 0) > 0))
+
+// 新建会话（防重复 + 无感复用空会话：已存在空会话时切换过去，不新建不提示）
+const creatingSession = ref(false)
 async function createNewSession() {
+  if (creatingSession.value) return
+  // 列表已存在空会话（messageCount=0）→ 无感复用，避免堆叠一堆"新建对话"
+  const emptySid = sessions.value.find(s => (s.messageCount ?? 0) === 0)?.id
+  if (emptySid) {
+    if (currentSessionId.value !== emptySid) {
+      await switchSession(emptySid)
+    } else {
+      messages.value = []
+    }
+    return
+  }
+  creatingSession.value = true
   try {
     const r = await newSession()
     if (r.success && r.data?.sessionId) {
       currentSessionId.value = r.data.sessionId
       messages.value = []
+      await loadSessions()   // 立即刷新会话列表（新会话置顶显示）
     }
   } catch (e) {
     message.error('创建会话失败: ' + (e.message || '未知错误'))
+  } finally {
+    creatingSession.value = false
   }
 }
 
