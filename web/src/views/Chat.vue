@@ -546,30 +546,37 @@ const visibleSessions = computed(() => {
   return list
 })
 
-// 置顶/取消置顶
+// 置顶/取消置顶（本地更新 + 原地排序，避免整表刷新导致 tooltip 卡住）
 async function handleTogglePin(s) {
   try {
     const next = !(s.isPinned === 1)
     const r = await pinSession(s.id, next)
     if (r.success) {
-      s.isPinned = next ? 1 : 0
+      const target = sessions.value.find(x => x.id === s.id)
+      if (target) target.isPinned = next ? 1 : 0
+      sortSessions()
       message.success(next ? '已置顶' : '已取消置顶')
-      await loadSessions()
     } else message.error(r.msg || '操作失败')
   } catch (e) { message.error(e.message || '操作失败') }
 }
 
-// 收藏/取消收藏
+// 收藏/取消收藏（本地更新，不整表刷新）
 async function handleToggleFavorite(s) {
   try {
     const next = !(s.isFavorite === 1)
     const r = await favoriteSession(s.id, next)
     if (r.success) {
-      s.isFavorite = next ? 1 : 0
+      const target = sessions.value.find(x => x.id === s.id)
+      if (target) target.isFavorite = next ? 1 : 0
       message.success(next ? '已收藏' : '已取消收藏')
-      await loadSessions()
     } else message.error(r.msg || '操作失败')
   } catch (e) { message.error(e.message || '操作失败') }
+}
+
+// 原地排序（置顶优先 + 更新时间倒序），保持与后端 listSessions 一致；不替换数组引用避免 DOM 重建
+function sortSessions() {
+  sessions.value.sort((a, b) =>
+    (b.isPinned || 0) - (a.isPinned || 0) || new Date(b.updateTime) - new Date(a.updateTime))
 }
 
 // 新建会话（防重复 + 无感复用空会话：已存在空会话时切换过去，不新建不提示）

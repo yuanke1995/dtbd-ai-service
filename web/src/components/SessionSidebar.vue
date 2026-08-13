@@ -70,13 +70,15 @@
             </div>
           </div>
           <div class="session-actions" @click.stop>
-            <a-tooltip :title="s.isFavorite ? '取消收藏' : '收藏'" placement="top">
+            <a-tooltip :title="s.isFavorite ? '取消收藏' : '收藏'" placement="top"
+                       :open="!!favTipOpen[s.id]" @open-change="v => favTipOpen[s.id] = v">
               <star-outlined class="act-icon" :class="{ fav: s.isFavorite }"
-                             @click="$emit('toggle-favorite', s)" />
+                             @click="onToggleFavorite(s)" />
             </a-tooltip>
-            <a-tooltip :title="s.isPinned ? '取消置顶' : '置顶'" placement="top">
+            <a-tooltip :title="s.isPinned ? '取消置顶' : '置顶'" placement="top"
+                       :open="!!pinTipOpen[s.id]" @open-change="v => pinTipOpen[s.id] = v">
               <pushpin-outlined class="act-icon" :class="{ pin: s.isPinned }"
-                                @click="$emit('toggle-pin', s)" />
+                                @click="onTogglePin(s)" />
             </a-tooltip>
             <a-popconfirm
               title="确定删除该会话？"
@@ -118,7 +120,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, reactive } from 'vue'
 import { PlusOutlined, DeleteOutlined, MenuFoldOutlined, MenuUnfoldOutlined, ClearOutlined, CommentOutlined,
          SearchOutlined, PushpinOutlined, PushpinFilled, StarOutlined } from '@ant-design/icons-vue'
 
@@ -133,6 +135,18 @@ defineProps({
 })
 
 const emit = defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear', 'toggle-pin', 'toggle-favorite', 'search', 'filter-change'])
+
+// 置顶/收藏 tooltip 受控 open 状态：点击图标时立即关闭，避免浮层残留
+const pinTipOpen = reactive({})
+const favTipOpen = reactive({})
+const onTogglePin = s => {
+  pinTipOpen[s.id] = false
+  emit('toggle-pin', s)
+}
+const onToggleFavorite = s => {
+  favTipOpen[s.id] = false
+  emit('toggle-favorite', s)
+}
 
 // 搜索（300ms 防抖）
 const searchText = ref('')
