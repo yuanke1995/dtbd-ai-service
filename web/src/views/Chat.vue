@@ -44,7 +44,7 @@
               <!-- 用户上传图片（本地 dataUrl 预览 / 历史 URL） -->
               <div v-if="m.role === 'user' && m.images && m.images.length" class="msg-imgs">
                 <img v-for="(u, ui) in m.images" :key="ui" :src="resolveImg(u)"
-                     class="msg-img" :alt="'上传图片' + (ui + 1)" @click="openPreviewFromMsg(m, ui)" />
+                     class="msg-img" :alt="'上传图片' + (ui + 1)" @click="openPreviewFromMsg(m, ui)" @error="onImgError" />
               </div>
               <div class="md" :data-msg-index="i" v-html="render(m.content, m.images)"></div>
               <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
@@ -62,6 +62,12 @@
                 <span class="related-label">猜你想问：</span>
                 <a-tag v-for="(q, qi) in m.related" :key="qi" color="green"
                        style="cursor:pointer;margin:2px" @click="ask(q)">{{ q }}</a-tag>
+              </div>
+              <!-- 流式中断/失败：重试入口（保留已生成内容，重新生成完整回答） -->
+              <div v-if="m.role === 'ai' && m.failed && !m.loading" class="retry-row">
+                <a-button size="small" type="primary" ghost :disabled="loading" @click="regenerate(i)">
+                  <sync-outlined /> 重试
+                </a-button>
               </div>
               <!-- 回答操作：检索调试 + 重新生成 + 反馈 -->
               <div v-if="m.role === 'ai' && m.messageId" class="fb-row">
@@ -135,7 +141,7 @@
         <!-- 图片点击放大灯箱：多图左右切换、滚轮缩放、拖动平移、双击重置、ESC 关闭 -->
         <div v-if="previewUrl" class="lightbox" @click="close" @wheel.prevent="onWheel">
           <img
-            :src="previewUrl" alt="大图预览" @click.stop
+            :src="previewUrl" alt="大图预览" @click.stop @error="onImgError"
             :class="{ dragging: !!dragState }"
             :style="{ transform: 'translate(' + offset.x + 'px,' + offset.y + 'px) scale(' + zoom + ')' }"
             @mousedown="onImgMouseDown" @mousemove="onImgMouseMove" @mouseup="onImgMouseUp" @mouseleave="onImgMouseUp"
@@ -194,7 +200,7 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import 'highlight.js/styles/github.css'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined } from '@ant-design/icons-vue'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
@@ -220,6 +226,11 @@ const zoom = ref(1)
 const offset = ref({ x: 0, y: 0 })
 const dragState = ref(null)
 const abortController = ref(null)
+
+// 图片加载兜底：加载失败替换为灰底占位图（签名过期/文件缺失等场景避免裂图）
+const FALLBACK_IMG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120"><rect width="100%" height="100%" fill="#f5f5f5"/><text x="50%" y="50%" fill="#999" font-size="14" text-anchor="middle" dominant-baseline="middle">图片加载失败</text></svg>')
+const onImgError = e => { e.target.onerror = null; e.target.src = FALLBACK_IMG }
 
 // 侧边栏宽度驱动：可拖拽伸缩，缩到阈值(<150px)自动切换为图标条（48px）
 const SIDEBAR_ICON_W = 48
@@ -633,7 +644,8 @@ const send = () => {
 }
 
 // 统一流式回答：replaceIdx 为 null 追加新 AI 消息；否则替换该条（重新生成）
-const streamAnswer = (question, imgs, replaceIdx, isFirstMessage) => {
+// autoRetry：剩余自动重试次数（仅"未收到任何 token"的瞬时断连才自动重试，避免清空已生成内容）
+const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1) => {
   const idx = replaceIdx ?? messages.value.length
   if (replaceIdx == null) {
     messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], loading: true })
@@ -643,9 +655,10 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage) => {
   loading.value = true
   abortController.value = new AbortController()
   let full = ''
+  let gotToken = false
   sendQuestion(currentSessionId.value, question, imgs, {
     signal: abortController.value.signal,
-    onToken: t => { full += t; messages.value[idx].content = full; scroll() },
+    onToken: t => { gotToken = true; full += t; messages.value[idx].content = full; scroll() },
     onImage: imgs => {
       try {
         const parsed = JSON.parse(imgs)
@@ -682,8 +695,25 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage) => {
       if (isFirstMessage) loadSessions()
     },
     onError: e => {
+      // 用户主动停止不走到这里（AbortError 在 api.js 按正常结束处理）
+      // 瞬时断连自动重试：未收到任何 token 时静默重试（2.5s 退避），替换当前消息而非追加
+      if (autoRetry > 0 && !gotToken) {
+        message.warning('连接中断，正在自动重试…')
+        setTimeout(() => {
+          // 等待期间消息列表可能已变化（切换/清空会话），放弃自动重试
+          if (idx < messages.value.length && messages.value[idx]?.role === 'ai' && messages.value[idx]?.loading) {
+            streamAnswer(question, imgs, idx, false, 0)
+          } else {
+            loading.value = false
+            abortController.value = null
+          }
+        }, 2500)
+        return
+      }
+      // 已收到部分回答：保留已生成内容（不自动重连清空重来），标记 failed 显示「重试」按钮
       messages.value[idx].content = '😅 ' + e
       messages.value[idx].loading = false
+      messages.value[idx].failed = true
       loading.value = false
       abortController.value = null
       message.error(e)
@@ -814,6 +844,7 @@ const render = (t, images = []) => {
     real.className = 'md-img'
     real.src = resolveImg(u)
     real.alt = '文档图片'
+    real.onerror = onImgError
     real.dataset.seq = n
     wrap.appendChild(real)
     img.replaceWith(wrap)
@@ -1013,6 +1044,8 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .fb-row { margin-top: 10px; display: flex; gap: 4px; opacity: .55; transition: opacity .2s; }
 .fb-row:hover { opacity: 1; }
 .fb-row :deep(.fb-active) { color: #1677ff; font-weight: 600; }
+/* 流式中断重试 */
+.retry-row { margin-top: 10px; }
 
 /* 图片灯箱（z-index 须高于 antd modal 默认 1000，避免被引用/反馈弹窗盖住） */
 .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.78); display: flex;

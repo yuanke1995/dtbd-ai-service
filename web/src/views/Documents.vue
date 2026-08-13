@@ -76,7 +76,7 @@
       <div style="white-space:pre-wrap;font-size:13px;line-height:1.7">{{ kbDetail?.content }}</div>
       <div v-if="kbDetail?.images?.length" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">
         <img v-for="(u, ui) in kbDetail.images" :key="ui" :src="resolveImg(u)"
-             style="width:120px;border-radius:6px;border:1px solid #eee" :alt="'知识块图片' + (ui + 1)" />
+             style="width:120px;border-radius:6px;border:1px solid #eee" :alt="'知识块图片' + (ui + 1)" @error="onImgError" />
       </div>
     </a-modal>
   </a-card>
@@ -91,6 +91,11 @@ import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocum
 
 // 知识块预览：图片 URL 兼容（/ai/ 前缀走 /proxy）
 const resolveImg = u => u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
+
+// 图片加载兜底：加载失败替换为灰底占位图（签名过期/文件缺失等场景避免裂图）
+const FALLBACK_IMG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120"><rect width="100%" height="100%" fill="#f5f5f5"/><text x="50%" y="50%" fill="#999" font-size="14" text-anchor="middle" dominant-baseline="middle">图片加载失败</text></svg>')
+const onImgError = e => { e.target.onerror = null; e.target.src = FALLBACK_IMG }
 
 // 知识块预览状态
 const kbVisible = ref(false)

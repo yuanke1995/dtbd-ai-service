@@ -30,7 +30,7 @@ async function request(path, { method = 'GET', body, timeout = 30000 } = {}) {
     let data = null
     try { data = await res.json() } catch (e) { /* 非 JSON 响应 */ }
     if (!res.ok) {
-      if (res.status === 401) throw new Error('未授权访问')
+      if (res.status === 401) window.dispatchEvent(new CustomEvent('app:unauthorized'))
       throw new Error(data?.msg || `请求失败(${res.status})`)
     }
     if (data && data.success === false) throw new Error(data.msg || '请求失败')
@@ -62,6 +62,7 @@ function upload(path, formData, onProgress) {
         if (data && data.success === false) reject(new Error(data.msg || '上传失败'))
         else resolve(data)
       } else {
+        if (xhr.status === 401) window.dispatchEvent(new CustomEvent('app:unauthorized'))
         reject(new Error(data?.msg || `上传失败(${xhr.status})`))
       }
     }
@@ -83,6 +84,7 @@ export function sendQuestion(sessionId, question, images = [], { onToken, onImag
     signal
   }).then(res => {
     if (!res.ok) {
+      if (res.status === 401) window.dispatchEvent(new CustomEvent('app:unauthorized'))
       res.json().then(d => onError(d?.msg || '请求失败: ' + res.status)).catch(() => onError('请求失败: ' + res.status))
       return
     }
