@@ -276,8 +276,13 @@ public class RagService {
                         }
                     })
                     .doOnError(error -> {
-                        log.error("Stream error: {}", error.getMessage());
-                        sendSseEvent(emitter, "error", "AI 回复失败，请稍后重试", sessionId);
+                        Throwable root = error;
+                        while (root.getCause() != null) root = root.getCause();
+                        log.error("Stream error: {} -> {}", error.getClass().getSimpleName(), root.toString());
+                        String msg = (root instanceof java.net.ConnectException)
+                                ? "无法连接 AI 服务，请检查网络或 API 地址"
+                                : "AI 回复失败，请稍后重试";
+                        sendSseEvent(emitter, "error", msg, sessionId);
                         completeEmitter(emitter);
                     })
                     .doOnComplete(() -> {
