@@ -31,6 +31,7 @@ public class ConfigService {
     private static final Map<String, String> EDITABLE = Map.of(
             "chat.model", "智能问答模型名",
             "chat.temperature", "回答温度(0~2)",
+            "chat.systemPrompt", "AI助手系统提示词（角色与回答风格）",
             "vision.model", "视觉识别模型名",
             "vision.prompt", "视觉识别提示词");
 
@@ -48,11 +49,9 @@ public class ConfigService {
 
     @jakarta.annotation.PostConstruct
     public void init() {
+        // 缺失的默认项自动补入（存量升级场景：新增 key 自动注入，不覆盖已有配置）
+        ensureDefaults();
         List<AiConfig> all = configMapper.selectList(new LambdaQueryWrapper<AiConfig>());
-        if (all.isEmpty()) {
-            seedDefaults();
-            all = configMapper.selectList(new LambdaQueryWrapper<AiConfig>());
-        }
         Map<String, String> map = new HashMap<>();
         for (AiConfig c : all) {
             map.put(c.getConfigKey(), c.getConfigValue());
@@ -61,16 +60,19 @@ public class ConfigService {
         log.info("模型配置加载完成，共 {} 项", map.size());
     }
 
-    /** 表空时用 yml/env 默认值灌入 */
-    private void seedDefaults() {
-        Map<String, String> defaults = defaults();
-        for (Map.Entry<String, String> e : defaults.entrySet()) {
+    /** 遍历 defaults()，DB 中缺失的 key 自动灌入默认值（单条失败不影响其余） */
+    private void ensureDefaults() {
+        for (Map.Entry<String, String> e : defaults().entrySet()) {
             try {
-                AiConfig c = new AiConfig();
-                c.setConfigKey(e.getKey());
-                c.setConfigValue(e.getValue());
-                c.setRemark(EDITABLE.getOrDefault(e.getKey(), "只读配置"));
-                configMapper.insert(c);
+                Long cnt = configMapper.selectCount(new LambdaQueryWrapper<AiConfig>()
+                        .eq(AiConfig::getConfigKey, e.getKey()));
+                if (cnt == null || cnt == 0) {
+                    AiConfig c = new AiConfig();
+                    c.setConfigKey(e.getKey());
+                    c.setConfigValue(e.getValue());
+                    c.setRemark(EDITABLE.getOrDefault(e.getKey(), "只读配置"));
+                    configMapper.insert(c);
+                }
             } catch (Exception ex) {
                 log.warn("配置默认值灌入失败: {} error={}", e.getKey(), ex.getMessage());
             }
@@ -82,6 +84,7 @@ public class ConfigService {
         Map<String, String> d = new LinkedHashMap<>();
         d.put("chat.model", env("spring.ai.openai.chat.options.model", "qwen3.7-flash-2026-07-15"));
         d.put("chat.temperature", env("spring.ai.openai.chat.options.temperature", "0.3"));
+        d.put("chat.systemPrompt", properties.getSystemPrompt());
         d.put("chat.baseUrl", env("spring.ai.openai.base-url", ""));
         d.put("chat.apiKey", env("spring.ai.openai.api-key", ""));
         d.put("vision.model", properties.getVision().getModel());

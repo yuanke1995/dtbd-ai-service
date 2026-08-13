@@ -12,6 +12,10 @@
           <a-form-item label="温度">
             <a-input-number v-model:value="form.chat.temperature" :min="0" :max="2" :step="0.1" style="width:200px" />
           </a-form-item>
+          <a-form-item label="System Prompt">
+            <a-textarea v-model:value="form.chat.systemPrompt" :rows="4"
+                        placeholder="AI 助手的角色与回答风格（引用/图片/追问规则由系统固定，不可修改）" />
+          </a-form-item>
           <a-form-item label="Base URL">
             <a-input :value="ro.chat.baseUrl" disabled />
           </a-form-item>
@@ -65,7 +69,7 @@ import { getConfig, saveConfig } from '../api'
 
 const loading = ref(false)
 const saving = ref(false)
-const form = ref({ chat: { model: '', temperature: 0.3 }, vision: { model: '', prompt: '' } })
+const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '' }, vision: { model: '', prompt: '' } })
 const ro = ref({ chat: {}, vision: {}, embedding: {} })
 
 onMounted(async () => {
@@ -76,6 +80,7 @@ onMounted(async () => {
       const d = r.data
       form.value.chat.model = d.chat?.model?.value || ''
       form.value.chat.temperature = Number(d.chat?.temperature?.value ?? 0.3)
+      form.value.chat.systemPrompt = d.chat?.systemPrompt?.value || ''
       form.value.vision.model = d.vision?.model?.value || ''
       form.value.vision.prompt = d.vision?.prompt?.value || ''
       ro.value.chat = { baseUrl: d.chat?.baseUrl?.value || '', apiKey: d.chat?.apiKey?.value || '' }
@@ -90,7 +95,8 @@ const save = async () => {
   saving.value = true
   try {
     const r = await saveConfig({
-      chat: { model: form.value.chat.model?.trim(), temperature: String(form.value.chat.temperature) },
+      chat: { model: form.value.chat.model?.trim(), temperature: String(form.value.chat.temperature),
+              systemPrompt: form.value.chat.systemPrompt?.trim() },
       vision: { model: form.value.vision.model?.trim(), prompt: form.value.vision.prompt?.trim() }
     })
     if (r.success) message.success('配置已保存并生效')

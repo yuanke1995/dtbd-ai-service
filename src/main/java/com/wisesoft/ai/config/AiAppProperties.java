@@ -22,6 +22,10 @@ public class AiAppProperties {
 
     private QueryRewrite queryRewrite = new QueryRewrite();
 
+    /** 主回答 System Prompt 角色段（DB 可编辑覆盖，保存即生效；此处为兜底默认值） */
+    private String systemPrompt = "你是\"小报\"，一个基于操作手册知识库回答系统使用问题的AI助手。"
+            + "回答应准确、简洁，优先依据参考资料，不要编造不存在的内容。";
+
     /** 内部信任 token（dtbd-core 代理调用时携带；必须通过环境变量配置，无默认值） */
     private String trustedToken;
 
