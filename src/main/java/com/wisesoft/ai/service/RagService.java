@@ -12,6 +12,8 @@ import reactor.core.Disposable;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -50,6 +52,18 @@ public class RagService {
     private final UserImageService userImageService;
     private final ConfigService configService;
 
+    /** M1：查询改写专用线程池（隔离超时任务，避免占用公共池/无限堆积） */
+    private final ExecutorService rewriteExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "rewrite");
+        t.setDaemon(true);
+        return t;
+    });
+
+    @jakarta.annotation.PreDestroy
+    void shutdownRewriteExecutor() {
+        rewriteExecutor.shutdownNow();
+    }
+
     public RagService(ChatClient.Builder chatClientBuilder,
                       SessionService sessionService,
                       AiAppProperties properties,
@@ -84,9 +98,12 @@ public class RagService {
                     .map(i -> "- " + (i.desc().isBlank() ? "（图片内容无法识别）" : i.desc()))
                     .collect(Collectors.joining("\n"));
 
-            // 0. 查询改写（支持多轮历史上下文；失败静默降级为原始问题）
-            List<Map<String, Object>> recentHistory = sessionService.getRecentHistory(sessionId, properties.getQueryRewrite().getHistoryRounds());
-            String retrievalQuery = rewriteQuery(question, recentHistory);
+            // 0. 查询改写（支持多轮历史上下文；失败静默降级为原始问题；M2：关闭时跳过历史查询）
+            String retrievalQuery = question;
+            if (properties.getQueryRewrite().isEnabled()) {
+                List<Map<String, Object>> recentHistory = sessionService.getRecentHistory(sessionId, properties.getQueryRewrite().getHistoryRounds());
+                retrievalQuery = rewriteQuery(question, recentHistory);
+            }
             // 图片描述参与检索：识别界面时描述含组件名，能显著提升召回
             if (!userImgs.isEmpty()) {
                 String descJoin = userImgs.stream().map(UserImageService.UserImage::desc)
@@ -425,7 +442,7 @@ public class RagService {
                                     .temperature(configService.getDouble("chat.temperature"))
                                     .build())
                             .call()
-                            .content())
+                            .content(), rewriteExecutor)
                     .get(properties.getQueryRewrite().getTimeoutMillis(), TimeUnit.MILLISECONDS);
             if (rewritten == null || rewritten.isBlank()) {
                 return question;
@@ -440,17 +457,23 @@ public class RagService {
     }
 
     /**
-     * 将对话历史格式化为 user/assistant 文本，用于多轮改写 prompt
+     * 将对话历史格式化为 user/assistant 文本，用于多轮改写 prompt（M5：单条截断 200 字、总长 1500 字）
      */
     private String formatHistory(List<Map<String, Object>> history) {
         StringBuilder sb = new StringBuilder();
         for (Map<String, Object> msg : history) {
             String role = String.valueOf(msg.getOrDefault("role", ""));
             String content = String.valueOf(msg.getOrDefault("content", ""));
+            if (content.length() > 200) {
+                content = content.substring(0, 200) + "…";
+            }
             if (role.equals("user")) {
                 sb.append("用户：").append(content).append("\n");
             } else if (role.equals("assistant")) {
                 sb.append("助手：").append(content).append("\n");
+            }
+            if (sb.length() > 1500) {
+                break;
             }
         }
         return sb.toString();

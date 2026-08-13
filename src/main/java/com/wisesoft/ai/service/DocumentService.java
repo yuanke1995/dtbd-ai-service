@@ -110,6 +110,31 @@ public class DocumentService {
     }
 
     /**
+     * 单知识块向量化并入库（供手动新增知识块复用；embedding 失败降级返回 false，不阻断入库）
+     * 成功后回写 vector_id = knowledgeId（与文档解析链路一致）
+     */
+    public boolean embedAndStore(AiKnowledge k, String content) {
+        try {
+            Map<String, Object> metadata = new HashMap<>();
+            if (k.getDocId() != null) {
+                metadata.put("docId", k.getDocId());
+            }
+            metadata.put("title", k.getTitle() == null ? "" : k.getTitle());
+            metadata.put("knowledgeId", k.getId());
+            if (k.getImages() != null) {
+                metadata.put("images", k.getImages());
+            }
+            vectorStore.add(List.of(new Document(k.getId(), content, metadata)));
+            k.setVectorId(k.getId());
+            knowledgeMapper.updateById(k);
+            return true;
+        } catch (Exception e) {
+            log.warn("知识块向量化失败 id={}: {}", k.getId(), e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * 异步解析核心：解析 → MySQL 元数据 + 向量 → 状态置 0；失败置 3 + 原因 + 补偿清理
      */
     private void processUpload(String docId, String fileName, Path source, DocumentParser parser) {

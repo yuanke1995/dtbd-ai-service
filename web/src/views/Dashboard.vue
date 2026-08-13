@@ -115,8 +115,9 @@ const submitAdd = async () => {
   try {
     const r = await createKnowledge(f.title, f.content.trim(), f.docId.trim() || null)
     if (r.success) {
-      message.success('知识块已创建，关键词检索可命中')
+      message.success('知识块已创建（含向量召回）')
       addVisible.value = false
+      loadUnmatched()  // M4：入库后刷新缺口列表
     } else {
       message.error(r.msg || '创建失败')
     }

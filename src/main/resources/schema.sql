@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS `c_ai_message` (
 -- ALTER TABLE `c_ai_message` ADD COLUMN `sources` TEXT DEFAULT NULL COMMENT '引用来源 (JSON数组字符串)' AFTER `images`;
 -- 2026-08-11: 文档表新增解析失败原因列
 -- ALTER TABLE `c_ai_document` ADD COLUMN `fail_reason` VARCHAR(500) DEFAULT NULL COMMENT '解析失败原因(status=3)' AFTER `status`;
+-- 2026-08-13: 存量库需手动执行以下 ALTER（问答日志新增改写问题列）
+-- ALTER TABLE `c_ai_qa_log` ADD COLUMN `rewritten_query` TEXT DEFAULT NULL COMMENT '改写后的检索用问题' AFTER `question`;
 
 -- ============================================
 -- 2026-08-11: 问答数据闭环（日志 + 反馈）

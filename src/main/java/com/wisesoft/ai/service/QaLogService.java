@@ -139,6 +139,7 @@ public class QaLogService {
         try {
             List<AiQaLog> logs = qaLogMapper.selectList(
                     new LambdaQueryWrapper<AiQaLog>()
+                            .ge(AiQaLog::getCreatedAt, LocalDateTime.now().minusDays(30))
                             .orderByDesc(AiQaLog::getCreatedAt)
                             .last("LIMIT 5000"));
             // 无命中：hitDocIds 为空
@@ -161,7 +162,7 @@ public class QaLogService {
                 result.add(item);
             }
             result.sort((a, b) -> Integer.compare((int) b.get("count"), (int) a.get("count")));
-            if (result.size() > 50) result = result.subList(0, 50);
+            if (result.size() > 50) result = new ArrayList<>(result.subList(0, 50));
         } catch (Exception e) {
             log.warn("查询无命中问题失败: {}", e.getMessage());
         }
