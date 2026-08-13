@@ -82,8 +82,9 @@
                  :keyboard="!previewUrl" :mask-closable="!previewUrl">
           <a-spin v-if="sourceLoading" style="display:block;margin:40px auto" />
           <template v-else>
-            <!-- 知识块全文（溯源；内嵌图片点击可灯箱放大并左右切换） -->
-            <div class="src-content" v-html="render(prepKnowledgeContent(sourceContent || sourceSnippet, sourceImages), sourceImages)"></div>
+            <!-- 知识块全文（溯源；内嵌图片点击可灯箱放大并左右切换；代码块可复制） -->
+            <div class="md src-content" @click="openPreview"
+                 v-html="render(prepKnowledgeContent(sourceContent || sourceSnippet, sourceImages), sourceImages)"></div>
           </template>
         </a-modal>
 
@@ -183,9 +184,56 @@ const tips = ['系统有哪些功能？', '如何创建一个新表单？', '字
 // 文档图片访问：data URL（用户上传预览）原样返回；http 原样；其余走 /proxy
 const resolveImg = u => u.startsWith('data:') ? u : u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
 
-// 点击回答内容：引用角标 [N] → 来源详情；图片 → 灯箱预览（事件委托）
+// 复制图标 SVG（antd CopyOutlined / CheckOutlined 路径，render 内联生成无需 vRender 组件挂载）
+const COPY_SVG = '<span class="anticon"><svg viewBox="64 64 896 896" width="1em" height="1em" fill="currentColor"><path d="M832 64H296c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496v688c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8V96c0-17.7-14.3-32-32-32zM704 192H192c-17.7 0-32 14.3-32 32v530.7c0 8.5 3.4 16.6 9.4 22.6l173.3 173.3c12.9 12.9 30.2 20 48.4 20H704c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32zM384 824l-128-128h128v128z"/></svg></span>'
+const CHECK_SVG = '<span class="anticon"><svg viewBox="64 64 896 896" width="1em" height="1em" fill="currentColor"><path d="M912 190h-69.9c-9.8 0-19.1 4.5-25.1 12.2L404.7 724.5 207 474c-6.1-7.7-15.3-12.2-25.1-12.2H112c-6.7 0-12.7 4.1-15.2 10.3-2.4 6.3-1.1 13.4 3.6 18.3l235.3 258.5c12.5 13.7 32.5 14.9 46.5 2.7l446.5-424.3c6.4-6.1 9-15.1 5.7-23.4-2.9-7.2-9.8-12.1-17.4-12.1z"/></svg></span>'
+
+// 代码块复制（事件委托入口）：clipboard API 优先（localhost 安全上下文），execCommand 兜底
+const copyCode = btn => {
+  const pre = btn.closest('pre')
+  if (!pre) return
+  const txt = (pre.querySelector('code')?.textContent ?? pre.innerText).trim()
+  if (!txt) return
+  const ok = () => {
+    btn.classList.add('copied')
+    btn.title = '已复制'
+    btn.innerHTML = CHECK_SVG
+    setTimeout(() => { btn.classList.remove('copied'); btn.title = '复制'; btn.innerHTML = COPY_SVG }, 1600)
+  }
+  const fallbackCopy = () => {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = txt
+      ta.setAttribute('readonly', '')
+      ta.style.position = 'absolute'
+      ta.style.left = '-9999px'
+      ta.style.top = '0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      ta.setSelectionRange(0, txt.length)
+      const flag = document.execCommand('copy')
+      ta.remove()
+      if (flag) ok()
+      else message.error('复制失败，请手动复制')
+    } catch (err) { message.error('复制失败，请手动复制') }
+  }
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(txt).then(ok).catch(fallbackCopy)
+  } else {
+    fallbackCopy()
+  }
+}
+
+// 点击回答内容：复制按钮 / 引用角标 [N] → 来源详情；图片 → 灯箱预览（事件委托）
 const openPreview = e => {
   const t = e.target
+  // 复制按钮：target 可能是按钮内 SVG/span，需 closest 向上查找
+  const copyBtn = t && t.closest ? t.closest('.code-copy') : null
+  if (copyBtn) {
+    copyCode(copyBtn)
+    return
+  }
   if (t && t.classList && t.classList.contains('ref-sup')) {
     const mdEl = t.closest('.md')
     const msgIdx = mdEl ? Number(mdEl.dataset.msgIndex) : -1
@@ -615,14 +663,17 @@ const render = (t, images = []) => {
   if (!t) return ''
   // ① 预处理：图片标记 [图片N：描述]/[图片N] → markdown 图片占位（保留位置/顺序）
   const pre = t.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？\s]*/g, '![img](__AI_IMG_$1__)')
-  // ② 渲染 + 消毒
-  let html = DOMPurify.sanitize(md.render(pre))
+  // ② 渲染 + 消毒（放行内部图片占位前缀 __AI_IMG_，否则 DOMPurify 会剥掉其 src 导致图片丢失）
+  let html = DOMPurify.sanitize(md.render(pre), {
+    ALLOWED_URI_REGEXP: /^(?:__AI_IMG_|https?:|data:|mailto:|tel:)/i
+  })
   // ③ DOM 后处理（sanitize 之后新建元素不受白名单限制）
   const box = document.createElement('div')
   box.innerHTML = html
   // 图片：占位 → 真实 src + 居中 + data-seq；图片缺失保留原文 [图片N]
   box.querySelectorAll('img[src^="__AI_IMG_"]').forEach(img => {
-    const n = (img.getAttribute('src') || '').replace('__AI_IMG_', '')
+    const m = (img.getAttribute('src') || '').match(/^__AI_IMG_(\d+)__$/)
+    const n = m ? m[1] : ''
     const u = images[Number(n) - 1]
     if (!u) { img.replaceWith(document.createTextNode(`[图片${n}]`)); return }
     const wrap = document.createElement('div')
@@ -658,6 +709,15 @@ const render = (t, images = []) => {
     })
     node.parentNode.replaceChild(frag, node)
   }
+  // 代码块复制按钮：只生成 HTML 结构（事件统一委托到 openPreview，避免 innerHTML 序列化丢失事件）
+  box.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'code-copy'
+    btn.title = '复制'
+    btn.innerHTML = COPY_SVG
+    pre.appendChild(btn)
+  })
   return box.innerHTML
 }
 
@@ -766,7 +826,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .md :deep(h2), .md :deep(h3), .md :deep(h4), .md :deep(h5) { margin: 12px 0 6px; font-weight: 600; }
 .md :deep(h2) { font-size: 17px; } .md :deep(h3) { font-size: 15px; } .md :deep(h4) { font-size: 14px; }
 .md :deep(code) { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
-.md :deep(pre) { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 8px 0; }
+.md :deep(pre) { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 8px 0; position: relative; }
 .md :deep(pre code) { background: none; padding: 0; display: block; white-space: pre; }
 .md :deep(table) { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px; }
 .md :deep(th), .md :deep(td) { border: 1px solid #e0e0e0; padding: 6px 10px; text-align: left; word-break: break-word; }
@@ -777,6 +837,19 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .md :deep(li.ul-item.d1) { margin-left: 16px; list-style-type: circle; }
 .md :deep(li.ul-item.d2) { margin-left: 32px; list-style-type: square; }
 .md :deep(hr) { border: none; border-top: 1px solid #e8e8e8; margin: 10px 0; }
+/* 代码块复制按钮（antd Tooltip 渲染页面层；render 动态创建，scoped 需 :deep） */
+.md :deep(.code-copy) {
+  position: absolute; top: 8px; right: 8px; z-index: 1;
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  color: #555; background: rgba(255,255,255,.85);
+  border: 1px solid #e0e0e0; border-radius: 4px;
+  cursor: pointer; opacity: 0; transition: opacity .15s;
+}
+.md :deep(pre:hover .code-copy) { opacity: 1; }
+.md :deep(.code-copy:hover) { color: #1677ff; border-color: #1677ff; }
+.md :deep(.code-copy.copied) { color: #52c41a; border-color: #52c41a; }
 .md :deep(.ref-sup:hover) { text-decoration: underline; }
 /* 来源引用 chips */
 .src-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
