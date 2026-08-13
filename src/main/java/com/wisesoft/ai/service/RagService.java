@@ -84,8 +84,9 @@ public class RagService {
                     .map(i -> "- " + (i.desc().isBlank() ? "（图片内容无法识别）" : i.desc()))
                     .collect(Collectors.joining("\n"));
 
-            // 0. 查询改写（优化检索精准度；默认关闭，失败静默降级为原始问题）
-            String retrievalQuery = rewriteQuery(question);
+            // 0. 查询改写（支持多轮历史上下文；失败静默降级为原始问题）
+            List<Map<String, Object>> recentHistory = sessionService.getRecentHistory(sessionId, properties.getQueryRewrite().getHistoryRounds());
+            String retrievalQuery = rewriteQuery(question, recentHistory);
             // 图片描述参与检索：识别界面时描述含组件名，能显著提升召回
             if (!userImgs.isEmpty()) {
                 String descJoin = userImgs.stream().map(UserImageService.UserImage::desc)
@@ -94,6 +95,9 @@ public class RagService {
                     retrievalQuery = question + " " + descJoin;
                 }
             }
+
+            // 日志记录用（final 副本，lambda 中引用需要 effectively final）
+            final String queryForLog = retrievalQuery;
 
             // 1. 混合检索（向量 + 关键词）→ 重排
             List<HybridRetrievalService.Hit> hits = hybridRetrievalService.search(retrievalQuery);
@@ -277,7 +281,8 @@ public class RagService {
                         // 异步落问答日志（不阻塞 SSE 完成）
                         List<String> hitDocIds = sources.stream().map(s -> String.valueOf(s.get("docId"))).toList();
                         qaLogService.logAsync(sessionId, question, answer, hitDocIds,
-                                !sources.isEmpty(), System.currentTimeMillis() - startTime);
+                                !sources.isEmpty(), System.currentTimeMillis() - startTime,
+                                queryForLog);
 
                         // done 事件携带引用来源/相关推荐/消息ID（反馈关联）
                         Map<String, Object> donePayload = new LinkedHashMap<>();
@@ -392,16 +397,28 @@ public class RagService {
     }
 
     /**
-     * LLM 改写用户问题，优化检索精准度。失败/超时/空结果时静默降级为原始问题。
+     * LLM 改写用户问题，优化检索精准度。支持多轮对话上下文（追问场景）。
+     * 失败/超时/空结果时静默降级为原始问题。
      */
-    private String rewriteQuery(String question) {
+    private String rewriteQuery(String question, List<Map<String, Object>> history) {
         if (!properties.getQueryRewrite().isEnabled()) {
             return question;
         }
         try {
+            // 构建 system prompt：根据是否有足够历史选择单轮或多轮改写
+            String systemPrompt;
+            boolean hasHistory = history != null && history.size() >= 2;
+            if (hasHistory) {
+                String historyText = formatHistory(history);
+                String template = properties.getQueryRewrite().getPromptMultiTurn();
+                systemPrompt = template.replace("%s", historyText);
+            } else {
+                systemPrompt = properties.getQueryRewrite().getPrompt();
+            }
+
             String rewritten = CompletableFuture
                     .supplyAsync(() -> chatClient.prompt()
-                            .system(properties.getQueryRewrite().getPrompt())
+                            .system(systemPrompt)
                             .user(question)
                             .options(OpenAiChatOptions.builder()
                                     .model(configService.get("chat.model"))
@@ -414,11 +431,28 @@ public class RagService {
                 return question;
             }
             String trimmed = rewritten.trim();
-            log.info("[rewrite] {} -> {}", question, trimmed);
+            log.info("[rewrite] history={} {} -> {}", hasHistory, question, trimmed);
             return trimmed;
         } catch (Exception e) {
             log.debug("[rewrite] 改写失败，降级为原始问题: {}", e.getMessage());
             return question;
         }
+    }
+
+    /**
+     * 将对话历史格式化为 user/assistant 文本，用于多轮改写 prompt
+     */
+    private String formatHistory(List<Map<String, Object>> history) {
+        StringBuilder sb = new StringBuilder();
+        for (Map<String, Object> msg : history) {
+            String role = String.valueOf(msg.getOrDefault("role", ""));
+            String content = String.valueOf(msg.getOrDefault("content", ""));
+            if (role.equals("user")) {
+                sb.append("用户：").append(content).append("\n");
+            } else if (role.equals("assistant")) {
+                sb.append("助手：").append(content).append("\n");
+            }
+        }
+        return sb.toString();
     }
 }

@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS `c_ai_qa_log` (
     `id`              VARCHAR(50)  NOT NULL COMMENT '主键ID',
     `session_id`      VARCHAR(50)  DEFAULT NULL COMMENT '会话ID',
     `question`        TEXT         COMMENT '用户问题',
+    `rewritten_query` TEXT         DEFAULT NULL COMMENT '改写后的检索用问题',
     `answer_summary`  VARCHAR(1000) DEFAULT NULL COMMENT '回答摘要(前500字)',
     `hit_doc_ids`     VARCHAR(1000) DEFAULT NULL COMMENT '命中文档ID列表(逗号分隔)',
     `has_citation`    INT          DEFAULT 0 COMMENT '是否有引用标注',

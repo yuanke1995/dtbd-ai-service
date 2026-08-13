@@ -26,6 +26,9 @@ public class AiQaLog {
     /** 回答摘要（前 500 字） */
     private String answerSummary;
 
+    /** 改写后的检索用问题 */
+    private String rewrittenQuery;
+
     /** 命中文档 ID 列表（逗号分隔） */
     private String hitDocIds;
 

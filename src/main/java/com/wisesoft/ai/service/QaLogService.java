@@ -9,6 +9,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
@@ -33,7 +34,8 @@ public class QaLogService {
      * 异步落问答日志（不阻塞主流程）
      */
     public void logAsync(String sessionId, String question, String answer,
-                         List<String> hitDocIds, boolean hasCitation, long elapsedMs) {
+                         List<String> hitDocIds, boolean hasCitation, long elapsedMs,
+                         String rewrittenQuery) {
         CompletableFuture.runAsync(() -> {
             try {
                 AiQaLog log = new AiQaLog();
@@ -42,6 +44,8 @@ public class QaLogService {
                 log.setAnswerSummary(summary(answer));
                 log.setHitDocIds(hitDocIds == null || hitDocIds.isEmpty()
                         ? null : hitDocIds.stream().distinct().collect(Collectors.joining(",")));
+                log.setRewrittenQuery(rewrittenQuery == null || rewrittenQuery.equals(question)
+                        ? null : (rewrittenQuery.length() > 500 ? rewrittenQuery.substring(0, 500) : rewrittenQuery));
                 log.setHasCitation(hasCitation ? 1 : 0);
                 log.setElapsedMs((int) Math.min(elapsedMs, Integer.MAX_VALUE));
                 qaLogMapper.insert(log);
@@ -123,6 +127,43 @@ public class QaLogService {
                     "likeRate", feedbacks.isEmpty() ? 0 : Math.round(likes * 1000.0 / feedbacks.size()) / 10.0));
         } catch (Exception e) {
             log.warn("统计聚合失败: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    /**
+     * 获取无命中问题列表（按频次降序，含最近提问时间），供前端一键入库
+     */
+    public List<Map<String, Object>> listUnmatched() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        try {
+            List<AiQaLog> logs = qaLogMapper.selectList(
+                    new LambdaQueryWrapper<AiQaLog>()
+                            .orderByDesc(AiQaLog::getCreatedAt)
+                            .last("LIMIT 5000"));
+            // 无命中：hitDocIds 为空
+            Map<String, List<AiQaLog>> grouped = logs.stream()
+                    .filter(l -> (l.getHitDocIds() == null || l.getHitDocIds().isBlank())
+                            && l.getQuestion() != null && !l.getQuestion().isBlank())
+                    .collect(Collectors.groupingBy(AiQaLog::getQuestion));
+            for (var entry : grouped.entrySet()) {
+                List<AiQaLog> qLogs = entry.getValue();
+                String latestTime = qLogs.stream()
+                        .map(AiQaLog::getCreatedAt)
+                        .filter(Objects::nonNull)
+                        .max(LocalDateTime::compareTo)
+                        .map(Object::toString)
+                        .orElse("");
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("question", entry.getKey());
+                item.put("count", qLogs.size());
+                item.put("latestTime", latestTime);
+                result.add(item);
+            }
+            result.sort((a, b) -> Integer.compare((int) b.get("count"), (int) a.get("count")));
+            if (result.size() > 50) result = result.subList(0, 50);
+        } catch (Exception e) {
+            log.warn("查询无命中问题失败: {}", e.getMessage());
         }
         return result;
     }

@@ -97,10 +97,18 @@ public class AiAppProperties {
     @Data
     public static class QueryRewrite {
         /** 是否启用查询改写 */
-        private boolean enabled = false;
+        private boolean enabled = true;
         /** 改写超时时间(ms) */
         private int timeoutMillis = 5000;
-        /** 改写 prompt */
-        private String prompt = "请将用户问题改写为一个更精准的检索关键词或短语。只需输出改写后的文本，不要解释。";
+        /** 改写 prompt（单轮对话） */
+        private String prompt = "请将用户问题改写为一个更精准的检索关键词或短语，用于检索操作手册知识库。"
+                + "要求：1) 只输出改写后的文本，不要解释；2) 保留核心动作和对象，去除疑问语气；"
+                + "3) 如果是简单问题（如'有哪些功能'）可原样返回。";
+        /** 多轮对话参与改写的最近轮数 */
+        private int historyRounds = 2;
+        /** 改写 prompt（多轮对话，其中 %s 会被替换为对话历史） */
+        private String promptMultiTurn = "以下是一段对话历史。请根据上下文，将最后一条用户消息改写为一个独立、精准的检索关键词或短语，用于检索操作手册知识库。"
+                + "要求：1) 只输出改写后的文本，不要解释；2) 如果最后一条消息是追问（如'那删除呢'），结合历史补全为完整问题；"
+                + "3) 保留核心动作和对象。\n\n对话历史：\n%s";
     }
 }

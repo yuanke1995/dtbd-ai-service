@@ -199,3 +199,13 @@ export const getConfig = () => request('/config')
 
 /** 模型配置：保存可编辑项 {"chat":{...},"vision":{...}} */
 export const saveConfig = payload => request('/config', { method: 'PUT', body: JSON.stringify(payload) })
+
+/** 获取无命中问题列表（按频次降序） */
+export const getUnmatchedQuestions = () => request('/knowledge/unmatched')
+
+/** 新增知识块（手动补充知识库缺口） */
+export const createKnowledge = (title, content, docId) =>
+  request('/knowledge', {
+    method: 'POST',
+    body: JSON.stringify({ title, content, docId: docId || null })
+  })

@@ -109,7 +109,8 @@ public class HybridRetrievalService {
             return CompletableFuture.supplyAsync(() -> {
                 // WHERE doc_id IN (生效文档) AND ((content LIKE ? OR title LIKE ?) OR ...)
                 QueryWrapper<AiKnowledge> wrapper = new QueryWrapper<AiKnowledge>()
-                        .inSql("doc_id", "SELECT id FROM c_ai_document WHERE status=0 AND deleted=0");
+                        .and(w -> w.inSql("doc_id", "SELECT id FROM c_ai_document WHERE status=0 AND deleted=0")
+                                .or().isNull("doc_id"));
                 wrapper.and(w -> {
                     for (int i = 0; i < terms.size(); i++) {
                         if (i > 0) w.or();

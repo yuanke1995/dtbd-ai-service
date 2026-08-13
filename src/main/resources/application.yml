@@ -121,7 +121,7 @@ ai-app:
     think: ${AI_VISION_THINK:false}
   # 查询改写（默认关闭，开启后会对用户提问做 LLM 优化后再检索）
   query-rewrite:
-    enabled: ${AI_QUERY_REWRITE_ENABLED:false}
+    enabled: ${AI_QUERY_REWRITE_ENABLED:true}
     timeout-millis: 5000
   # 内部鉴权 token（与 dtbd-core 一致；必须通过环境变量 AI_TRUSTED_TOKEN 提供，缺失启动即失败）
   trusted-token: ${AI_TRUSTED_TOKEN}
