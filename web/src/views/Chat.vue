@@ -7,12 +7,16 @@
       :collapsed="sidebarCollapsed"
       :loading="sessionsLoading"
       :creating="creatingSession"
+      :width="sidebarWidth"
+      :dragging="sidebarDragging"
       @select="switchSession"
       @delete="handleDeleteSession"
       @clear="handleClearAll"
       @new="createNewSession"
       @toggle-collapse="toggleSidebar"
     />
+    <!-- 侧边栏拖拽手柄（左右伸缩） -->
+    <div class="sidebar-resizer" title="拖动调整宽度" @mousedown="onSidebarDrag" />
 
     <!-- 右侧聊天区域 -->
     <div class="chat">
@@ -216,7 +220,38 @@ const zoom = ref(1)
 const offset = ref({ x: 0, y: 0 })
 const dragState = ref(null)
 const abortController = ref(null)
-const sidebarCollapsed = ref(false)
+
+// 侧边栏宽度驱动：可拖拽伸缩，缩到阈值(<150px)自动切换为图标条（48px）
+const SIDEBAR_ICON_W = 48
+const SIDEBAR_ICON_THRESHOLD = 150
+const SIDEBAR_MAX = 420
+const sidebarWidth = ref(parseInt(localStorage.getItem('ai_sidebar_width')) || 260)
+const sidebarCollapsed = computed(() => sidebarWidth.value < SIDEBAR_ICON_THRESHOLD)
+function toggleSidebar() {
+  sidebarWidth.value = sidebarWidth.value < SIDEBAR_ICON_THRESHOLD ? 260 : SIDEBAR_ICON_W
+  localStorage.setItem('ai_sidebar_width', String(sidebarWidth.value))
+}
+// 拖拽右侧边缘调整宽度（拖拽中禁用宽度过渡动画，保证跟手；松开设 transition 平滑折叠）
+const sidebarDragging = ref(false)
+function onSidebarDrag(e) {
+  e.preventDefault()
+  sidebarDragging.value = true
+  const startX = e.clientX
+  const startW = sidebarWidth.value
+  const onMove = ev => {
+    const w = Math.max(SIDEBAR_ICON_W, Math.min(SIDEBAR_MAX, startW + (ev.clientX - startX)))
+    sidebarWidth.value = w
+  }
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+    sidebarDragging.value = false
+    localStorage.setItem('ai_sidebar_width', String(sidebarWidth.value))
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
 const tips = ['系统有哪些功能？', '如何创建一个新表单？', '字段验证怎么设置？', '什么是填报周期？']
 
 // 文档图片访问：data URL（用户上传预览）原样返回；http 原样；其余走 /proxy
@@ -413,18 +448,16 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 // 窄窗口（<640px）自动折叠侧边栏：保证浏览器窗口可以任意缩小，不出现横向溢出
 const handleWindowResize = () => {
-  if (window.innerWidth < 640 && !sidebarCollapsed.value) {
-    sidebarCollapsed.value = true
-    localStorage.setItem('ai_sidebar_collapsed', 'true')
+  if (window.innerWidth < 640 && sidebarWidth.value >= SIDEBAR_ICON_THRESHOLD) {
+    sidebarWidth.value = SIDEBAR_ICON_W
+    localStorage.setItem('ai_sidebar_width', String(sidebarWidth.value))
   }
 }
 window.addEventListener('resize', handleWindowResize)
 onUnmounted(() => window.removeEventListener('resize', handleWindowResize))
 
-// 初始化：恢复侧边栏状态 → 加载会话列表 → 选择最近会话或新建
+// 初始化：加载会话列表 → 选择最近会话或新建
 onMounted(async () => {
-  const saved = localStorage.getItem('ai_sidebar_collapsed')
-  if (saved === 'true') sidebarCollapsed.value = true
 
   await loadSessions()
   if (sessions.value.length > 0) {
@@ -537,12 +570,6 @@ async function handleClearAll() {
   } catch (e) {
     message.error('清空失败: ' + (e.message || '未知错误'))
   }
-}
-
-// 切换侧边栏折叠
-function toggleSidebar() {
-  sidebarCollapsed.value = !sidebarCollapsed.value
-  localStorage.setItem('ai_sidebar_collapsed', String(sidebarCollapsed.value))
 }
 
 // 用户上传图片：压缩为 data URL（最长边 1280，JPEG 0.85），最多 5 张
@@ -830,6 +857,17 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
   border-radius: 8px;
   overflow: hidden;
 }
+/* 侧边栏拖拽手柄 */
+.sidebar-resizer {
+  width: 5px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  transition: background .15s;
+  position: relative;
+  z-index: 2;
+}
+.sidebar-resizer:hover, .sidebar-resizer:active { background: #cfe3ff; }
 .chat {
   flex: 1;
   min-width: 0;
@@ -838,7 +876,6 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 }
 .chat-box {
   width: 100%;
-  max-width: 900px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -854,7 +891,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
+  padding: 24px 48px;   /* 左右留白：拉满宽度下消息不贴边 */
 }
 .welcome {
   text-align: center;
@@ -864,10 +901,10 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .welcome p { color: #888; margin-bottom: 24px; }
 .row { display: flex; gap: 12px; margin-bottom: 20px; }
 .row.user { flex-direction: row-reverse; }
-.bubble { max-width: 70%; padding: 12px 16px; border-radius: 12px; line-height: 1.6; }
+.bubble { max-width: min(720px, 70%); padding: 12px 16px; border-radius: 12px; line-height: 1.6; }
 .bubble.user { background: #1677ff; color: #fff; }
 .bubble.ai { background: #f5f5f5; color: #333; }
-.input { padding: 12px 24px 16px; border-top: 1px solid #f0f0f0; }
+.input { padding: 12px 48px 16px; border-top: 1px solid #f0f0f0; }
 .input-box { position: relative; }
 /* 待发送图片预览 */
 .pending-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }

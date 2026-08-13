@@ -1,12 +1,15 @@
 <template>
-  <div class="session-sidebar" :class="{ collapsed }">
+  <div class="session-sidebar" :class="{ collapsed, 'no-anim': dragging }"
+       :style="{ width: width + 'px', minWidth: width + 'px' }">
     <!-- 展开态：新建对话 + 会话列表 -->
     <div v-if="!collapsed" class="sidebar-inner">
       <!-- 头部：新建对话 + 清空 + 收起按钮 -->
       <div class="sidebar-header">
         <div class="header-row">
-          <a-button type="primary" block @click="$emit('new')" :disabled="loading || creating">
-            <plus-outlined /> 新建对话
+          <a-button type="primary" block @click="$emit('new')" :disabled="loading || creating"
+                    :style="width < 220 ? 'padding: 0 8px' : ''">
+            <plus-outlined />
+            <span v-if="width >= 220">新建对话</span>
           </a-button>
           <a-tooltip title="清空所有对话">
             <a-popconfirm title="确定清空所有对话？此操作不可恢复" ok-text="清空" cancel-text="取消"
@@ -90,7 +93,9 @@ defineProps({
   currentSessionId: { type: String, default: null },
   collapsed: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
-  creating: { type: Boolean, default: false }   // 新建对话进行中（防重复点击）
+  creating: { type: Boolean, default: false },   // 新建对话进行中（防重复点击）
+  width: { type: Number, default: 260 },         // 展开态宽度（可由外层拖拽调整）
+  dragging: { type: Boolean, default: false }    // 拖拽中（禁用宽度过渡动画）
 })
 
 defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear'])
@@ -112,23 +117,19 @@ const formatTime = (t) => {
 
 <style scoped>
 .session-sidebar {
-  width: 260px;
-  min-width: 260px;
   background: #fafafa;
   border-right: 1px solid #e8e8e8;
   display: flex;
   flex-direction: row;
-  transition: width 0.2s, min-width 0.2s;
   overflow: hidden;
   position: relative;
+  transition: width 0.18s ease, min-width 0.18s ease; /* 阈值折叠/展开时平滑过渡 */
 }
-.session-sidebar.collapsed {
-  width: 48px;
-  min-width: 48px;
-}
+.session-sidebar.no-anim { transition: none; }  /* 拖拽中禁用动画，保证跟手 */
+.session-sidebar.collapsed { /* 宽度由 inline style 控制（48px） */ }
 /* 折叠态小图标条 */
 .collapsed-bar {
-  width: 48px;
+  width: 100%;           /* 跟随容器宽度（用户拖到哪宽度就是哪），图标居中 */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -169,8 +170,8 @@ const formatTime = (t) => {
   top: 4px;
 }
 .sidebar-inner {
-  width: 260px;
-  min-width: 260px;
+  width: 100%;
+  min-width: 0;              /* 跟随外层拖拽宽度伸缩 */
   display: flex;
   flex-direction: column;
   height: 100%;
