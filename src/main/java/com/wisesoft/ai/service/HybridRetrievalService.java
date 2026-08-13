@@ -19,7 +19,8 @@ import java.util.stream.Collectors;
  * 混合检索：向量召回 + MySQL 关键词召回 并行执行 → 按 knowledgeId 合并去重 → 规则加权排序
  * - 向量：topK 放大（默认 15）+ 阈值放宽（0.3），提高召回率
  * - 关键词：词元 LIKE 匹配（自动排除已弃用文档），命中词元越多权重越高
- * - 融合分 = 0.6 * 向量相似度 + 0.4 * 关键词命中率 + 标题奖励
+ * - 融合分 = 向量权重 * 向量相似度 + 关键词权重 * 命中率 + 标题命中奖励
+ *   （权重来自 DB 配置 retrieval.*，设置页保存即生效；默认 0.6/0.4/0.1）
  * 解决"评分组件"等长尾词向量检索不到的问题
  *
  * @author yuanke
@@ -29,9 +30,6 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class HybridRetrievalService {
 
-    private static final double VECTOR_WEIGHT = 0.6;
-    private static final double KEYWORD_WEIGHT = 0.4;
-    private static final double TITLE_BONUS = 0.1;
     /** 关键词检索超时（ms） */
     private static final long KEYWORD_TIMEOUT_MS = 800;
     /** 关键词召回上限 */
@@ -41,6 +39,7 @@ public class HybridRetrievalService {
     private final AiKnowledgeMapper knowledgeMapper;
     private final AiAppProperties properties;
     private final KeywordExtractor keywordExtractor;
+    private final ConfigService configService;
 
     /**
      * 混合检索结果
@@ -53,6 +52,11 @@ public class HybridRetrievalService {
      * 混合检索：返回按融合分降序的结果（已过滤弃用文档）
      */
     public List<Hit> search(String query) {
+        // 权重动态读取（DB 配置，保存即生效；缺失时兜底 yml 默认值 0.6/0.4/0.1）
+        double vectorWeight = configService.getDouble("retrieval.vectorWeight");
+        double keywordWeight = configService.getDouble("retrieval.keywordWeight");
+        double titleBonus = configService.getDouble("retrieval.titleBonus");
+
         // 1. 向量召回（放大召回率）
         List<Document> vectorDocs = vectorSearch(query);
 
@@ -63,18 +67,18 @@ public class HybridRetrievalService {
         Map<String, Hit> merged = new LinkedHashMap<>();
         Set<String> kwHit = kwDocs.stream().map(AiKnowledge::getId).collect(Collectors.toSet());
 
-        // 向量命中：score = 0.6 * 向量分
+        // 向量命中：score = 向量权重 * 向量分
         for (Document doc : vectorDocs) {
             double vecScore = parseScore(doc.getScore());
-            double score = VECTOR_WEIGHT * vecScore;
+            double score = vectorWeight * vecScore;
             String kid = String.valueOf(doc.getId());
             merged.put(kid, buildHit(doc, kid, score));
         }
-        // 关键词命中：score = 0.6 * 0(无向量分) + 0.4 * 命中率 + 标题奖励
+        // 关键词命中：score = 关键词权重 * 命中率 + 标题奖励
         for (AiKnowledge k : kwDocs) {
             double hitRate = k.getHitTerms() / (double) Math.max(1, k.getTotalTerms());
-            double score = KEYWORD_WEIGHT * hitRate
-                    + (k.isTitleHit() ? TITLE_BONUS : 0);
+            double score = keywordWeight * hitRate
+                    + (k.isTitleHit() ? titleBonus : 0);
             // merge 时保留非空 docId（向量 metadata 可能被 M6 丢弃导致 docId 为空，关键词版是正确的）
             merged.merge(k.getId(), buildHit(k, score), (oldHit, newHit) ->
                     new Hit(oldHit.knowledgeId(),

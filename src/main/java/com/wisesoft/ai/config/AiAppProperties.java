@@ -43,6 +43,12 @@ public class AiAppProperties {
         private int topK = 5;
         /** 相似度阈值 */
         private double similarityThreshold = 0.5;
+        /** 混合检索：向量相似度权重（0~1） */
+        private double vectorWeight = 0.6;
+        /** 混合检索：关键词命中率权重（0~1） */
+        private double keywordWeight = 0.4;
+        /** 混合检索：标题命中额外奖励（0~1，加在融合分上） */
+        private double titleBonus = 0.1;
     }
 
     @Data

@@ -82,6 +82,10 @@ ai-app:
   retrieval:
     top-k: 5
     similarity-threshold: 0.5
+    # 混合检索融合权重（DB c_ai_config 可覆盖，设置页保存即生效）
+    vector-weight: 0.6
+    keyword-weight: 0.4
+    title-bonus: 0.1
   # 会话
   session:
     max-history: 10

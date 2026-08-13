@@ -188,6 +188,9 @@ ai-app:
   retrieval:
     top-k: 5                               # 上下文用命中块数（重排候选另算）
     similarity-threshold: 0.5
+    vector-weight: 0.6                     # 混合检索：向量权重（DB c_ai_config 可覆盖，设置页保存即生效）
+    keyword-weight: 0.4                    # 混合检索：关键词权重
+    title-bonus: 0.1                       # 混合检索：标题命中奖励
   session: { max-history: 10, expire-minutes: 30 }
   images:
     dir: ${AI_IMAGES_DIR:...}              # 数据根目录（必须绝对路径，Tomcat 下相对路径会漂移）

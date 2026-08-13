@@ -33,7 +33,10 @@ public class ConfigService {
             "chat.temperature", "回答温度(0~2)",
             "chat.systemPrompt", "AI助手系统提示词（角色与回答风格）",
             "vision.model", "视觉识别模型名",
-            "vision.prompt", "视觉识别提示词");
+            "vision.prompt", "视觉识别提示词",
+            "retrieval.vectorWeight", "混合检索：向量权重(0~1)",
+            "retrieval.keywordWeight", "混合检索：关键词权重(0~1)",
+            "retrieval.titleBonus", "混合检索：标题命中奖励(0~1)");
 
     private final AiConfigMapper configMapper;
     private final AiAppProperties properties;
@@ -92,6 +95,9 @@ public class ConfigService {
         d.put("vision.baseUrl", properties.getVision().getBaseUrl());
         d.put("vision.apiKey", properties.getVision().getApiKey());
         d.put("embedding.model", env("spring.ai.openai.embedding.options.model", ""));
+        d.put("retrieval.vectorWeight", String.valueOf(properties.getRetrieval().getVectorWeight()));
+        d.put("retrieval.keywordWeight", String.valueOf(properties.getRetrieval().getKeywordWeight()));
+        d.put("retrieval.titleBonus", String.valueOf(properties.getRetrieval().getTitleBonus()));
         return d;
     }
 
@@ -128,15 +134,27 @@ public class ConfigService {
                 }
             }
         }
-        // 校验
+        // 校验：仅当本次提交包含 chat.model 时才要求非空（避免只想改检索权重等其他项时被阻塞）
         String model = updates.get("chat.model");
-        if (model == null || model.isBlank()) {
+        if (updates.containsKey("chat.model") && (model == null || model.isBlank())) {
             throw new IllegalArgumentException("chat.model 不能为空");
         }
         String temp = updates.get("chat.temperature");
         if (temp != null && !temp.isBlank()) {
             double t = Double.parseDouble(temp);
             if (t < 0 || t > 2) throw new IllegalArgumentException("temperature 需在 0~2 之间");
+        }
+        // 检索权重校验：必须是 0~1 的数字（防非法值导致检索排序异常）
+        for (String wKey : new String[]{"retrieval.vectorWeight", "retrieval.keywordWeight", "retrieval.titleBonus"}) {
+            String w = updates.get(wKey);
+            if (w != null && !w.isBlank()) {
+                try {
+                    double v = Double.parseDouble(w);
+                    if (v < 0 || v > 1) throw new IllegalArgumentException(wKey + " 需在 0~1 之间");
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(wKey + " 必须是数字");
+                }
+            }
         }
 
         for (Map.Entry<String, String> kv : updates.entrySet()) {
@@ -163,7 +181,7 @@ public class ConfigService {
     /** 全量配置（供配置界面展示；apiKey 脱敏） */
     public Map<String, Object> snapshot() {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] groups = {"chat", "vision", "embedding"};
+        String[] groups = {"chat", "vision", "embedding", "retrieval"};
         for (String g : groups) {
             Map<String, Object> items = new LinkedHashMap<>();
             for (Map.Entry<String, String> d : defaults().entrySet()) {
