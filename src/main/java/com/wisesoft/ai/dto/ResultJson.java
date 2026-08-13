@@ -1,5 +1,6 @@
 package com.wisesoft.ai.dto;
 
+import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 
 /**
@@ -8,10 +9,15 @@ import lombok.Data;
  * @author yuanke
  */
 @Data
+@Schema(description = "统一响应格式")
 public class ResultJson<T> {
+    @Schema(description = "是否成功", example = "true")
     private boolean success = true;
+    @Schema(description = "业务状态码", example = "200")
     private int code = 200;
+    @Schema(description = "提示信息", example = "请求成功")
     private String msg = "请求成功";
+    @Schema(description = "响应数据")
     private T data;
 
     public static <T> ResultJson<T> ok(T data) {

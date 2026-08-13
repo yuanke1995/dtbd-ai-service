@@ -145,3 +145,13 @@ management:
   endpoint:
     health:
       show-details: ${ACTUATOR_HEALTH_DETAILS:never}
+
+# SpringDoc OpenAPI (Swagger UI)
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  show-actuator: false

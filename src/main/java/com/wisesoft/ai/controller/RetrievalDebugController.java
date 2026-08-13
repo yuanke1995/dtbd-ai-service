@@ -6,6 +6,9 @@ import com.wisesoft.ai.model.AiKnowledge;
 import com.wisesoft.ai.service.DocumentMetaCache;
 import com.wisesoft.ai.service.HybridRetrievalService;
 import com.wisesoft.ai.service.RerankService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.document.Document;
 import org.springframework.web.bind.annotation.*;
@@ -21,6 +24,7 @@ import java.util.*;
 @RestController
 @RequestMapping("/api/ai/debug")
 @RequiredArgsConstructor
+@Tag(name = "检索调试", description = "检索链路分步调试，排查召回问题")
 public class RetrievalDebugController {
 
     /** 与 RagService 保持一致 */
@@ -32,8 +36,12 @@ public class RetrievalDebugController {
     private final RerankService rerankService;
     private final DocumentMetaCache documentMetaCache;
 
+    @Operation(summary = "检索链路调试",
+            description = "分步展示检索全链路：关键词命中、向量命中（含相似度分）、合并结果、重排结果、最终上下文（Top 8）、被排除的候选。用于排查召回质量问题")
     @PostMapping("/retrieval")
-    public ResultJson debug(@RequestBody Map<String, String> body) {
+    public ResultJson debug(
+            @Parameter(description = "{\"question\": \"检索问题\"}")
+            @RequestBody Map<String, String> body) {
         String query = body.get("question");
         if (query == null || query.isBlank()) {
             throw new BizException("请输入问题");

@@ -3,6 +3,10 @@ package com.wisesoft.ai.controller;
 import com.wisesoft.ai.common.BizException;
 import com.wisesoft.ai.dto.ResultJson;
 import com.wisesoft.ai.service.DocumentService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -23,24 +27,24 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/ai/document")
 @RequiredArgsConstructor
+@Tag(name = "文档管理", description = "文档上传/解析、列表、启停用、重解析、批量操作、命中统计")
 public class DocumentController {
 
     private final DocumentService documentService;
 
+    @Operation(summary = "上传文档", description = "上传单个文档（docx/pdf/xlsx，≤50MB），异步解析，返回文档 ID 和解析状态")
     @PostMapping("/upload")
     public ResultJson upload(
-            @RequestParam("file") MultipartFile file,
-            @RequestParam(value = "description", required = false) String description) throws Exception {
+            @Parameter(description = "文档文件") @RequestParam("file") MultipartFile file,
+            @Parameter(description = "文档描述（可选）") @RequestParam(value = "description", required = false) String description) throws Exception {
         var doc = documentService.upload(file, description);
         return ResultJson.ok(doc, "已提交解析");
     }
 
-    /**
-     * 批量上传：多文件（multipart 的 file 参数重复），逐个提交异步解析
-     * 返回 [{fileName, docId, success, msg}]
-     */
+    @Operation(summary = "批量上传文档", description = "批量上传多个文档，逐个提交异步解析，返回每个文件的上传结果")
     @PostMapping("/upload/batch")
-    public ResultJson uploadBatch(@RequestParam("file") MultipartFile[] files) {
+    public ResultJson uploadBatch(
+            @Parameter(description = "文档文件列表") @RequestParam("file") MultipartFile[] files) {
         List<Map<String, Object>> results = new ArrayList<>();
         for (MultipartFile file : files) {
             Map<String, Object> item = new LinkedHashMap<>();
@@ -59,51 +63,53 @@ public class DocumentController {
         return ResultJson.ok(results);
     }
 
+    @Operation(summary = "文档列表", description = "获取所有文档列表（含解析状态、分块数、文件大小等）")
     @GetMapping("/list")
     public ResultJson list() {
         return ResultJson.ok(documentService.list());
     }
 
+    @Operation(summary = "删除文档", description = "删除指定文档（同时清理向量、知识块、图片、源文件）")
     @DeleteMapping("/{id}")
-    public ResultJson delete(@PathVariable String id) {
+    public ResultJson delete(
+            @Parameter(description = "文档 ID") @PathVariable String id) {
         documentService.delete(id);
         return ResultJson.ok("删除成功");
     }
 
-    /**
-     * 启停用：body {"status": 0} 生效 / {"status": 1} 弃用
-     */
+    @Operation(summary = "启停用文档", description = "设置文档状态：0=生效（参与检索），1=弃用（不参与检索）")
     @PutMapping("/{id}/status")
-    public ResultJson updateStatus(@PathVariable String id, @RequestBody Map<String, Integer> body) {
+    public ResultJson updateStatus(
+            @Parameter(description = "文档 ID") @PathVariable String id,
+            @RequestBody Map<String, Integer> body) {
         Integer status = body.get("status");
         if (status == null) throw new BizException("缺少 status 参数");
         documentService.updateStatus(id, status);
         return ResultJson.ok("操作成功");
     }
 
-    /**
-     * 重解析（复用源文件，重新解析+向量化）
-     */
+    @Operation(summary = "重解析文档", description = "复用源文件重新解析+向量化，适用于文档内容更新后重新入库")
     @PostMapping("/{id}/reparse")
-    public ResultJson reparse(@PathVariable String id) {
+    public ResultJson reparse(
+            @Parameter(description = "文档 ID") @PathVariable String id) {
         documentService.reparse(id);
         return ResultJson.ok("已重新提交解析");
     }
 
-    /**
-     * 批量删除：body {"ids":[".."]}
-     */
+    @Operation(summary = "批量删除文档", description = "批量删除多个文档")
     @PostMapping("/batch/delete")
-    public ResultJson batchDelete(@RequestBody Map<String, List<String>> body) {
+    public ResultJson batchDelete(
+            @Parameter(description = "{\"ids\": [\"docId1\", \"docId2\"]}")
+            @RequestBody Map<String, List<String>> body) {
         documentService.batchDelete(body.getOrDefault("ids", List.of()));
         return ResultJson.ok("删除成功");
     }
 
-    /**
-     * 批量启停用：body {"ids":[".."],"status":0|1}
-     */
+    @Operation(summary = "批量启停用", description = "批量设置多个文档的启用/弃用状态")
     @PostMapping("/batch/status")
-    public ResultJson batchStatus(@RequestBody Map<String, Object> body) {
+    public ResultJson batchStatus(
+            @Parameter(description = "{\"ids\": [\"docId1\"], \"status\": 0|1}")
+            @RequestBody Map<String, Object> body) {
         Object idsObj = body.get("ids");
         List<String> ids = idsObj instanceof List<?> list
                 ? list.stream().map(String::valueOf).toList() : List.of();
@@ -112,9 +118,7 @@ public class DocumentController {
         return ResultJson.ok("操作成功");
     }
 
-    /**
-     * 文档命中次数统计（问答日志聚合）：返回 {docId: count}
-     */
+    @Operation(summary = "文档命中统计", description = "从问答日志聚合各文档的命中次数")
     @GetMapping("/stats")
     public ResultJson stats() {
         return ResultJson.ok(documentService.statsHitCounts());

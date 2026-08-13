@@ -9,6 +9,9 @@ import com.wisesoft.ai.model.AiKnowledge;
 import com.wisesoft.ai.service.DocumentService;
 import com.wisesoft.ai.service.QaLogService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -24,6 +27,7 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/ai")
 @RequiredArgsConstructor
+@Tag(name = "知识库", description = "无命中问题查询、知识块预览、手动创建知识块")
 public class AiKnowledgeController {
 
     private final AiKnowledgeMapper knowledgeMapper;
@@ -31,19 +35,16 @@ public class AiKnowledgeController {
     private final DocumentService documentService;
     private final QaLogService qaLogService;
 
-    /**
-     * 获取无命中问题列表（按频次降序），供一键入库使用
-     */
+    @Operation(summary = "无命中问题列表", description = "获取最近 30 天内无检索命中的问题列表（按频次降序，最多 50 条），供一键入库补齐知识缺口")
     @GetMapping("/knowledge/unmatched")
     public ResultJson listUnmatched() {
         return ResultJson.ok(qaLogService.listUnmatched());
     }
 
-    /**
-     * 按文档列出知识块（知识块预览；详情复用 GET /api/ai/knowledge/{id}）
-     */
+    @Operation(summary = "按文档列知识块", description = "获取指定文档下的所有知识块（含标题、正文、图片），用于知识块预览")
     @GetMapping("/knowledge/list")
-    public ResultJson listByDoc(@RequestParam String docId) {
+    public ResultJson listByDoc(
+            @Parameter(description = "文档 ID") @RequestParam String docId) {
         if (docId == null || docId.isBlank()) {
             throw new BizException("缺少 docId");
         }
@@ -64,12 +65,11 @@ public class AiKnowledgeController {
         return ResultJson.ok(list);
     }
 
-    /**
-     * 新增知识块（手动补充知识库缺口）
-     * body: {"title":"问题","content":"回答内容","docId":"可选关联文档ID"}
-     */
+    @Operation(summary = "新增知识块", description = "手动创建知识块（自动生成向量），用于补充知识库缺口。可关联已有文档或独立创建")
     @PostMapping("/knowledge")
-    public ResultJson createKnowledge(@RequestBody Map<String, Object> body) {
+    public ResultJson createKnowledge(
+            @Parameter(description = "{\"title\": \"问题/标题\", \"content\": \"回答内容\", \"docId\": \"可选关联文档ID\"}")
+            @RequestBody Map<String, Object> body) {
         String title = body.get("title") == null ? null : String.valueOf(body.get("title")).trim();
         String content = body.get("content") == null ? null : String.valueOf(body.get("content")).trim();
         String docId = body.get("docId") == null ? null : String.valueOf(body.get("docId")).trim();
