@@ -101,6 +101,11 @@ ai-app:
     auth-enabled: ${AI_IMAGES_AUTH_ENABLED:false}
     # 签名有效期（秒）
     auth-expire-seconds: 3600
+    # 回答中 [图片N] 标记与图片描述的相关性校验（LLM 偶发错配兜底；无描述/无关键词自动放行，不误杀）
+    image-filter:
+      enabled: ${AI_IMAGE_FILTER_ENABLED:true}
+      min-hits: 1
+      pre-context-chars: 100
   # 图片描述（本地 Ollama 视觉模型，OpenAI 兼容协议；已实测返回标准 OpenAI 格式）
   vision:
     model: ${AI_VISION_MODEL:qwen3-vl:2b}

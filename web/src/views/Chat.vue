@@ -662,6 +662,13 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage) => {
         sources = Array.isArray(p.sources) ? p.sources : []
         related = Array.isArray(p.related) ? p.related : []
         messageId = p.messageId || null
+        // 后端图片相关性校验后下发的修正内容/图片（覆盖流式中间态，保证 [图片N] 编号与图一致）
+        if (typeof p.finalContent === 'string' && p.finalContent !== '') {
+          messages.value[idx].content = p.finalContent
+        }
+        if (Array.isArray(p.finalImages)) {
+          messages.value[idx].images = p.finalImages
+        }
       } catch (e) { /* 旧版/停止生成：无负载 */ }
       if (messages.value[idx].content === '') messages.value[idx].content = '（已停止生成）'
       messages.value[idx].loading = false

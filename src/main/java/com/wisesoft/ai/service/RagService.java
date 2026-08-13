@@ -51,6 +51,7 @@ public class RagService {
     private final QaLogService qaLogService;
     private final UserImageService userImageService;
     private final ConfigService configService;
+    private final ImageFilterService imageFilterService;
 
     /** M1：查询改写专用线程池（隔离超时任务，避免占用公共池/无限堆积） */
     private final ExecutorService rewriteExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -73,7 +74,8 @@ public class RagService {
                       DocumentMetaCache documentMetaCache,
                       QaLogService qaLogService,
                       UserImageService userImageService,
-                      ConfigService configService) {
+                      ConfigService configService,
+                      ImageFilterService imageFilterService) {
         this.chatClient = chatClientBuilder.build();
         this.sessionService = sessionService;
         this.properties = properties;
@@ -84,6 +86,7 @@ public class RagService {
         this.qaLogService = qaLogService;
         this.userImageService = userImageService;
         this.configService = configService;
+        this.imageFilterService = imageFilterService;
     }
 
     /**
@@ -128,6 +131,8 @@ public class RagService {
 
             // 2. 为命中块的图片编号，构建参考资料上下文（保留 [图片N：描述] 供 LLM 识别）
             Map<Integer, String> imgIndex = new LinkedHashMap<>();
+            // 全局图片编号 → 描述（图片相关性校验用：LLM 输出标记后逐图比对）
+            Map<Integer, String> imgDescIndex = new HashMap<>();
             Pattern imgPattern = Pattern.compile("\\[图片(：.*?)?\\]");
             StringBuilder context = new StringBuilder();
             List<Map<String, Object>> sources = new ArrayList<>();
@@ -154,6 +159,7 @@ public class RagService {
                                 ? "[图片" + globalSeq + "]"
                                 : "[图片" + globalSeq + "：" + desc + "]";
                         matcher.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+                        imgDescIndex.put(globalSeq, desc);
                         imgIdxForChunk++;
                     } else {
                         matcher.appendReplacement(sb, matcher.group());
@@ -179,6 +185,7 @@ public class RagService {
                 for (int i = imgIdxForChunk; i < urls.size(); i++) {
                     int globalSeq = imgIndex.size() + 1;
                     imgIndex.put(globalSeq, urls.get(i));
+                    imgDescIndex.put(globalSeq, "");
                     context.append("[图片").append(globalSeq).append("]\n");
                 }
             }
@@ -287,13 +294,26 @@ public class RagService {
                         }
                         String answer = fullResponse.toString();
 
+                        // 图片相关性校验兜底：剔除与描述不匹配的 [图片N] 标记并重建编号（LLM 偶发错配）
+                        List<String> finalImgs = new ArrayList<>(imgIndex.values());
+                        if (properties.getImages().getImageFilter().isEnabled() && !imgIndex.isEmpty()) {
+                            ImageFilterService.RebuildResult rr = imageFilterService.rebuild(answer, imgDescIndex, question,
+                                    properties.getImages().getImageFilter().getMinHits(),
+                                    properties.getImages().getImageFilter().getPreContextChars());
+                            if (!rr.dropped().isEmpty()) {
+                                log.info("[IMG-FILTER] 图片错配剔除 {} 个: {}", rr.dropped().size(), rr.dropped());
+                                answer = rr.text();
+                                finalImgs = rr.keptSeq().stream().map(imgIndex::get).toList();
+                            }
+                        }
+
                         // 记录对话历史（含图片与引用来源），拿到消息ID供前端反馈
                         String sourcesJson = sources.isEmpty() ? null : JSON.toJSONString(sources);
                         List<String> userImgUrls = userImgs.stream().map(UserImageService.UserImage::url).toList();
                         sessionService.appendMessage(sessionId, "user", question,
                                 userImgUrls.isEmpty() ? null : userImgUrls, null);
                         String messageId = sessionService.appendMessage(sessionId, "assistant", answer,
-                                new ArrayList<>(imgIndex.values()), sourcesJson);
+                                finalImgs, sourcesJson);
 
                         // 异步落问答日志（不阻塞 SSE 完成）
                         List<String> hitDocIds = sources.stream().map(s -> String.valueOf(s.get("docId"))).toList();
@@ -301,11 +321,13 @@ public class RagService {
                                 !sources.isEmpty(), System.currentTimeMillis() - startTime,
                                 queryForLog);
 
-                        // done 事件携带引用来源/相关推荐/消息ID（反馈关联）
+                        // done 事件携带引用来源/相关推荐/消息ID（反馈关联）+ 校验修正后的内容/图片（前端覆盖，保证编号与图一致）
                         Map<String, Object> donePayload = new LinkedHashMap<>();
                         donePayload.put("sources", sources);
                         donePayload.put("related", related);
                         donePayload.put("messageId", messageId);
+                        donePayload.put("finalContent", answer);
+                        donePayload.put("finalImages", finalImgs);
                         sendSseEvent(emitter, "done", JSON.toJSONString(donePayload), sessionId);
                         completeEmitter(emitter);
                     })
