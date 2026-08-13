@@ -42,10 +42,17 @@ public class VisionService {
     }
 
     /**
-     * 生成图片文字描述；任何失败返回 ""（降级，不中断主流程）
-     * 失败自动重试 retryCount 次（Ollama 偶发 500/超时）
+     * 生成图片文字描述（使用配置的默认提示词）；任何失败返回 ""（降级，不中断主流程）
      */
     public String describe(byte[] imageBytes, String ext) {
+        return describe(imageBytes, ext, configService.get("vision.prompt"));
+    }
+
+    /**
+     * 生成图片文字描述（自定义提示词，如 OCR）；任何失败返回 ""（降级，不中断主流程）
+     * 失败自动重试 retryCount 次（Ollama 偶发 500/超时）
+     */
+    public String describe(byte[] imageBytes, String ext, String prompt) {
         if (!properties.getVision().isEnabled() || imageBytes == null || imageBytes.length == 0) {
             return "";
         }
@@ -53,7 +60,7 @@ public class VisionService {
         Exception lastErr = null;
         for (int attempt = 0; attempt <= retry; attempt++) {
             try {
-                String desc = callOnce(imageBytes, ext);
+                String desc = callOnce(imageBytes, ext, prompt);
                 if (desc != null && !desc.isBlank()) return desc;
                 // 空响应：模型偶发空输出，重试一次
                 if (attempt < retry) log.warn("图片描述为空，第 {} 次重试", attempt + 1);
@@ -66,12 +73,12 @@ public class VisionService {
         return "";
     }
 
-    private String callOnce(byte[] imageBytes, String ext) {
+    private String callOnce(byte[] imageBytes, String ext, String prompt) {
         String mime = mimeOf(ext);
         String base64 = Base64.getEncoder().encodeToString(imageBytes);
 
         Map<String, Object> body = new HashMap<>();
-        // 模型配置界面：视觉模型名/提示词动态读 DB（保存即生效）
+        // 模型配置界面：视觉模型名动态读 DB（保存即生效）
         body.put("model", configService.get("vision.model"));
         // qwen3 系列默认思考模式：关闭以提速且输出稳定（实测 max_tokens 在思考模型下会导致空输出，保持 0 不发送）
         if (!properties.getVision().isThink()) {
@@ -85,7 +92,7 @@ public class VisionService {
         body.put("messages", List.of(Map.of("role", "user", "content", List.of(
                 Map.of("type", "image_url", "image_url",
                         Map.of("url", "data:" + mime + ";base64," + base64)),
-                Map.of("type", "text", "text", configService.get("vision.prompt"))))));
+                Map.of("type", "text", "text", prompt)))));
 
         String resp = restClient.post()
                 // 防御：base-url 已含 /v1（如 Ollama http://localhost:11434/v1）时不重复拼 /v1

@@ -54,18 +54,7 @@ public class HybridRetrievalService {
      */
     public List<Hit> search(String query) {
         // 1. 向量召回（放大召回率）
-        List<Document> vectorDocs;
-        try {
-            SearchRequest req = SearchRequest.builder()
-                    .query(query)
-                    .topK(Math.max(15, properties.getRetrieval().getTopK()))
-                    .similarityThreshold(Math.min(0.3, properties.getRetrieval().getSimilarityThreshold()))
-                    .build();
-            vectorDocs = vectorStore.similaritySearch(req);
-        } catch (Exception e) {
-            log.warn("向量检索失败: {}", e.getMessage());
-            vectorDocs = List.of();
-        }
+        List<Document> vectorDocs = vectorSearch(query);
 
         // 2. 关键词召回（并行，超时兜底）
         List<AiKnowledge> kwDocs = keywordSearch(query);
@@ -100,9 +89,26 @@ public class HybridRetrievalService {
     }
 
     /**
+     * 向量召回（独立方法，供检索调试复用）
+     */
+    public List<Document> vectorSearch(String query) {
+        try {
+            SearchRequest req = SearchRequest.builder()
+                    .query(query)
+                    .topK(Math.max(15, properties.getRetrieval().getTopK()))
+                    .similarityThreshold(Math.min(0.3, properties.getRetrieval().getSimilarityThreshold()))
+                    .build();
+            return vectorStore.similaritySearch(req);
+        } catch (Exception e) {
+            log.warn("向量检索失败: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
      * 关键词检索：词元 OR LIKE（content/title），自动排除弃用文档；带命中统计
      */
-    private List<AiKnowledge> keywordSearch(String query) {
+    public List<AiKnowledge> keywordSearch(String query) {
         List<String> terms = keywordExtractor.extract(query);
         if (terms.isEmpty()) return List.of();
         try {

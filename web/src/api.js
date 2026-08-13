@@ -200,6 +200,9 @@ export const getConfig = () => request('/config')
 /** 模型配置：保存可编辑项 {"chat":{...},"vision":{...}} */
 export const saveConfig = payload => request('/config', { method: 'PUT', body: JSON.stringify(payload) })
 
+/** 按文档列出知识块（知识块预览） */
+export const listKnowledgeByDoc = docId => request('/knowledge/list?docId=' + encodeURIComponent(docId))
+
 /** 获取无命中问题列表（按频次降序） */
 export const getUnmatchedQuestions = () => request('/knowledge/unmatched')
 
@@ -209,3 +212,7 @@ export const createKnowledge = (title, content, docId) =>
     method: 'POST',
     body: JSON.stringify({ title, content, docId: docId || null })
   })
+
+/** 检索调试：分步查看关键词/向量/合并/重排/最终上下文/被排除 */
+export const debugRetrieval = question =>
+  request('/debug/retrieval', { method: 'POST', body: JSON.stringify({ question }) })

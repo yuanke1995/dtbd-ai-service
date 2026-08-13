@@ -41,6 +41,7 @@
         <template v-else-if="column.key === 'fileSize'">{{ fmtSize(text) }}</template>
         <template v-else-if="column.key === 'createTime'">{{ fmtTime(text) }}</template>
         <template v-else-if="column.key === 'action'">
+          <a-button v-if="record.status === 0" type="link" size="small" @click="openKb(record)">知识块</a-button>
           <a-button v-if="record.status === 0" type="link" size="small" @click="toggleStatus(record, 1)">弃用</a-button>
           <a-button v-else-if="record.status === 1" type="link" size="small" @click="toggleStatus(record, 0)">启用</a-button>
           <a-button v-if="record.status === 0 || record.status === 3" type="link" size="small"
@@ -53,6 +54,31 @@
         </template>
       </template>
     </a-table>
+
+    <!-- 知识块预览：列表（点击行查看详情） -->
+    <a-modal v-model:open="kbVisible" :title="'知识块预览 · ' + kbDocName" :footer="null" width="720">
+      <a-spin :spinning="kbLoading">
+        <a-table :data-source="kbList" size="small" row-key="id" :pagination="{ pageSize: 8 }"
+                 :locale="{ emptyText: '暂无知识块' }"
+                 :custom-row="r => ({ onClick: () => openKbDetail(r) })"
+                 style="cursor:pointer">
+          <a-table-column title="#" dataIndex="chunkIndex" key="chunkIndex" width="50" />
+          <a-table-column title="标题" dataIndex="title" key="title" ellipsis />
+          <a-table-column title="内容摘要" key="snippet">
+            <template #default="{ record }">{{ (record.content || '').replace(/\s+/g, ' ').slice(0, 80) }}</template>
+          </a-table-column>
+        </a-table>
+      </a-spin>
+    </a-modal>
+
+    <!-- 知识块详情 -->
+    <a-modal v-model:open="kbDetailVisible" :title="kbDetail?.title || '知识块详情'" :footer="null" width="720">
+      <div style="white-space:pre-wrap;font-size:13px;line-height:1.7">{{ kbDetail?.content }}</div>
+      <div v-if="kbDetail?.images?.length" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">
+        <img v-for="(u, ui) in kbDetail.images" :key="ui" :src="resolveImg(u)"
+             style="width:120px;border-radius:6px;border:1px solid #eee" :alt="'知识块图片' + (ui + 1)" />
+      </div>
+    </a-modal>
   </a-card>
 </template>
 
@@ -61,7 +87,38 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { UploadOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocument, deleteDocument,
-         batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats } from '../api'
+         batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats, listKnowledgeByDoc, getKnowledgeDetail } from '../api'
+
+// 知识块预览：图片 URL 兼容（/ai/ 前缀走 /proxy）
+const resolveImg = u => u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
+
+// 知识块预览状态
+const kbVisible = ref(false)
+const kbLoading = ref(false)
+const kbList = ref([])
+const kbDocName = ref('')
+const kbDetailVisible = ref(false)
+const kbDetail = ref(null)
+const openKb = async record => {
+  kbDocName.value = record.fileName
+  kbVisible.value = true
+  kbLoading.value = true
+  kbList.value = []
+  try {
+    const r = await listKnowledgeByDoc(record.id)
+    kbList.value = r.success && Array.isArray(r.data) ? r.data : []
+  } catch (e) { message.error(e.message || '加载知识块失败') }
+  finally { kbLoading.value = false }
+}
+const openKbDetail = async row => {
+  kbDetail.value = null
+  kbDetailVisible.value = true
+  try {
+    const r = await getKnowledgeDetail(row.id)
+    if (r.success) kbDetail.value = r.data
+    else message.error(r.msg || '加载详情失败')
+  } catch (e) { message.error(e.message || '加载详情失败') }
+}
 
 const MAX_SIZE = 50 * 1024 * 1024 // 与后端 multipart 限制一致
 const ALLOWED = ['docx', 'pdf', 'xlsx']

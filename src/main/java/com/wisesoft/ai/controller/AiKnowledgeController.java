@@ -12,6 +12,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -36,6 +37,31 @@ public class AiKnowledgeController {
     @GetMapping("/knowledge/unmatched")
     public ResultJson listUnmatched() {
         return ResultJson.ok(qaLogService.listUnmatched());
+    }
+
+    /**
+     * 按文档列出知识块（知识块预览；详情复用 GET /api/ai/knowledge/{id}）
+     */
+    @GetMapping("/knowledge/list")
+    public ResultJson listByDoc(@RequestParam String docId) {
+        if (docId == null || docId.isBlank()) {
+            throw new BizException("缺少 docId");
+        }
+        List<Map<String, Object>> list = knowledgeMapper.selectList(
+                        new LambdaQueryWrapper<AiKnowledge>()
+                                .eq(AiKnowledge::getDocId, docId)
+                                .orderByAsc(AiKnowledge::getChunkIndex))
+                .stream().map(k -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("id", k.getId());
+                    m.put("title", k.getTitle());
+                    m.put("chunkIndex", k.getChunkIndex());
+                    m.put("content", k.getContent());
+                    m.put("images", k.getImages() != null && !k.getImages().isBlank()
+                            ? com.alibaba.fastjson2.JSON.parseArray(k.getImages()) : List.of());
+                    return m;
+                }).toList();
+        return ResultJson.ok(list);
     }
 
     /**

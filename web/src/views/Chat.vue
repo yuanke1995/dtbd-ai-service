@@ -58,8 +58,12 @@
                 <a-tag v-for="(q, qi) in m.related" :key="qi" color="green"
                        style="cursor:pointer;margin:2px" @click="ask(q)">{{ q }}</a-tag>
               </div>
-              <!-- 回答操作：重新生成 + 反馈 -->
+              <!-- 回答操作：检索调试 + 重新生成 + 反馈 -->
               <div v-if="m.role === 'ai' && m.messageId" class="fb-row">
+                <a-button size="small" type="text" :disabled="loading"
+                          @click="openDebug(i)">
+                  <bug-outlined /> 检索调试
+                </a-button>
                 <a-button size="small" type="text" :disabled="loading"
                           @click="regenerate(i)">
                   <reload-outlined /> 重新生成
@@ -94,6 +98,33 @@
           <a-button type="primary" style="margin-top:12px" :loading="feedbackSubmitting" @click="submitFeedback">
             提交反馈
           </a-button>
+        </a-modal>
+
+        <!-- 检索调试弹窗：分步展示检索过程（为什么这么答） -->
+        <a-modal v-model:open="debugVisible" title="🔍 检索调试（为什么这么答）" :footer="null" width="780">
+          <div style="display:flex;gap:8px;margin-bottom:12px">
+            <a-input v-model:value="debugQuestion" placeholder="输入要调试的问题" @pressEnter="runDebug" />
+            <a-button type="primary" :loading="debugLoading" @click="runDebug">调试</a-button>
+          </div>
+          <a-spin :spinning="debugLoading">
+            <template v-if="debugResult">
+              <a-collapse :bordered="false" :default-active-key="['final']">
+                <a-collapse-panel v-for="(s, si) in debugStages" :key="si" :name="si === 4 ? 'final' : String(si)"
+                                  :header="s.name">
+                  <div v-if="s.items.length" class="dbg-item" v-for="(it, ii) in s.items" :key="ii">
+                    <div class="dbg-head">
+                      <span class="dbg-title">{{ it.title }}</span>
+                      <a-tag v-if="it.docName" size="small">{{ it.docName }}</a-tag>
+                      <a-tag v-if="it.titleHit" color="green" size="small">标题命中</a-tag>
+                      <a-tag color="blue" size="small">{{ it.tag }}</a-tag>
+                    </div>
+                    <div class="dbg-snippet">{{ it.snippet }}</div>
+                  </div>
+                  <a-empty v-else description="无命中" />
+                </a-collapse-panel>
+              </a-collapse>
+            </template>
+          </a-spin>
         </a-modal>
 
         <!-- 图片点击放大灯箱：多图左右切换、滚轮缩放、拖动平移、双击重置、ESC 关闭 -->
@@ -158,12 +189,18 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import 'highlight.js/styles/github.css'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi } from '../api'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined } from '@ant-design/icons-vue'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
 const text = ref('')
 const textareaRef = ref(null)
+
+// 检索调试状态
+const debugVisible = ref(false)
+const debugLoading = ref(false)
+const debugQuestion = ref('')
+const debugResult = ref(null)
 const loading = ref(false)
 const sessionsLoading = ref(false)
 const currentSessionId = ref(null)
@@ -615,6 +652,47 @@ const regenerate = mi => {
   message.warning('未找到对应的问题')
 }
 
+// 检索调试：打开弹窗（默认该轮问题）并执行
+const openDebug = mi => {
+  for (let i = mi - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'user') { debugQuestion.value = messages.value[i].content; break }
+  }
+  debugVisible.value = true
+  runDebug()
+}
+const runDebug = async () => {
+  const q = debugQuestion.value.trim()
+  if (!q) { message.warning('请输入问题'); return }
+  debugLoading.value = true
+  debugResult.value = null
+  try {
+    const r = await debugRetrieval(q)
+    if (r.success) debugResult.value = r.data
+    else message.error(r.msg || '调试失败')
+  } catch (e) { message.error(e.message || '调试失败') }
+  finally { debugLoading.value = false }
+}
+// 分步调试面板数据（统一行结构：title/docName/snippet/tag）
+const debugStages = computed(() => {
+  const d = debugResult.value
+  if (!d) return []
+  const map = (items, tagFn) => (items || []).map(it => ({
+    title: it.title || '（无标题）',
+    docName: it.docName || '',
+    snippet: it.snippet || '',
+    titleHit: !!it.titleHit,
+    tag: tagFn(it)
+  }))
+  return [
+    { name: `关键词命中（${(d.keywordHits || []).length}）`, items: map(d.keywordHits, it => '命中率 ' + (it.hitRate ?? 0)) },
+    { name: `向量命中（${(d.vectorHits || []).length}）`, items: map(d.vectorHits, it => '相似度 ' + (it.score ?? 0)) },
+    { name: `合并后（${(d.merged || []).length}）`, items: map(d.merged, it => '分 ' + (it.score ?? 0)) },
+    { name: `重排后（${(d.reranked || []).length}）` + (d.rerankApplied ? '' : `（${d.rerankSkipReason || '未重排'}）`), items: map(d.reranked, it => '分 ' + (it.score ?? 0)) },
+    { name: `最终上下文（${(d.finalContext || []).length}/8）`, items: map(d.finalContext, it => '分 ' + (it.score ?? 0)) },
+    { name: `被排除（${(d.excluded || []).length}）`, items: map(d.excluded, it => '分 ' + (it.score ?? 0)) }
+  ]
+})
+
 // 编辑问题：回填输入框（回显本地图片）+ 重新发送
 const editMessage = mi => {
   const m = messages.value[mi]
@@ -837,6 +915,11 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .md :deep(li.ul-item.d1) { margin-left: 16px; list-style-type: circle; }
 .md :deep(li.ul-item.d2) { margin-left: 32px; list-style-type: square; }
 .md :deep(hr) { border: none; border-top: 1px solid #e8e8e8; margin: 10px 0; }
+/* 检索调试面板 */
+.dbg-item { padding: 6px 8px; margin-bottom: 6px; border: 1px solid #f0f0f0; border-radius: 6px; background: #fafafa; }
+.dbg-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dbg-title { font-weight: 500; font-size: 13px; }
+.dbg-snippet { margin-top: 3px; font-size: 12px; color: #888; word-break: break-all; }
 /* 代码块复制按钮（antd Tooltip 渲染页面层；render 动态创建，scoped 需 :deep） */
 .md :deep(.code-copy) {
   position: absolute; top: 8px; right: 8px; z-index: 1;
