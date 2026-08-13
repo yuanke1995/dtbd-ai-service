@@ -36,21 +36,23 @@ public class DocumentController {
     @PostMapping("/upload")
     public ResultJson upload(
             @Parameter(description = "文档文件") @RequestParam("file") MultipartFile file,
-            @Parameter(description = "文档描述（可选）") @RequestParam(value = "description", required = false) String description) throws Exception {
-        var doc = documentService.upload(file, description);
+            @Parameter(description = "文档描述（可选）") @RequestParam(value = "description", required = false) String description,
+            @Parameter(description = "文档分类（可选，≤50字）") @RequestParam(value = "category", required = false) String category) throws Exception {
+        var doc = documentService.upload(file, description, category);
         return ResultJson.ok(doc, "已提交解析");
     }
 
     @Operation(summary = "批量上传文档", description = "批量上传多个文档，逐个提交异步解析，返回每个文件的上传结果")
     @PostMapping("/upload/batch")
     public ResultJson uploadBatch(
-            @Parameter(description = "文档文件列表") @RequestParam("file") MultipartFile[] files) {
+            @Parameter(description = "文档文件列表") @RequestParam("file") MultipartFile[] files,
+            @Parameter(description = "批量分类（可选，应用到所有文件）") @RequestParam(value = "category", required = false) String category) {
         List<Map<String, Object>> results = new ArrayList<>();
         for (MultipartFile file : files) {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("fileName", file.getOriginalFilename());
             try {
-                var doc = documentService.upload(file, null);
+                var doc = documentService.upload(file, null, category);
                 item.put("docId", doc.getId());
                 item.put("success", true);
                 item.put("msg", "已提交解析");
@@ -63,10 +65,26 @@ public class DocumentController {
         return ResultJson.ok(results);
     }
 
-    @Operation(summary = "文档列表", description = "获取所有文档列表（含解析状态、分块数、文件大小等）")
+    @Operation(summary = "文档列表", description = "获取所有文档列表（含解析状态、分块数、文件大小等）；可按分类筛选")
     @GetMapping("/list")
-    public ResultJson list() {
-        return ResultJson.ok(documentService.list());
+    public ResultJson list(
+            @Parameter(description = "分类筛选（可选）") @RequestParam(value = "category", required = false) String category) {
+        return ResultJson.ok(documentService.list(category));
+    }
+
+    @Operation(summary = "文档分类列表", description = "获取所有已使用的文档分类（去重）")
+    @GetMapping("/categories")
+    public ResultJson categories() {
+        return ResultJson.ok(documentService.listCategories());
+    }
+
+    @Operation(summary = "修改文档分类", description = "设置文档分类；category 传空串/空白清除分类")
+    @PutMapping("/{id}/category")
+    public ResultJson updateCategory(
+            @Parameter(description = "文档 ID") @PathVariable String id,
+            @RequestBody Map<String, String> body) {
+        documentService.updateCategory(id, body.get("category"));
+        return ResultJson.ok("操作成功");
     }
 
     @Operation(summary = "删除文档", description = "删除指定文档（同时清理向量、知识块、图片、源文件）")
@@ -122,5 +140,23 @@ public class DocumentController {
     @GetMapping("/stats")
     public ResultJson stats() {
         return ResultJson.ok(documentService.statsHitCounts());
+    }
+
+    @Operation(summary = "文档版本列表", description = "获取文档的历史版本列表（倒序）")
+    @GetMapping("/{id}/versions")
+    public ResultJson versions(
+            @Parameter(description = "文档 ID") @PathVariable String id) {
+        return ResultJson.ok(documentService.listVersions(id));
+    }
+
+    @Operation(summary = "回滚文档版本", description = "回滚到指定版本：重建该版本的知识块与向量（历史引用仍可溯源）")
+    @PostMapping("/{id}/rollback")
+    public ResultJson rollback(
+            @Parameter(description = "文档 ID") @PathVariable String id,
+            @Parameter(description = "{\"version\": 2}") @RequestBody Map<String, Integer> body) {
+        Integer version = body.get("version");
+        if (version == null) throw new BizException("缺少 version 参数");
+        documentService.rollback(id, version);
+        return ResultJson.ok("回滚成功");
     }
 }

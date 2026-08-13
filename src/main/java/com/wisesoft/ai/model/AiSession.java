@@ -32,4 +32,10 @@ public class AiSession {
 
     @TableLogic
     private Integer deleted;
+
+    /** 是否置顶: 0=否,1=是 */
+    private Integer isPinned;
+
+    /** 是否收藏: 0=否,1=是 */
+    private Integer isFavorite;
 }

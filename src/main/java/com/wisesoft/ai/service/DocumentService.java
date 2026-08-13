@@ -26,6 +26,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -46,6 +47,7 @@ public class DocumentService {
 
     private final AiDocumentMapper documentMapper;
     private final AiKnowledgeMapper knowledgeMapper;
+    private final com.wisesoft.ai.mapper.AiDocumentVersionMapper versionMapper;
     private final VectorStore vectorStore;
     private final AiAppProperties properties;
     private final DocumentMetaCache documentMetaCache;
@@ -67,8 +69,10 @@ public class DocumentService {
 
     /**
      * 上传文档：校验格式 → 同名替换 → 源文件落盘 → 建记录(解析中) → 异步解析
+     *
+     * @param category 文档分类（可选，≤50字）
      */
-    public AiDocument upload(MultipartFile file, String description) throws Exception {
+    public AiDocument upload(MultipartFile file, String description, String category) throws Exception {
         String fileName = file.getOriginalFilename();
         if (fileName == null || fileName.isBlank()) {
             throw new BizException("文件名为空");
@@ -92,6 +96,12 @@ public class DocumentService {
         doc.setFileSize(file.getSize());
         doc.setStatus(2); // 解析中
         doc.setDescription(description);
+        if (category != null && !category.isBlank()) {
+            if (category.trim().length() > 50) {
+                throw new BizException("分类过长（最多50字）");
+            }
+            doc.setCategory(category.trim());
+        }
         documentMapper.insert(doc);
         documentMetaCache.invalidate(doc.getId());
 
@@ -186,6 +196,15 @@ public class DocumentService {
             doc.setStatus(0);
             doc.setFailReason(null);
             documentMapper.updateById(doc);
+            // 版本管理：成功解析后版本号 +1 并保存快照
+            try {
+                int newVersion = (doc.getVersion() == null ? 0 : doc.getVersion()) + 1;
+                doc.setVersion(newVersion);
+                documentMapper.updateById(doc);
+                saveSnapshot(docId, newVersion);
+            } catch (Exception e) {
+                log.warn("[{}] 保存版本快照失败: {}", docId, e.getMessage());
+            }
             log.info("[{}] 解析成功: {} chunks", docId, chunks.size());
         } catch (Exception e) {
             log.error("[{}] 解析失败: {}", docId, e.getMessage());
@@ -220,17 +239,59 @@ public class DocumentService {
         }
         knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
         documentMapper.deleteById(docId);
+        // 清理版本快照
+        try {
+            versionMapper.delete(new LambdaQueryWrapper<com.wisesoft.ai.model.AiDocumentVersion>()
+                    .eq(com.wisesoft.ai.model.AiDocumentVersion::getDocId, docId));
+        } catch (Exception e) {
+            log.warn("清理版本快照失败: {}", e.getMessage());
+        }
         documentMetaCache.invalidate(docId);
         cleanupImages(docId);
         cleanupSourceFile(docId);
     }
 
     /**
-     * 文档列表
+     * 文档列表（可按分类筛选）
      */
-    public List<AiDocument> list() {
+    public List<AiDocument> list(String category) {
+        LambdaQueryWrapper<AiDocument> wrapper = new LambdaQueryWrapper<>();
+        if (category != null && !category.isBlank()) {
+            wrapper.eq(AiDocument::getCategory, category.trim());
+        }
+        wrapper.orderByDesc(AiDocument::getCreateTime);
+        return documentMapper.selectList(wrapper);
+    }
+
+    /**
+     * 修改文档分类（空串/空白视为清除分类）
+     */
+    public void updateCategory(String docId, String category) {
+        AiDocument doc = documentMapper.selectById(docId);
+        if (doc == null) throw new BizException("文档不存在");
+        if (category != null && !category.isBlank()) {
+            if (category.trim().length() > 50) throw new BizException("分类过长（最多50字）");
+            doc.setCategory(category.trim());
+        } else {
+            doc.setCategory(null);
+        }
+        documentMapper.updateById(doc);
+        documentMetaCache.invalidate(docId);
+    }
+
+    /**
+     * 文档分类列表（去重、按使用频次降序）
+     */
+    public List<String> listCategories() {
         return documentMapper.selectList(
-                new LambdaQueryWrapper<AiDocument>().orderByDesc(AiDocument::getCreateTime));
+                        new LambdaQueryWrapper<AiDocument>()
+                                .isNotNull(AiDocument::getCategory)
+                                .select(AiDocument::getCategory))
+                .stream()
+                .map(AiDocument::getCategory)
+                .filter(c -> c != null && !c.isBlank())
+                .distinct()
+                .toList();
     }
 
     /**
@@ -276,6 +337,212 @@ public class DocumentService {
     }
 
     /**
+     * 编辑知识块：更新 title/content（images 保留）→ 删旧向量 → 插新向量（同 knowledgeId）
+     */
+    public void updateKnowledge(String id, String title, String content) {
+        AiKnowledge k = knowledgeMapper.selectById(id);
+        if (k == null) throw new BizException("知识块不存在");
+        if (title == null || title.isBlank()) throw new BizException("标题不能为空");
+        if (title.length() > 200) throw new BizException("标题过长（最多200字）");
+        if (content == null || content.isBlank()) throw new BizException("内容不能为空");
+        if (k.getDocId() != null) {
+            AiDocument doc = documentMapper.selectById(k.getDocId());
+            if (doc != null && doc.getStatus() == 2) throw new BizException("文档解析中，暂不可编辑知识块");
+        }
+
+        String oldVectorId = k.getVectorId();
+        k.setTitle(title.trim());
+        k.setContent(content);
+        knowledgeMapper.updateById(k);
+
+        // 删旧向量（尽力而为）
+        if (oldVectorId != null && !oldVectorId.isBlank()) {
+            try {
+                vectorStore.delete(List.of(oldVectorId));
+            } catch (Exception e) {
+                log.warn("删除旧向量失败 id={}: {}", id, e.getMessage());
+            }
+        }
+        // 插新向量（embedding 失败降级，关键词检索仍可用）
+        try {
+            Map<String, Object> metadata = new HashMap<>();
+            if (k.getDocId() != null) metadata.put("docId", k.getDocId());
+            metadata.put("title", k.getTitle());
+            metadata.put("knowledgeId", k.getId());
+            if (k.getImages() != null && !k.getImages().isBlank()) {
+                metadata.put("images", k.getImages());
+            }
+            vectorStore.add(List.of(new Document(k.getId(), k.getTitle() + "\n" + k.getContent(), metadata)));
+            k.setVectorId(k.getId());
+            knowledgeMapper.updateById(k);
+        } catch (Exception e) {
+            log.warn("知识块重新向量化失败 id={}: {}", id, e.getMessage());
+        }
+    }
+
+    /**
+     * 删除知识块：删向量 + 逻辑删行 + 扣减文档 chunk_count
+     */
+    public void deleteKnowledge(String id) {
+        AiKnowledge k = knowledgeMapper.selectById(id);
+        if (k == null) throw new BizException("知识块不存在");
+        if (k.getDocId() != null) {
+            AiDocument doc = documentMapper.selectById(k.getDocId());
+            if (doc != null && doc.getStatus() == 2) throw new BizException("文档解析中，暂不可删除知识块");
+        }
+
+        if (k.getVectorId() != null && !k.getVectorId().isBlank()) {
+            try {
+                vectorStore.delete(List.of(k.getVectorId()));
+            } catch (Exception e) {
+                log.warn("删除知识块向量失败 id={}: {}", id, e.getMessage());
+            }
+        }
+        knowledgeMapper.deleteById(id);
+
+        // 扣减文档 chunk_count（尽力而为）
+        if (k.getDocId() != null) {
+            try {
+                AiDocument doc = documentMapper.selectById(k.getDocId());
+                if (doc != null && doc.getChunkCount() != null && doc.getChunkCount() > 0) {
+                    doc.setChunkCount(doc.getChunkCount() - 1);
+                    documentMapper.updateById(doc);
+                }
+            } catch (Exception e) {
+                log.warn("更新文档 chunk_count 失败: {}", e.getMessage());
+            }
+        }
+    }
+
+    // ==================== 版本管理 ====================
+
+    /**
+     * 保存文档当前知识块状态为版本快照（按 chunk_index 有序，快照含原 knowledgeId 便于回滚后可溯源）
+     */
+    private void saveSnapshot(String docId, int version) {
+        List<AiKnowledge> chunks = knowledgeMapper.selectList(
+                new LambdaQueryWrapper<AiKnowledge>()
+                        .eq(AiKnowledge::getDocId, docId)
+                        .orderByAsc(AiKnowledge::getChunkIndex));
+        List<Map<String, Object>> snapshot = chunks.stream().map(k -> {
+            Map<String, Object> m = new HashMap<>();
+            m.put("id", k.getId());
+            m.put("title", k.getTitle());
+            m.put("content", k.getContent());
+            m.put("images", k.getImages() == null ? null : com.alibaba.fastjson2.JSON.parseArray(k.getImages(), String.class));
+            return m;
+        }).toList();
+
+        // 同 (docId, version) 唯一：先删再插（重解析同版本覆盖）
+        versionMapper.delete(new LambdaQueryWrapper<com.wisesoft.ai.model.AiDocumentVersion>()
+                .eq(com.wisesoft.ai.model.AiDocumentVersion::getDocId, docId)
+                .eq(com.wisesoft.ai.model.AiDocumentVersion::getVersion, version));
+        com.wisesoft.ai.model.AiDocumentVersion v = new com.wisesoft.ai.model.AiDocumentVersion();
+        v.setDocId(docId);
+        v.setVersion(version);
+        v.setChunkCount(chunks.size());
+        v.setSnapshotJson(JSON.toJSONString(snapshot));
+        versionMapper.insert(v);
+        log.info("[{}] 保存版本快照 v{}: {} chunks", docId, version, chunks.size());
+    }
+
+    /**
+     * 文档版本列表（倒序）
+     */
+    public List<Map<String, Object>> listVersions(String docId) {
+        return versionMapper.selectList(
+                        new LambdaQueryWrapper<com.wisesoft.ai.model.AiDocumentVersion>()
+                                .eq(com.wisesoft.ai.model.AiDocumentVersion::getDocId, docId)
+                                .orderByDesc(com.wisesoft.ai.model.AiDocumentVersion::getVersion))
+                .stream().map(v -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("version", v.getVersion());
+                    m.put("chunkCount", v.getChunkCount());
+                    m.put("createTime", v.getCreateTime());
+                    return m;
+                }).toList();
+    }
+
+    /**
+     * 回滚到指定版本：物理清空现有知识块 → 按快照原 id 重建 → 重新向量化
+     */
+    public void rollback(String docId, int version) {
+        AiDocument doc = documentMapper.selectById(docId);
+        if (doc == null) throw new BizException("文档不存在");
+        if (doc.getStatus() != null && doc.getStatus() == 2) throw new BizException("文档解析中，暂不可回滚");
+
+        com.wisesoft.ai.model.AiDocumentVersion v = versionMapper.selectOne(
+                new LambdaQueryWrapper<com.wisesoft.ai.model.AiDocumentVersion>()
+                        .eq(com.wisesoft.ai.model.AiDocumentVersion::getDocId, docId)
+                        .eq(com.wisesoft.ai.model.AiDocumentVersion::getVersion, version));
+        if (v == null) throw new BizException("目标版本不存在");
+
+        List<Map<String, Object>> snapshot = JSON.parseObject(v.getSnapshotJson(),
+                new com.alibaba.fastjson2.TypeReference<List<Map<String, Object>>>() {});
+        if (snapshot == null || snapshot.isEmpty()) {
+            throw new BizException("目标版本无知识块数据");
+        }
+
+        // 1. 物理清空现有知识块 + 向量（释放主键，允许按原 id 重建）
+        deleteVectorsAndKnowledge(docId);
+        knowledgeMapper.physicalDeleteByDocId(docId);
+
+        // 2. 按快照重建（复用原 id 保持历史引用可溯源）
+        List<org.springframework.ai.document.Document> aiDocs = new ArrayList<>();
+        int idx = 0;
+        for (Map<String, Object> item : snapshot) {
+            // 快照字段顺序：id/title/content/images
+            String oldId = item.get("id") == null ? null : String.valueOf(item.get("id"));
+            String title = item.get("title") == null ? "" : String.valueOf(item.get("title"));
+            String content = item.get("content") == null ? "" : String.valueOf(item.get("content"));
+            Object imagesObj = item.get("images");
+
+            AiKnowledge k = new AiKnowledge();
+            if (oldId != null && !oldId.isBlank()) k.setId(oldId);
+            k.setDocId(docId);
+            k.setTitle(title);
+            k.setContent(content);
+            k.setImages(imagesObj == null ? null : JSON.toJSONString(imagesObj));
+            k.setChunkIndex(idx++);
+            knowledgeMapper.insert(k);
+            k.setVectorId(k.getId());
+            knowledgeMapper.updateById(k);
+
+            Map<String, Object> metadata = new HashMap<>();
+            metadata.put("docId", docId);
+            metadata.put("title", title);
+            metadata.put("knowledgeId", k.getId());
+            if (k.getImages() != null) metadata.put("images", k.getImages());
+            aiDocs.add(new org.springframework.ai.document.Document(k.getId(), title + "\n" + content, metadata));
+        }
+
+        // 3. 分批向量化
+        if (!aiDocs.isEmpty()) {
+            int batchSize = 10;
+            for (int i = 0; i < aiDocs.size(); i += batchSize) {
+                int end = Math.min(i + batchSize, aiDocs.size());
+                try {
+                    vectorStore.add(aiDocs.subList(i, end));
+                } catch (Exception e) {
+                    log.warn("[{}] 回滚向量化失败 {}-{}: {}", docId, i + 1, end, e.getMessage());
+                }
+            }
+        }
+
+        // 4. 更新文档状态 + 清理较新版本行
+        doc.setChunkCount(snapshot.size());
+        doc.setStatus(0);
+        doc.setFailReason(null);
+        doc.setVersion(version);
+        documentMapper.updateById(doc);
+        versionMapper.delete(new LambdaQueryWrapper<com.wisesoft.ai.model.AiDocumentVersion>()
+                .eq(com.wisesoft.ai.model.AiDocumentVersion::getDocId, docId)
+                .gt(com.wisesoft.ai.model.AiDocumentVersion::getVersion, version));
+        documentMetaCache.invalidate(docId);
+        log.info("[{}] 回滚到 v{} 完成: {} chunks", docId, version, snapshot.size());
+    }
+
+    /**
      * 文档命中次数统计：从问答日志 hit_doc_ids 聚合，返回 {docId: count}
      */
     public Map<String, Long> statsHitCounts() {
@@ -308,7 +575,12 @@ public class DocumentService {
                 .findFirst().orElse(null);
         if (parser == null) throw new BizException("不支持的文件格式");
 
-        // 清理旧向量与元数据（保留记录）
+        // 重解析前先保存当前状态快照（作为版本历史），再清理旧向量与元数据
+        try {
+            saveSnapshot(docId, doc.getVersion() == null ? 0 : doc.getVersion());
+        } catch (Exception e) {
+            log.warn("重解析前保存快照失败: {}", e.getMessage());
+        }
         deleteVectorsAndKnowledge(docId);
         cleanupImages(docId);
         doc.setStatus(2);

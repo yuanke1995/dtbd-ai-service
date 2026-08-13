@@ -2,7 +2,8 @@
   <a-card title="文档管理">
     <template #extra>
       <div style="display:flex;align-items:center;gap:12px">
-        <a-input v-model:value="desc" placeholder="文档描述（可选，仅单文件上传时生效）" style="width:220px" allow-clear />
+        <a-input v-model:value="desc" placeholder="文档描述（可选）" style="width:180px" allow-clear />
+        <a-input v-model:value="uploadCategory" placeholder="分类（可选）" style="width:120px" allow-clear />
         <a-upload :before-upload="beforeUpload" :show-upload-list="false" accept=".docx,.pdf,.xlsx" multiple :disabled="uploading">
           <a-button type="primary" :loading="uploading">
             <upload-outlined /> {{ uploading ? '上传中...' : '上传文档' }}
@@ -11,6 +12,13 @@
       </div>
       <a-progress v-if="uploading" :percent="uploadPercent" size="small" style="margin-top:8px" />
     </template>
+
+    <!-- 分类筛选 -->
+    <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px">
+      <span style="color:#888;font-size:13px">分类筛选：</span>
+      <a-select v-model:value="filterCategory" style="width:160px" allow-clear placeholder="全部"
+                :options="categoryOptions" @change="fetchList()" />
+    </div>
 
     <!-- 批量操作栏 -->
     <div v-if="selectedKeys.length" class="batch-bar">
@@ -40,8 +48,19 @@
         <template v-else-if="column.key === 'hitCount'">{{ text || 0 }}</template>
         <template v-else-if="column.key === 'fileSize'">{{ fmtSize(text) }}</template>
         <template v-else-if="column.key === 'createTime'">{{ fmtTime(text) }}</template>
+        <template v-else-if="column.key === 'category'">
+          <a-select
+            :value="record.category || undefined"
+            placeholder="未分类"
+            size="small"
+            style="width:110px"
+            :options="categoryOptions"
+            @change="val => saveCategory(record, val)"
+          />
+        </template>
         <template v-else-if="column.key === 'action'">
           <a-button v-if="record.status === 0" type="link" size="small" @click="openKb(record)">知识块</a-button>
+          <a-button v-if="record.status === 0" type="link" size="small" @click="openVersions(record)">版本</a-button>
           <a-button v-if="record.status === 0" type="link" size="small" @click="toggleStatus(record, 1)">弃用</a-button>
           <a-button v-else-if="record.status === 1" type="link" size="small" @click="toggleStatus(record, 0)">启用</a-button>
           <a-button v-if="record.status === 0 || record.status === 3" type="link" size="small"
@@ -55,8 +74,8 @@
       </template>
     </a-table>
 
-    <!-- 知识块预览：列表（点击行查看详情） -->
-    <a-modal v-model:open="kbVisible" :title="'知识块预览 · ' + kbDocName" :footer="null" width="720">
+    <!-- 知识块预览：列表（点击行查看详情；编辑/删除操作） -->
+    <a-modal v-model:open="kbVisible" :title="'知识块预览 · ' + kbDocName" :footer="null" width="820">
       <a-spin :spinning="kbLoading">
         <a-table :data-source="kbList" size="small" row-key="id" :pagination="{ pageSize: 8 }"
                  :locale="{ emptyText: '暂无知识块' }"
@@ -66,6 +85,51 @@
           <a-table-column title="标题" dataIndex="title" key="title" ellipsis />
           <a-table-column title="内容摘要" key="snippet">
             <template #default="{ record }">{{ (record.content || '').replace(/\s+/g, ' ').slice(0, 80) }}</template>
+          </a-table-column>
+          <a-table-column title="操作" key="action" width="120">
+            <template #default="{ record }">
+              <a-button type="link" size="small" @click.stop="openKbEdit(record)">编辑</a-button>
+              <a-popconfirm title="确定删除该知识块？向量将同步移除" ok-text="删除" cancel-text="取消"
+                            @confirm.stop="delKnowledge(record.id)">
+                <a-button type="link" danger size="small" @click.stop>删除</a-button>
+              </a-popconfirm>
+            </template>
+          </a-table-column>
+        </a-table>
+      </a-spin>
+    </a-modal>
+
+    <!-- 知识块编辑弹窗（title/content；图片保留） -->
+    <a-modal v-model:open="kbEditVisible" title="编辑知识块" :footer="null" width="640">
+      <a-form layout="vertical">
+        <a-form-item label="标题">
+          <a-input v-model:value="kbEditForm.title" maxlength="200" placeholder="知识块标题" />
+        </a-form-item>
+        <a-form-item label="内容">
+          <a-textarea v-model:value="kbEditForm.content" :rows="10" placeholder="知识块正文" />
+        </a-form-item>
+      </a-form>
+      <div style="text-align:right">
+        <a-button style="margin-right:8px" @click="kbEditVisible = false">取消</a-button>
+        <a-button type="primary" :loading="kbEditSaving" @click="saveKnowledgeEdit">保存</a-button>
+      </div>
+    </a-modal>
+
+    <!-- 版本管理弹窗 -->
+    <a-modal v-model:open="verVisible" :title="'版本历史 · ' + verDocName" :footer="null" width="560">
+      <a-spin :spinning="verLoading">
+        <a-table :data-source="verList" size="small" row-key="version" :pagination="false"
+                 :locale="{ emptyText: '暂无版本记录' }">
+          <a-table-column title="版本" dataIndex="version" key="version" width="80" />
+          <a-table-column title="知识块数" dataIndex="chunkCount" key="chunkCount" width="100" />
+          <a-table-column title="创建时间" dataIndex="createTime" key="createTime" />
+          <a-table-column title="操作" key="action" width="100">
+            <template #default="{ record }">
+              <a-popconfirm :title="`确定回滚到 v${record.version}？当前版本将被覆盖`" ok-text="回滚" cancel-text="取消"
+                            @confirm="doRollback(record.version)">
+                <a-button type="link" size="small">回滚</a-button>
+              </a-popconfirm>
+            </template>
           </a-table-column>
         </a-table>
       </a-spin>
@@ -87,7 +151,8 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { UploadOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocument, deleteDocument,
-         batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats, listKnowledgeByDoc, getKnowledgeDetail } from '../api'
+         batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats, listKnowledgeByDoc, getKnowledgeDetail,
+         updateKnowledge, deleteKnowledge, listDocumentVersions, rollbackDocument, getDocumentCategories, updateDocumentCategory } from '../api'
 
 // 知识块预览：图片 URL 兼容（/ai/ 前缀走 /proxy）
 const resolveImg = u => u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
@@ -106,6 +171,7 @@ const kbDetailVisible = ref(false)
 const kbDetail = ref(null)
 const openKb = async record => {
   kbDocName.value = record.fileName
+  kbDocId.value = record.id
   kbVisible.value = true
   kbLoading.value = true
   kbList.value = []
@@ -125,6 +191,98 @@ const openKbDetail = async row => {
   } catch (e) { message.error(e.message || '加载详情失败') }
 }
 
+// ==================== 知识块编辑/删除 ====================
+const kbEditVisible = ref(false)
+const kbEditSaving = ref(false)
+const kbEditForm = ref({ id: '', title: '', content: '' })
+const openKbEdit = row => {
+  kbEditForm.value = { id: row.id, title: row.title || '', content: row.content || '' }
+  kbEditVisible.value = true
+}
+const saveKnowledgeEdit = async () => {
+  if (!kbEditForm.value.title.trim()) { message.warning('标题不能为空'); return }
+  if (!kbEditForm.value.content.trim()) { message.warning('内容不能为空'); return }
+  kbEditSaving.value = true
+  try {
+    const r = await updateKnowledge(kbEditForm.value.id, kbEditForm.value.title.trim(), kbEditForm.value.content)
+    if (r.success) {
+      message.success('知识块已更新')
+      kbEditVisible.value = false
+      if (kbVisible.value) {
+        const rr = await listKnowledgeByDoc(kbDocId.value)
+        kbList.value = rr.success && Array.isArray(rr.data) ? rr.data : []
+      }
+    } else message.error(r.msg || '更新失败')
+  } catch (e) { message.error(e.message || '更新失败') }
+  finally { kbEditSaving.value = false }
+}
+const kbDocId = ref('')
+const delKnowledge = async id => {
+  try {
+    const r = await deleteKnowledge(id)
+    if (r.success) {
+      message.success('知识块已删除')
+      if (kbVisible.value) {
+        const rr = await listKnowledgeByDoc(kbDocId.value)
+        kbList.value = rr.success && Array.isArray(rr.data) ? rr.data : []
+      }
+      fetchList()
+    } else message.error(r.msg || '删除失败')
+  } catch (e) { message.error(e.message || '删除失败') }
+}
+
+// ==================== 文档版本管理 ====================
+const verVisible = ref(false)
+const verLoading = ref(false)
+const verList = ref([])
+const verDocName = ref('')
+const verDocId = ref('')
+const openVersions = async record => {
+  verDocName.value = record.fileName
+  verDocId.value = record.id
+  verVisible.value = true
+  verLoading.value = true
+  verList.value = []
+  try {
+    const r = await listDocumentVersions(record.id)
+    verList.value = r.success && Array.isArray(r.data) ? r.data : []
+  } catch (e) { message.error(e.message || '加载版本失败') }
+  finally { verLoading.value = false }
+}
+const doRollback = async version => {
+  try {
+    const r = await rollbackDocument(verDocId.value, version)
+    if (r.success) {
+      message.success(`已回滚到 v${version}`)
+      verVisible.value = false
+      fetchList()
+    } else message.error(r.msg || '回滚失败')
+  } catch (e) { message.error(e.message || '回滚失败') }
+}
+
+// ==================== 文档分类 ====================
+const categoryOptions = ref([])
+const filterCategory = ref(undefined)
+const uploadCategory = ref('')
+const loadCategories = async () => {
+  try {
+    const r = await getDocumentCategories()
+    if (r.success && Array.isArray(r.data)) {
+      categoryOptions.value = r.data.filter(Boolean).map(c => ({ label: c, value: c }))
+    }
+  } catch (e) { /* 分类加载失败不阻塞 */ }
+}
+const saveCategory = async (record, val) => {
+  try {
+    const r = await updateDocumentCategory(record.id, val || '')
+    if (r.success) {
+      record.category = val || null
+      message.success(val ? `已分类：${val}` : '已清除分类')
+      loadCategories()
+    } else message.error(r.msg || '保存失败')
+  } catch (e) { message.error(e.message || '保存失败') }
+}
+
 const MAX_SIZE = 50 * 1024 * 1024 // 与后端 multipart 限制一致
 const ALLOWED = ['docx', 'pdf', 'xlsx']
 
@@ -132,12 +290,13 @@ const cols = [
   { title: '文件名', dataIndex: 'fileName', key: 'fileName', ellipsis: true },
   { title: '类型', dataIndex: 'fileType', key: 'fileType', width: 70 },
   { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true },
+  { title: '分类', dataIndex: 'category', key: 'category', width: 130 },
   { title: '知识片段数', dataIndex: 'chunkCount', key: 'chunkCount', width: 110 },
   { title: '命中次数', dataIndex: 'hitCount', key: 'hitCount', width: 90 },
   { title: '文件大小', dataIndex: 'fileSize', key: 'fileSize', width: 110 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 100 },
   { title: '上传时间', dataIndex: 'createTime', key: 'createTime', width: 170 },
-  { title: '操作', key: 'action', width: 180 }
+  { title: '操作', key: 'action', width: 220 }
 ]
 
 const list = ref([])
@@ -150,13 +309,13 @@ const desc = ref('')
 const selectedKeys = ref([])
 let pollTimer = null
 
-onMounted(fetchList)
+onMounted(() => { fetchList(); loadCategories() })
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 
 async function fetchList() {
   loading.value = true
   try {
-    const [r, stats] = await Promise.all([listDocuments(), getDocumentStats()])
+    const [r, stats] = await Promise.all([listDocuments(filterCategory.value), getDocumentStats()])
     if (r.success) {
       const hitMap = (stats && stats.success && stats.data) ? stats.data : {}
       list.value = (r.data || []).map(d => ({ ...d, hitCount: hitMap[d.id] || 0 }))
@@ -172,7 +331,7 @@ function startPolling() {
   if (pollTimer) return
   pollTimer = setInterval(async () => {
     try {
-      const r = await listDocuments()
+      const r = await listDocuments(filterCategory.value)
       if (r.success) {
         list.value = r.data || []
         if (!list.value.some(d => d.status === 2)) stopPolling()
@@ -198,7 +357,7 @@ async function beforeUpload(fileList) {
   uploading.value = true
   uploadPercent.value = 0
   try {
-    const r = await uploadDocumentsBatch(files, pct => { uploadPercent.value = pct })
+    const r = await uploadDocumentsBatch(files, pct => { uploadPercent.value = pct }, uploadCategory.value.trim() || '')
     if (r.success) {
       const failed = (r.data || []).filter(x => !x.success)
       if (failed.length) {
@@ -207,7 +366,9 @@ async function beforeUpload(fileList) {
         message.success(`已提交 ${files.length} 个文档解析`)
       }
       desc.value = ''
+      uploadCategory.value = ''
       fetchList()
+      loadCategories()
     } else {
       message.error(r.msg || '上传失败')
     }

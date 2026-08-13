@@ -14,6 +14,10 @@
       @clear="handleClearAll"
       @new="createNewSession"
       @toggle-collapse="toggleSidebar"
+      @search="onSearchSessions"
+      @filter-change="onFilterChange"
+      @toggle-pin="handleTogglePin"
+      @toggle-favorite="handleToggleFavorite"
     />
     <!-- 侧边栏拖拽手柄（左右伸缩） -->
     <div class="sidebar-resizer" title="拖动调整宽度" @mousedown="onSidebarDrag" />
@@ -69,7 +73,7 @@
                   <sync-outlined /> 重试
                 </a-button>
               </div>
-              <!-- 回答操作：检索调试 + 重新生成 + 反馈 -->
+              <!-- 回答操作：检索调试 + 重新生成 + 复制/导出 + 反馈 -->
               <div v-if="m.role === 'ai' && m.messageId" class="fb-row">
                 <a-button size="small" type="text" :disabled="loading"
                           @click="openDebug(i)">
@@ -78,6 +82,12 @@
                 <a-button size="small" type="text" :disabled="loading"
                           @click="regenerate(i)">
                   <reload-outlined /> 重新生成
+                </a-button>
+                <a-button size="small" type="text" @click="copyAnswer(i)">
+                  <copy-outlined /> 复制
+                </a-button>
+                <a-button size="small" type="text" @click="exportAnswer(i)">
+                  <download-outlined /> 导出
                 </a-button>
                 <a-button size="small" type="text"
                           :class="{ 'fb-active': m.fb === 1 }" @click="openFeedback(m, 1)">
@@ -200,8 +210,8 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import 'highlight.js/styles/github.css'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval } from '../api'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons-vue'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
 const text = ref('')
@@ -478,11 +488,12 @@ onMounted(async () => {
   }
 })
 
-// 加载会话列表
-async function loadSessions() {
+// 加载会话列表（支持关键词搜索）
+const searchKw = ref('')
+async function loadSessions(keyword) {
   sessionsLoading.value = true
   try {
-    const r = await listSessions()
+    const r = await listSessions(keyword ?? searchKw.value)
     if (r.success && Array.isArray(r.data)) {
       sessions.value = r.data
     }
@@ -492,6 +503,14 @@ async function loadSessions() {
     sessionsLoading.value = false
   }
 }
+// 侧边栏搜索输入
+const onSearchSessions = kw => {
+  searchKw.value = kw
+  loadSessions(kw)
+}
+// 收藏筛选（本地过滤）
+const favFilter = ref('all')
+const onFilterChange = f => { favFilter.value = f }
 
 // 切换会话
 async function switchSession(sid) {
@@ -518,8 +537,40 @@ async function switchSession(sid) {
   }
 }
 
-// 会话列表显示：隐藏空会话（新建的空对话不展示，发消息后自动显示到顶部）
-const visibleSessions = computed(() => sessions.value.filter(s => (s.messageCount ?? 0) > 0))
+// 会话列表显示：隐藏空会话 + 收藏筛选（收藏 tab 仅展示收藏项）
+const visibleSessions = computed(() => {
+  let list = sessions.value.filter(s => (s.messageCount ?? 0) > 0)
+  if (favFilter.value === 'fav') {
+    list = list.filter(s => s.isFavorite === 1)
+  }
+  return list
+})
+
+// 置顶/取消置顶
+async function handleTogglePin(s) {
+  try {
+    const next = !(s.isPinned === 1)
+    const r = await pinSession(s.id, next)
+    if (r.success) {
+      s.isPinned = next ? 1 : 0
+      message.success(next ? '已置顶' : '已取消置顶')
+      await loadSessions()
+    } else message.error(r.msg || '操作失败')
+  } catch (e) { message.error(e.message || '操作失败') }
+}
+
+// 收藏/取消收藏
+async function handleToggleFavorite(s) {
+  try {
+    const next = !(s.isFavorite === 1)
+    const r = await favoriteSession(s.id, next)
+    if (r.success) {
+      s.isFavorite = next ? 1 : 0
+      message.success(next ? '已收藏' : '已取消收藏')
+      await loadSessions()
+    } else message.error(r.msg || '操作失败')
+  } catch (e) { message.error(e.message || '操作失败') }
+}
 
 // 新建会话（防重复 + 无感复用空会话：已存在空会话时切换过去，不新建不提示）
 const creatingSession = ref(false)
@@ -734,6 +785,66 @@ const regenerate = mi => {
     }
   }
   message.warning('未找到对应的问题')
+}
+
+// 复制回答（Markdown 原文）
+const copyAnswer = async mi => {
+  const m = messages.value[mi]
+  if (!m || !m.content) { message.warning('该回答无可复制内容'); return }
+  const txt = m.content.trim()
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(txt); message.success('已复制到剪贴板') }
+    catch (e) { fallbackCopyText(txt) }
+  } else {
+    fallbackCopyText(txt)
+  }
+}
+const fallbackCopyText = txt => {
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = txt
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'absolute'
+    ta.style.left = '-9999px'
+    document.body.appendChild(ta)
+    ta.focus(); ta.select(); ta.setSelectionRange(0, txt.length)
+    const ok = document.execCommand('copy')
+    ta.remove()
+    if (ok) message.success('已复制到剪贴板')
+    else message.error('复制失败，请手动复制')
+  } catch (err) { message.error('复制失败，请手动复制') }
+}
+
+// 导出回答为 .md 文件（含会话标题 + 引用来源）
+const exportAnswer = mi => {
+  const m = messages.value[mi]
+  if (!m || !m.content) { message.warning('该回答无可导出内容'); return }
+  const title = sessions.value.find(s => s.id === currentSessionId.value)?.title || 'AI回答'
+  const parts = [`# ${title}\n`]
+  // 收集该回答之前的用户问题（同会话上下文）
+  const questions = []
+  for (let i = mi - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'user') questions.unshift(messages.value[i].content)
+  }
+  if (questions.length) {
+    parts.push('## 问题\n' + questions.join('\n\n') + '\n')
+  }
+  parts.push('## 回答\n' + m.content.trim() + '\n')
+  if (m.sources && m.sources.length) {
+    parts.push('## 引用来源\n' + m.sources.map((s, si) =>
+      `${si + 1}. ${s.fileName || '未知文档'}${s.title ? ' §' + s.title : ''}`).join('\n') + '\n')
+  }
+  const md = parts.join('\n')
+  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  const safeName = (title || new Date().toISOString().slice(0, 10)).replace(/[\\/:*?"<>|]/g, '_')
+  a.href = url
+  a.download = safeName + '.md'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 // 检索调试：打开弹窗（默认该轮问题）并执行

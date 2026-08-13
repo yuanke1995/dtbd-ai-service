@@ -27,10 +27,30 @@
         </div>
       </div>
 
+      <!-- 搜索 + 收藏筛选 -->
+      <div class="sidebar-search" v-if="!collapsed">
+        <div class="search-row">
+          <a-input
+            v-model:value="searchText"
+            placeholder="搜索会话"
+            allow-clear
+            size="small"
+            @input="onSearchInput"
+            @clear="onSearchClear"
+          >
+            <template #prefix><search-outlined style="color:#bbb" /></template>
+          </a-input>
+        </div>
+        <div class="filter-row">
+          <span class="filter-tab" :class="{ active: filter === 'all' }" @click="setFilter('all')">全部</span>
+          <span class="filter-tab" :class="{ active: filter === 'fav' }" @click="setFilter('fav')">收藏</span>
+        </div>
+      </div>
+
       <!-- 会话列表 -->
       <div class="session-list">
         <div v-if="sessions.length === 0" class="empty">
-          <span>暂无历史会话</span>
+          <span>{{ searchText || filter === 'fav' ? '无匹配会话' : '暂无历史会话' }}</span>
         </div>
         <div
           v-for="s in sessions"
@@ -40,22 +60,34 @@
           @click="$emit('select', s.id)"
         >
           <div class="session-info">
-            <div class="session-title">{{ s.title || '新对话' }}</div>
+            <div class="session-title">
+              <span v-if="s.isPinned" class="pin-mark"><pushpin-filled style="font-size:11px" /></span>
+              {{ s.title || '新对话' }}
+            </div>
             <div class="session-meta">
               <span>{{ formatTime(s.updateTime) }}</span>
               <span class="msg-count">{{ s.messageCount || 0 }} 条消息</span>
             </div>
           </div>
-          <a-popconfirm
-            title="确定删除该会话？"
-            ok-text="删除"
-            cancel-text="取消"
-            placement="right"
-            @confirm.stop="$emit('delete', s.id)"
-            @click.stop
-          >
-            <delete-outlined class="delete-icon" />
-          </a-popconfirm>
+          <div class="session-actions" @click.stop>
+            <a-tooltip :title="s.isFavorite ? '取消收藏' : '收藏'" placement="top">
+              <star-outlined class="act-icon" :class="{ fav: s.isFavorite }"
+                             @click="$emit('toggle-favorite', s)" />
+            </a-tooltip>
+            <a-tooltip :title="s.isPinned ? '取消置顶' : '置顶'" placement="top">
+              <pushpin-outlined class="act-icon" :class="{ pin: s.isPinned }"
+                                @click="$emit('toggle-pin', s)" />
+            </a-tooltip>
+            <a-popconfirm
+              title="确定删除该会话？"
+              ok-text="删除"
+              cancel-text="取消"
+              placement="right"
+              @confirm="$emit('delete', s.id)"
+            >
+              <delete-outlined class="delete-icon" />
+            </a-popconfirm>
+          </div>
         </div>
       </div>
     </div>
@@ -86,7 +118,9 @@
 </template>
 
 <script setup>
-import { PlusOutlined, DeleteOutlined, MenuFoldOutlined, MenuUnfoldOutlined, ClearOutlined, CommentOutlined } from '@ant-design/icons-vue'
+import { ref } from 'vue'
+import { PlusOutlined, DeleteOutlined, MenuFoldOutlined, MenuUnfoldOutlined, ClearOutlined, CommentOutlined,
+         SearchOutlined, PushpinOutlined, PushpinFilled, StarOutlined } from '@ant-design/icons-vue'
 
 defineProps({
   sessions: { type: Array, default: () => [] },
@@ -98,7 +132,25 @@ defineProps({
   dragging: { type: Boolean, default: false }    // 拖拽中（禁用宽度过渡动画）
 })
 
-defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear'])
+const emit = defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear', 'toggle-pin', 'toggle-favorite', 'search', 'filter-change'])
+
+// 搜索（300ms 防抖）
+const searchText = ref('')
+let debounceTimer = null
+const onSearchInput = () => {
+  clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => emit('search', searchText.value.trim()), 300)
+}
+const onSearchClear = () => {
+  clearTimeout(debounceTimer)
+  emit('search', '')
+}
+// 收藏筛选 tab（父组件按 s.isFavorite 本地过滤）
+const filter = ref('all')
+const setFilter = f => {
+  filter.value = f
+  emit('filter-change', f)
+}
 
 const formatTime = (t) => {
   if (!t) return ''
@@ -180,6 +232,68 @@ const formatTime = (t) => {
   padding: 12px;
   border-bottom: 1px solid #e8e8e8;
 }
+/* 搜索 + 收藏筛选 */
+.sidebar-search {
+  padding: 8px 12px 4px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.search-row { margin-bottom: 6px; }
+.filter-row {
+  display: flex;
+  gap: 4px;
+  padding-bottom: 6px;
+}
+.filter-tab {
+  font-size: 12px;
+  color: #666;
+  padding: 2px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all .15s;
+  user-select: none;
+}
+.filter-tab:hover { color: #1677ff; }
+.filter-tab.active {
+  background: #e6f4ff;
+  color: #1677ff;
+  font-weight: 500;
+}
+/* 会话项操作区（hover 显示） */
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity .15s;
+  flex-shrink: 0;
+  margin-left: 6px;
+}
+.session-item:hover .session-actions { opacity: 1; }
+.session-item.active .session-actions { opacity: 1; }
+.act-icon {
+  color: #bbb;
+  font-size: 13px;
+  padding: 3px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.act-icon:hover { color: #1677ff; background: #f0f0f0; }
+.act-icon.fav { color: #faad14; }
+.act-icon.pin { color: #1677ff; }
+/* 置顶标题前的图钉标记 */
+.pin-mark { color: #1677ff; margin-right: 2px; }
+.delete-icon {
+  color: #ccc;
+  font-size: 13px;
+  flex-shrink: 0;
+  padding: 3px;
+  border-radius: 4px;
+  transition: color 0.15s;
+}
+.delete-icon:hover {
+  color: #ff4d4f;
+  background: #fff1f0;
+}
 .header-row {
   display: flex;
   align-items: center;
@@ -259,15 +373,5 @@ const formatTime = (t) => {
 }
 .msg-count {
   color: #bbb;
-}
-.delete-icon {
-  color: #ccc;
-  font-size: 14px;
-  flex-shrink: 0;
-  margin-left: 8px;
-  transition: color 0.15s;
-}
-.delete-icon:hover {
-  color: #ff4d4f;
 }
 </style>

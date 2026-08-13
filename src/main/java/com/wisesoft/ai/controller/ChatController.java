@@ -60,11 +60,33 @@ public class ChatController {
         return emitter;
     }
 
-    @Operation(summary = "会话列表", description = "列出所有会话（按更新时间倒序）")
+    @Operation(summary = "会话列表", description = "列出所有会话（置顶优先、按更新时间倒序）；支持 keyword 按标题或消息内容模糊搜索")
     @GetMapping("/sessions")
-    public ResultJson listSessions() {
-        List<SessionInfo> sessions = sessionService.listSessions();
+    public ResultJson listSessions(
+            @Parameter(description = "搜索关键词（可选，按标题/消息内容模糊匹配）")
+            @RequestParam(required = false) String keyword) {
+        List<SessionInfo> sessions = sessionService.listSessions(keyword);
         return ResultJson.ok(sessions);
+    }
+
+    @Operation(summary = "置顶/取消置顶会话", description = "设置会话置顶状态，置顶会话排在列表最前")
+    @PutMapping("/session/{sessionId}/pin")
+    public ResultJson updatePin(
+            @Parameter(description = "会话 ID") @PathVariable String sessionId,
+            @RequestBody Map<String, Boolean> body) {
+        boolean pinned = Boolean.TRUE.equals(body.get("pinned"));
+        sessionService.updatePin(sessionId, pinned);
+        return ResultJson.ok("操作成功");
+    }
+
+    @Operation(summary = "收藏/取消收藏会话", description = "设置会话收藏状态，收藏会话可在侧边栏筛选")
+    @PutMapping("/session/{sessionId}/favorite")
+    public ResultJson updateFavorite(
+            @Parameter(description = "会话 ID") @PathVariable String sessionId,
+            @RequestBody Map<String, Boolean> body) {
+        boolean favorite = Boolean.TRUE.equals(body.get("favorite"));
+        sessionService.updateFavorite(sessionId, favorite);
+        return ResultJson.ok("操作成功");
     }
 
     @Operation(summary = "会话历史", description = "获取指定会话的完整对话历史（含图片与引用来源）")

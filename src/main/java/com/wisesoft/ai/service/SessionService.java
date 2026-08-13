@@ -68,24 +68,74 @@ public class SessionService {
     }
 
     /**
-     * 查询所有未删除会话列表，按更新时间倒序
+     * 查询会话列表（支持关键词搜索），置顶优先、按更新时间倒序
+     *
+     * @param keyword 可选，按标题或消息内容模糊匹配；空/空白返回全量
      */
-    public List<SessionInfo> listSessions() {
+    public List<SessionInfo> listSessions(String keyword) {
         try {
             LambdaQueryWrapper<AiSession> wrapper = new LambdaQueryWrapper<>();
-            wrapper.orderByDesc(AiSession::getUpdateTime);
+            if (keyword != null && !keyword.isBlank()) {
+                String esc = escapeLike(keyword.trim());
+                wrapper.and(w -> w.like(AiSession::getTitle, keyword.trim())
+                        .or().inSql(AiSession::getId,
+                                "SELECT DISTINCT session_id FROM c_ai_message WHERE deleted=0 AND content LIKE '%"
+                                        + esc + "%'"));
+            }
+            wrapper.orderByDesc(AiSession::getIsPinned)
+                    .orderByDesc(AiSession::getUpdateTime);
             return sessionMapper.selectList(wrapper).stream().map(s -> {
                 SessionInfo info = new SessionInfo();
                 info.setId(s.getId());
                 info.setTitle(s.getTitle());
                 info.setMessageCount(s.getMessageCount());
                 info.setUpdateTime(s.getUpdateTime());
+                info.setIsPinned(s.getIsPinned());
+                info.setIsFavorite(s.getIsFavorite());
                 return info;
             }).toList();
         } catch (Exception e) {
             log.warn("查询会话列表失败: {}", e.getMessage());
             return Collections.emptyList();
         }
+    }
+
+    /**
+     * 置顶/取消置顶会话
+     */
+    public void updatePin(String sessionId, boolean pinned) {
+        updateFlag(sessionId, pinned, "is_pinned", AiSession::setIsPinned);
+    }
+
+    /**
+     * 收藏/取消收藏会话
+     */
+    public void updateFavorite(String sessionId, boolean favorite) {
+        updateFlag(sessionId, favorite, "is_favorite", AiSession::setIsFavorite);
+    }
+
+    /**
+     * 通用布尔标志更新（置顶/收藏）
+     */
+    private void updateFlag(String sessionId, boolean flag, String fieldName,
+                            java.util.function.BiConsumer<AiSession, Integer> setter) {
+        AiSession session = sessionMapper.selectById(sessionId);
+        if (session == null) {
+            throw new com.wisesoft.ai.common.BizException("会话不存在");
+        }
+        AiSession update = new AiSession();
+        update.setId(sessionId);
+        setter.accept(update, flag ? 1 : 0);
+        sessionMapper.updateById(update);
+    }
+
+    /**
+     * 转义 LIKE 特殊字符（% _ \），防止搜索词干扰匹配
+     */
+    private String escapeLike(String keyword) {
+        return keyword.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
     }
 
     /**

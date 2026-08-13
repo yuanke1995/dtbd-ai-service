@@ -22,4 +22,8 @@ public class SessionInfo {
     private Integer messageCount;
     @Schema(description = "最后更新时间")
     private LocalDateTime updateTime;
+    @Schema(description = "是否置顶: 0=否,1=是")
+    private Integer isPinned;
+    @Schema(description = "是否收藏: 0=否,1=是")
+    private Integer isFavorite;
 }

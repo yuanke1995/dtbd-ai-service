@@ -102,4 +102,22 @@ public class AiKnowledgeController {
         documentService.embedAndStore(k, k.getTitle() + "\n" + k.getContent());
         return ResultJson.ok(Map.of("id", k.getId()), "知识块已创建");
     }
+
+    @Operation(summary = "编辑知识块", description = "修改知识块标题/正文（图片保留），并重新向量化")
+    @PutMapping("/knowledge/{id}")
+    public ResultJson updateKnowledge(
+            @Parameter(description = "知识块 ID") @PathVariable String id,
+            @Parameter(description = "{\"title\": \"新标题\", \"content\": \"新内容\"}")
+            @RequestBody Map<String, String> body) {
+        documentService.updateKnowledge(id, body.get("title"), body.get("content"));
+        return ResultJson.ok("知识块已更新");
+    }
+
+    @Operation(summary = "删除知识块", description = "删除知识块（同步移除向量并扣减文档知识块数）")
+    @DeleteMapping("/knowledge/{id}")
+    public ResultJson deleteKnowledge(
+            @Parameter(description = "知识块 ID") @PathVariable String id) {
+        documentService.deleteKnowledge(id);
+        return ResultJson.ok("知识块已删除");
+    }
 }

@@ -134,8 +134,17 @@ export const getHistory = sid => request(`/session/${sid}`)
 /** 清除会话（Redis 缓存） */
 export const clearSession = sid => request(`/session/${sid}`, { method: 'DELETE' })
 
-/** 列出所有会话 */
-export const listSessions = () => request('/sessions')
+/** 列出所有会话（支持 keyword 按标题/消息内容模糊搜索） */
+export const listSessions = (keyword = '') =>
+  request('/sessions' + (keyword ? '?keyword=' + encodeURIComponent(keyword) : ''))
+
+/** 置顶/取消置顶会话 */
+export const pinSession = (sid, pinned) =>
+  request(`/session/${sid}/pin`, { method: 'PUT', body: JSON.stringify({ pinned }) })
+
+/** 收藏/取消收藏会话 */
+export const favoriteSession = (sid, favorite) =>
+  request(`/session/${sid}/favorite`, { method: 'PUT', body: JSON.stringify({ favorite }) })
 
 /** 删除会话（MySQL 软删除 + Redis 清理） */
 export const deleteSessionApi = sid => request(`/session/${sid}`, { method: 'DELETE' })
@@ -143,21 +152,31 @@ export const deleteSessionApi = sid => request(`/session/${sid}`, { method: 'DEL
 /** 清空所有会话 */
 export const clearAllSessionsApi = () => request('/sessions', { method: 'DELETE' })
 
-/** 文档列表 */
-export const listDocuments = () => request('/document/list')
+/** 文档列表（可按分类筛选） */
+export const listDocuments = (category = '') =>
+  request('/document/list' + (category ? '?category=' + encodeURIComponent(category) : ''))
+
+/** 文档分类列表 */
+export const getDocumentCategories = () => request('/document/categories')
+
+/** 修改文档分类（category 传空串清除） */
+export const updateDocumentCategory = (id, category) =>
+  request(`/document/${id}/category`, { method: 'PUT', body: JSON.stringify({ category }) })
 
 /** 上传文档（onProgress 接收 0-100 百分比） */
-export function uploadDocument(file, description, onProgress) {
+export function uploadDocument(file, description, onProgress, category) {
   const fd = new FormData()
   fd.append('file', file)
   if (description) fd.append('description', description)
+  if (category) fd.append('category', category)
   return upload('/document/upload', fd, onProgress)
 }
 
-/** 批量上传（onProgress 接收 0-100 百分比） */
-export function uploadDocumentsBatch(files, onProgress) {
+/** 批量上传（onProgress 接收 0-100 百分比；category 应用到所有文件） */
+export function uploadDocumentsBatch(files, onProgress, category) {
   const fd = new FormData()
   files.forEach(f => fd.append('file', f))
+  if (category) fd.append('category', category)
   return upload('/document/upload/batch', fd, onProgress)
 }
 
@@ -214,6 +233,23 @@ export const createKnowledge = (title, content, docId) =>
     method: 'POST',
     body: JSON.stringify({ title, content, docId: docId || null })
   })
+
+/** 编辑知识块（重新向量化） */
+export const updateKnowledge = (id, title, content) =>
+  request(`/knowledge/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ title, content })
+  })
+
+/** 删除知识块 */
+export const deleteKnowledge = id => request(`/knowledge/${id}`, { method: 'DELETE' })
+
+/** 文档版本列表 */
+export const listDocumentVersions = id => request(`/document/${id}/versions`)
+
+/** 回滚文档到指定版本 */
+export const rollbackDocument = (id, version) =>
+  request(`/document/${id}/rollback`, { method: 'POST', body: JSON.stringify({ version }) })
 
 /** 检索调试：分步查看关键词/向量/合并/重排/最终上下文/被排除 */
 export const debugRetrieval = question =>

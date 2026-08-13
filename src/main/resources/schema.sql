@@ -103,3 +103,25 @@ CREATE TABLE IF NOT EXISTS `c_ai_config` (
     `update_time`   DATETIME      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     PRIMARY KEY (`config_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI模型配置表';
+
+-- ============================================
+-- 2026-08-13: 产品功能补强（会话置顶收藏 / 文档分类 / 文档版本）
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS `c_ai_document_version` (
+    `id`            VARCHAR(50)  NOT NULL COMMENT '主键ID',
+    `doc_id`        VARCHAR(50)  NOT NULL COMMENT '文档ID',
+    `version`       INT          DEFAULT 0 COMMENT '版本号',
+    `chunk_count`   INT          DEFAULT 0 COMMENT '该版本知识块数量',
+    `snapshot_json` MEDIUMTEXT   COMMENT '知识块快照(JSON数组:[{id,title,content,images}])',
+    `create_time`   DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `deleted`       INT          DEFAULT 0 COMMENT '逻辑删除: 0=未删除,1=已删除',
+    PRIMARY KEY (`id`),
+    KEY `idx_doc_version` (`doc_id`, `version`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI文档版本快照表';
+
+-- 存量库需手动执行以下 ALTER（启动自动建表只覆盖新表，存量表加列需手工）
+-- ALTER TABLE `c_ai_session`   ADD COLUMN `is_pinned`   INT DEFAULT 0 COMMENT '是否置顶: 0=否,1=是' AFTER `deleted`,
+--                              ADD COLUMN `is_favorite` INT DEFAULT 0 COMMENT '是否收藏: 0=否,1=是' AFTER `is_pinned`;
+-- ALTER TABLE `c_ai_document`  ADD COLUMN `category` VARCHAR(50) DEFAULT NULL COMMENT '文档分类' AFTER `description`,
+--                              ADD COLUMN `version`   INT DEFAULT 0 COMMENT '当前版本号' AFTER `deleted`;
