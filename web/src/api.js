@@ -75,12 +75,13 @@ function upload(path, formData, onProgress) {
 /**
  * 流式聊天（SSE）
  * signal 用于停止生成（AbortController.abort()）
+ * deepThink=true 时后端先流式输出思考过程（thinking / thinking_done 事件）
  */
-export function sendQuestion(sessionId, question, images = [], { onToken, onImage, onDone, onError, signal }) {
+export function sendQuestion(sessionId, question, images = [], { onToken, onImage, onDone, onError, onThinking, onThinkingDone, deepThink = false, signal }) {
   fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ sessionId, question, images }),
+    body: JSON.stringify({ sessionId, question, images, deepThink }),
     signal
   }).then(res => {
     if (!res.ok) {
@@ -103,6 +104,8 @@ export function sendQuestion(sessionId, question, images = [], { onToken, onImag
             try {
               const d = JSON.parse(line.substring(5).trim())
               if (d.type === 'token') { onToken(d.content) }
+              else if (d.type === 'thinking') { onThinking && onThinking(d.content) }
+              else if (d.type === 'thinking_done') { onThinkingDone && onThinkingDone(d.content) }
               else if (d.type === 'image') { console.log('[SSE] 收到 image 事件:', d.content); onImage(d.content) }
               else if (d.type === 'done') { onDone(d.content); return } // content 为 {sources,related} JSON 字符串
               else if (d.type === 'error') { onError(d.content); return }

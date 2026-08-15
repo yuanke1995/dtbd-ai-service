@@ -90,6 +90,6 @@ public class ImageUrlSigner {
     private String secretKey() {
         // 签名密钥派生自 trusted-token（不额外引入配置项）
         String token = properties.getTrustedToken();
-        return token == null || token.isBlank() ? "dtbd-image-signer" : token + ":image";
+        return token == null || token.isBlank() ? "ai-doc-image-signer" : token + ":image";
     }
 }

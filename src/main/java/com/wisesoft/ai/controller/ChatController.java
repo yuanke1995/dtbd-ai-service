@@ -43,7 +43,7 @@ public class ChatController {
     private final AiKnowledgeMapper knowledgeMapper;
 
     @Operation(summary = "SSE 流式问答",
-            description = "发送问题（可含图片），通过 SSE 流式返回 AI 回答。事件类型：token（文本增量）、image（图片 URL 列表）、done（引用来源/相关推荐/消息ID）、error（错误信息）")
+            description = "发送问题（可含图片），通过 SSE 流式返回 AI 回答。事件类型：thinking（深度思考增量）、thinking_done（思考结束）、token（文本增量）、image（图片 URL 列表）、done（引用来源/相关推荐/消息ID/思考全文）、error（错误信息）")
     @ApiResponse(responseCode = "200", description = "SSE 流式响应",
             content = @Content(mediaType = "text/event-stream"))
     @PostMapping("/chat")
@@ -56,7 +56,7 @@ public class ChatController {
         }
 
         SseEmitter emitter = new SseEmitter(300000L);
-        ragService.chat(sessionId, question, request.getImages(), emitter);
+        ragService.chat(sessionId, question, request.getImages(), request.isDeepThink(), emitter);
         return emitter;
     }
 

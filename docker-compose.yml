@@ -1,7 +1,7 @@
 services:
   redis-stack:
     image: redis/redis-stack-server:latest
-    container_name: dtbd-redis-stack
+    container_name: ai-doc-redis-stack
     ports:
       - "6380:6379"
     volumes:
@@ -14,7 +14,7 @@ services:
 
   app:
     build: .
-    container_name: dtbd-ai-service
+    container_name: ai-doc-assistant
     ports:
       - "8090:8090"
     environment:

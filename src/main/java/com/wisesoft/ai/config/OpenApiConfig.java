@@ -20,11 +20,11 @@ import java.util.List;
 public class OpenApiConfig {
 
     @Bean
-    public OpenAPI dtbdAiOpenAPI() {
+    public OpenAPI aiDocOpenAPI() {
         return new OpenAPI()
                 .info(new Info()
-                        .title("DTBD AI Service API")
-                        .description("报表平台独立 AI 服务，基于 RAG 实现知识库问答。" +
+                        .title("AI 文档助手 API")
+                        .description("AI 文档助手服务，基于 RAG 实现知识库问答。" +
                                 "支持文档解析、混合检索、流式回答、引用溯源、数据看板与知识缺口闭环。")
                         .version("1.0.1")
                         .contact(new Contact()

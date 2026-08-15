@@ -34,7 +34,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class SessionService {
 
-    private static final String KEY_PREFIX = "dtbd:ai:session:";
+    private static final String KEY_PREFIX = "ai-doc:session:";
 
     /**
      * 原子追加：RPUSH 消息 → LTRIM 保留最近 max 条 → 重置 EXPIRE
@@ -192,6 +192,16 @@ public class SessionService {
      * @param sources  引用来源 JSON 数组字符串（可为空），如 [{"ref":1,"knowledgeId":..,"docId":..,"fileName":..,"title":..,"snippet":..}]
      */
     public String appendMessage(String sessionId, String role, String content, List<String> images, String sources) {
+        return appendMessage(sessionId, role, content, images, sources, null);
+    }
+
+    /**
+     * 追加消息（含深度思考全文）：
+     * MySQL 优先持久化，失败降级 Redis 缓存（Lua 原子追加 + 上限裁剪 + TTL）
+     *
+     * @param thinking 思考过程全文（深度思考，可为空）
+     */
+    public String appendMessage(String sessionId, String role, String content, List<String> images, String sources, String thinking) {
         // 1. MySQL 持久化
         try {
             // 获取下一序号
@@ -202,6 +212,7 @@ public class SessionService {
             msg.setSessionId(sessionId);
             msg.setRole(role);
             msg.setContent(content);
+            msg.setThinking(thinking);
             msg.setImages(images != null && !images.isEmpty() ? JSON.toJSONString(images) : null);
             msg.setSources(sources);
             msg.setSequence(nextSeq);
@@ -231,6 +242,9 @@ public class SessionService {
             Map<String, Object> redisMsg = new HashMap<>();
             redisMsg.put("role", role);
             redisMsg.put("content", content);
+            if (thinking != null && !thinking.isBlank()) {
+                redisMsg.put("thinking", thinking);
+            }
             if (images != null && !images.isEmpty()) {
                 redisMsg.put("images", images);
             }
@@ -299,6 +313,9 @@ public class SessionService {
                 map.put("role", m.getRole());
                 map.put("content", m.getContent());
                 map.put("messageId", m.getId()); // 与 SSE done 事件字段名一致，供前端反馈/导出等操作
+                if (m.getThinking() != null && !m.getThinking().isBlank()) {
+                    map.put("thinking", m.getThinking());
+                }
                 if (m.getImages() != null && !m.getImages().isBlank()) {
                     try {
                         map.put("images", JSON.parseArray(m.getImages(), String.class));
@@ -398,6 +415,10 @@ public class SessionService {
                     msg.setRole(role);
                     msg.setContent(content);
                     msg.setImages(imagesJson);
+                    Object thinkingObj = m.get("thinking");
+                    if (thinkingObj != null) {
+                        msg.setThinking(String.valueOf(thinkingObj));
+                    }
                     Object sourcesObj = m.get("sources");
                     if (sourcesObj != null) {
                         msg.setSources(JSON.toJSONString(sourcesObj));

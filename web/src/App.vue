@@ -4,7 +4,7 @@
       <a-layout-header class="header">
         <div class="logo">
           <robot-outlined style="color:#fff;font-size:20px;margin-right:8px" />
-          <span>DTBD AI 助手 · 测试台</span>
+          <span>AI 文档助手</span>
         </div>
         <a-menu theme="dark" mode="horizontal" :selected-keys="[activeKey]" @click="onMenu" class="menu">
           <a-menu-item key="chat">智能问答</a-menu-item>

@@ -45,7 +45,16 @@ public class ConfigService {
             Map.entry("context.historyMaxTokens", "上下文：对话历史注入上限(token)"),
             Map.entry("context.historyPerMsgChars", "上下文：单条历史截断(字符)"),
             Map.entry("context.snippetWindowChars", "上下文：知识块命中片段窗口(字符,0=整块)"),
-            Map.entry("context.maxContextHits", "上下文：知识块填充上限(块)"));
+            Map.entry("context.maxContextHits", "上下文：知识块填充上限(块)"),
+            Map.entry("deepReasoning.enabled", "深度思考：总开关"),
+            Map.entry("deepReasoning.thinkingMode", "深度思考：思考模式(model/prompt)"),
+            Map.entry("deepReasoning.enableThinking", "深度思考：透传 enable_thinking"),
+            Map.entry("deepReasoning.prompt", "深度思考：思考引导提示词"),
+            Map.entry("deepReasoning.searchTag", "深度思考：检索计划标签名"),
+            Map.entry("deepReasoning.maxSubQueries", "深度思考：最大子问题数"),
+            Map.entry("deepReasoning.multiRetrieval", "深度思考：多路并行检索开关"),
+            Map.entry("deepReasoning.timeoutMillis", "深度思考：思考阶段超时(ms)"),
+            Map.entry("deepReasoning.maxThinkingTokens", "深度思考：思考输出上限(token,0=不设)"));
 
     private final AiConfigMapper configMapper;
     private final AiAppProperties properties;
@@ -116,6 +125,15 @@ public class ConfigService {
         d.put("context.historyPerMsgChars", String.valueOf(properties.getContext().getHistoryPerMsgChars()));
         d.put("context.snippetWindowChars", String.valueOf(properties.getContext().getSnippetWindowChars()));
         d.put("context.maxContextHits", String.valueOf(properties.getContext().getMaxContextHits()));
+        d.put("deepReasoning.enabled", String.valueOf(properties.getDeepReasoning().isEnabled()));
+        d.put("deepReasoning.thinkingMode", properties.getDeepReasoning().getThinkingMode());
+        d.put("deepReasoning.enableThinking", String.valueOf(properties.getDeepReasoning().isEnableThinking()));
+        d.put("deepReasoning.prompt", properties.getDeepReasoning().getPrompt());
+        d.put("deepReasoning.searchTag", properties.getDeepReasoning().getSearchTag());
+        d.put("deepReasoning.maxSubQueries", String.valueOf(properties.getDeepReasoning().getMaxSubQueries()));
+        d.put("deepReasoning.multiRetrieval", String.valueOf(properties.getDeepReasoning().isMultiRetrieval()));
+        d.put("deepReasoning.timeoutMillis", String.valueOf(properties.getDeepReasoning().getTimeoutMillis()));
+        d.put("deepReasoning.maxThinkingTokens", String.valueOf(properties.getDeepReasoning().getMaxThinkingTokens()));
         return d;
     }
 
@@ -143,6 +161,14 @@ public class ConfigService {
             return Integer.parseInt(get(key).trim());
         } catch (Exception e) {
             return 0;
+        }
+    }
+
+    public boolean getBoolean(String key) {
+        try {
+            return Boolean.parseBoolean(get(key).trim());
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -194,6 +220,27 @@ public class ConfigService {
                 }
             }
         }
+        // 深度思考参数校验
+        String mode = updates.get("deepReasoning.thinkingMode");
+        if (mode != null && !mode.isBlank() && !"model".equals(mode) && !"prompt".equals(mode)) {
+            throw new IllegalArgumentException("deepReasoning.thinkingMode 仅允许 model / prompt");
+        }
+        for (String iKey : new String[]{"deepReasoning.maxSubQueries", "deepReasoning.timeoutMillis", "deepReasoning.maxThinkingTokens"}) {
+            String v = updates.get(iKey);
+            if (v != null && !v.isBlank()) {
+                try {
+                    if (Integer.parseInt(v.trim()) < 0) throw new IllegalArgumentException(iKey + " 不能为负数");
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(iKey + " 必须是整数");
+                }
+            }
+        }
+        for (String bKey : new String[]{"deepReasoning.enabled", "deepReasoning.enableThinking", "deepReasoning.multiRetrieval"}) {
+            String v = updates.get(bKey);
+            if (v != null && !v.isBlank() && !"true".equalsIgnoreCase(v) && !"false".equalsIgnoreCase(v)) {
+                throw new IllegalArgumentException(bKey + " 仅允许 true / false");
+            }
+        }
 
         for (Map.Entry<String, String> kv : updates.entrySet()) {
             AiConfig c = configMapper.selectById(kv.getKey());
@@ -219,7 +266,7 @@ public class ConfigService {
     /** 全量配置（供配置界面展示；apiKey 脱敏） */
     public Map<String, Object> snapshot() {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] groups = {"chat", "vision", "embedding", "retrieval", "context"};
+        String[] groups = {"chat", "vision", "embedding", "retrieval", "context", "deepReasoning"};
         for (String g : groups) {
             Map<String, Object> items = new LinkedHashMap<>();
             for (Map.Entry<String, String> d : defaults().entrySet()) {

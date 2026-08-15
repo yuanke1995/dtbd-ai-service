@@ -123,6 +123,53 @@
                    message="预算 = min(模型窗口×安全系数−输出限制, 成本上限)，知识块按相关度降序累积填充，超出预算的块自动被裁；每块只取命中关键词±窗口片段。历史单条截断+总量限制，[图片N] 标记自动剥离避免编号冲突。保存后立即生效。" />
         </a-collapse-panel>
 
+        <a-collapse-panel key="deepReasoning" header="深度思考设置">
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.drEnabled" placement="top">总开关 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.deepReasoning.enabled" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.drMode" placement="top">思考模式 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-select v-model:value="form.deepReasoning.thinkingMode" style="width:220px" :options="[
+                { value: 'model', label: 'model（透传 enable_thinking，从 reasoning_content 提取）' },
+                { value: 'prompt', label: 'prompt（提示词引导输出到正文）' }
+              ]" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.drEnableThinking" placement="top">透传 enable_thinking <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.deepReasoning.enableThinking" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.drPrompt" placement="top">思考引导提示词 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-textarea v-model:value="form.deepReasoning.prompt" :rows="6"
+                          placeholder="引导模型先深度思考、末尾输出 <search>精化query|子问题1|子问题2</search> 检索计划" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.drSearchTag" placement="top">检索计划标签名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.deepReasoning.searchTag" style="width:200px" placeholder="search" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.drMaxSub" placement="top">最大子问题数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.deepReasoning.maxSubQueries" :min="0" :max="8" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.drMultiRetrieval" placement="top">多路并行检索 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.deepReasoning.multiRetrieval" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.drTimeout" placement="top">思考阶段超时 ms <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.deepReasoning.timeoutMillis" :min="1000" :step="1000" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.drMaxTokens" placement="top">思考输出上限 token <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.deepReasoning.maxThinkingTokens" :min="0" :step="100" style="width:200px" />
+            </a-form-item>
+          </a-form>
+          <a-alert type="info" show-icon style="margin:0 24px 16px"
+                   message="深度思考：AI 先流式展示思维链（回答上方折叠面板），思考末尾输出 <search> 检索计划（精化 query + 子问题），多路并行检索合并后回答。默认 maxThinkingTokens=0 不设上限（qwen 思考模式设 max_tokens 会空输出）。失败自动降级为普通回答。" />
+        </a-collapse-panel>
+
       </a-collapse>
 
       <div style="margin-top:20px">
@@ -140,8 +187,8 @@ import { message } from 'ant-design-vue'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 import { getConfig, saveConfig } from '../api'
 
-// 折叠面板：默认展开常用分组（chat / retrieval / context），vision / embedding 收起
-const activeKeys = ref(['chat', 'retrieval', 'context'])
+// 折叠面板：默认展开常用分组（chat / retrieval / context / deepReasoning），vision / embedding 收起
+const activeKeys = ref(['chat', 'retrieval', 'context', 'deepReasoning'])
 
 // 参数说明（hover ? 查看"调整该参数会影响什么"）
 const tips = {
@@ -161,7 +208,16 @@ const tips = {
   historyMax: '注入对话历史的 token 总上限。越大多轮上下文越完整（追问更准），但会挤压知识块的空间，且历史可能引入过时信息。',
   historyPerMsg: '每条历史消息保留的最大字符数，超出部分截断。控制历史占用的空间，保留最近轮次。',
   snippetWindow: '每个知识块只取"命中关键词 ± 该字符数"的片段送入上下文（0=整块塞入）。调大上下文信息更全但 token 消耗增大；调小更省 token 但可能丢失上下文导致理解偏差。',
-  maxContextHits: '上下文最多塞入的知识块数量上限。调大可能引入相关度低的块稀释注意力；调小可能漏掉有价值的参考资料。'
+  maxContextHits: '上下文最多塞入的知识块数量上限。调大可能引入相关度低的块稀释注意力；调小可能漏掉有价值的参考资料。',
+  drEnabled: '深度思考总开关。关闭后即使前端开启"深度思考"开关也走普通回答流程（前端开关独立控制）。',
+  drMode: '思考模式：model=通过 extraBody 透传 enable_thinking=true，从模型 reasoning_content 提取思维链（qwen3 系原生支持）；prompt=用提示词引导模型把思考输出到正文 content（兼容不支持思考参数的模型/网关）。',
+  drEnableThinking: 'thinkingMode=model 时是否透传 enable_thinking=true。若网关静默忽略或返回异常，可关闭此项并切到 prompt 模式。',
+  drPrompt: '思考阶段的引导提示词：要求模型先深度分析不直接作答，并在末尾输出 <search> 检索计划（精化 query | 子问题1 | 子问题2）。改坏可能导致检索计划提取失败（自动降级普通检索）。',
+  drSearchTag: '检索计划包裹标签名，默认 search（即 <search>...</search>）。需与提示词中的标签一致。',
+  drMaxSub: '从检索计划中最多取多少个子问题参与多路并行检索（不含精化 query）。越大召回越广但更慢、成本更高。',
+  drMultiRetrieval: '是否多路并行检索（精化 query + 子问题分别检索后按最高分合并）。关闭则只用精化 query 单路检索（更快但召回面窄）。',
+  drTimeout: '思考阶段最大等待时间(ms)。超时用已收集的思考内容降级为普通检索回答，不阻塞。',
+  drMaxTokens: '思考输出的 token 上限（0=不设）。qwen3 思考模式下设 max_tokens 会导致空输出，默认 0；仅当思考过长需裁剪时设置。'
 }
 
 const loading = ref(false)
@@ -170,7 +226,10 @@ const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '' }, visi
                     retrieval: { vectorWeight: 0.6, keywordWeight: 0.4, titleBonus: 0.1 },
                     context: { modelWindows: '', defaultWindowTokens: 32768, safetyFactor: 0.7, costCapTokens: 8000,
                                maxOutputTokens: 2000, historyMaxTokens: 1200, historyPerMsgChars: 200,
-                               snippetWindowChars: 150, maxContextHits: 8 } })
+                               snippetWindowChars: 150, maxContextHits: 8 },
+                    deepReasoning: { enabled: true, thinkingMode: 'model', enableThinking: true, prompt: '',
+                                     searchTag: 'search', maxSubQueries: 3, multiRetrieval: true,
+                                     timeoutMillis: 30000, maxThinkingTokens: 0 } })
 const ro = ref({ chat: {}, vision: {}, embedding: {} })
 
 onMounted(async () => {
@@ -197,6 +256,16 @@ onMounted(async () => {
       form.value.context.historyPerMsgChars = Number(ctx.historyPerMsgChars?.value ?? 200)
       form.value.context.snippetWindowChars = Number(ctx.snippetWindowChars?.value ?? 150)
       form.value.context.maxContextHits = Number(ctx.maxContextHits?.value ?? 8)
+      const dr = d.deepReasoning || {}
+      form.value.deepReasoning.enabled = dr.enabled?.value === 'true'
+      form.value.deepReasoning.thinkingMode = dr.thinkingMode?.value || 'model'
+      form.value.deepReasoning.enableThinking = dr.enableThinking?.value === 'true'
+      form.value.deepReasoning.prompt = dr.prompt?.value || ''
+      form.value.deepReasoning.searchTag = dr.searchTag?.value || 'search'
+      form.value.deepReasoning.maxSubQueries = Number(dr.maxSubQueries?.value ?? 3)
+      form.value.deepReasoning.multiRetrieval = dr.multiRetrieval?.value === 'true'
+      form.value.deepReasoning.timeoutMillis = Number(dr.timeoutMillis?.value ?? 30000)
+      form.value.deepReasoning.maxThinkingTokens = Number(dr.maxThinkingTokens?.value ?? 0)
       ro.value.chat = { baseUrl: d.chat?.baseUrl?.value || '', apiKey: d.chat?.apiKey?.value || '' }
       ro.value.vision = { baseUrl: d.vision?.baseUrl?.value || '', apiKey: d.vision?.apiKey?.value || '' }
       ro.value.embedding = { model: d.embedding?.model?.value || '' }
@@ -223,7 +292,16 @@ const save = async () => {
                  historyMaxTokens: String(form.value.context.historyMaxTokens),
                  historyPerMsgChars: String(form.value.context.historyPerMsgChars),
                  snippetWindowChars: String(form.value.context.snippetWindowChars),
-                 maxContextHits: String(form.value.context.maxContextHits) }
+                 maxContextHits: String(form.value.context.maxContextHits) },
+      deepReasoning: { enabled: String(form.value.deepReasoning.enabled),
+                       thinkingMode: form.value.deepReasoning.thinkingMode,
+                       enableThinking: String(form.value.deepReasoning.enableThinking),
+                       prompt: form.value.deepReasoning.prompt,
+                       searchTag: form.value.deepReasoning.searchTag?.trim(),
+                       maxSubQueries: String(form.value.deepReasoning.maxSubQueries),
+                       multiRetrieval: String(form.value.deepReasoning.multiRetrieval),
+                       timeoutMillis: String(form.value.deepReasoning.timeoutMillis),
+                       maxThinkingTokens: String(form.value.deepReasoning.maxThinkingTokens) }
     })
     if (r.success) message.success('配置已保存并生效')
     else message.error(r.msg || '保存失败')

@@ -5,12 +5,15 @@ import com.wisesoft.ai.config.AiAppProperties;
 import com.wisesoft.ai.util.TokenCounter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.core.Disposable;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -92,10 +95,13 @@ public class RagService {
     }
 
     /**
-     * 处理用户问题（可含上传图片），通过 SSE 流式返回
+     * 处理用户问题（可含上传图片），通过 SSE 流式返回。
+     * deepThink=true 时先流式输出思考过程（thinking 事件），提取检索计划后多路检索再回答。
      */
-    public void chat(String sessionId, String question, List<String> userImages, SseEmitter emitter) {
+    public void chat(String sessionId, String question, List<String> userImages, boolean deepThink, SseEmitter emitter) {
         long startTime = System.currentTimeMillis();
+        // 深度思考全文（供 done 事件/持久化；lambda 中引用需 effectively final，用数组容器）
+        final String[] thinkingHolder = {null};
         try {
             // 0. 用户上传图片：并行保存+视觉描述（用于上下文与检索召回）
             List<UserImageService.UserImage> userImgs = userImageService.process(userImages);
@@ -121,11 +127,33 @@ public class RagService {
             // 日志记录用（final 副本，lambda 中引用需要 effectively final）
             final String queryForLog = retrievalQuery;
 
-            // 1. 混合检索（向量 + 关键词）→ 重排
-            //    候选全部保留，由上下文预算决定填充多少块（价值驱动，不固定截断）
-            List<HybridRetrievalService.Hit> hits = hybridRetrievalService.search(retrievalQuery);
-            if (hits.size() > RERANK_MIN && hits.size() <= RERANK_MAX) {
-                hits = rerankService.rank(hits, retrievalQuery);
+            // 1. 深度思考（可选）：思考流式 → 提取检索计划 → 多路检索。
+            //    失败/超时/提取失败 → 降级为原始 question 单路检索（thinkingHolder 保留已收集增量，可为空）
+            List<HybridRetrievalService.Hit> hits = null;
+            if (deepThink && configService.getBoolean("deepReasoning.enabled")) {
+                DeepThinkResult dr = runDeepThinking(sessionId, question, imgDescText, emitter);
+                thinkingHolder[0] = dr.thinking();
+                if (dr.ok()) {
+                    // 多路检索：精化 query + 子问题并行召回合并；开关关闭时单路精化 query
+                    if (configService.getBoolean("deepReasoning.multiRetrieval")) {
+                        List<String> queries = new ArrayList<>();
+                        queries.add(dr.refinedQuery());
+                        queries.addAll(dr.subQueries());
+                        hits = hybridRetrievalService.searchMulti(queries);
+                    } else {
+                        retrievalQuery = dr.refinedQuery();
+                        hits = hybridRetrievalService.search(retrievalQuery);
+                    }
+                    log.info("[DEEP-THINK] 检索计划: refined={}, subQueries={}, hits={}",
+                            dr.refinedQuery(), dr.subQueries(), hits.size());
+                }
+            }
+            // 降级/未开启深度思考：走普通单路检索
+            if (hits == null) {
+                hits = hybridRetrievalService.search(retrievalQuery);
+                if (hits.size() > RERANK_MIN && hits.size() <= RERANK_MAX) {
+                    hits = rerankService.rank(hits, retrievalQuery);
+                }
             }
             log.info("[RAG] 检索命中 {} 块, query={}", hits.size(), retrievalQuery);
 
@@ -349,7 +377,7 @@ public class RagService {
                         sessionService.appendMessage(sessionId, "user", question,
                                 userImgUrls.isEmpty() ? null : userImgUrls, null);
                         String messageId = sessionService.appendMessage(sessionId, "assistant", answer,
-                                finalImgs, sourcesJson);
+                                finalImgs, sourcesJson, thinkingHolder[0]);
 
                         // 异步落问答日志（不阻塞 SSE 完成）
                         List<String> hitDocIds = sources.stream().map(s -> String.valueOf(s.get("docId"))).toList();
@@ -357,13 +385,14 @@ public class RagService {
                                 !sources.isEmpty(), System.currentTimeMillis() - startTime,
                                 queryForLog);
 
-                        // done 事件携带引用来源/相关推荐/消息ID（反馈关联）+ 校验修正后的内容/图片（前端覆盖，保证编号与图一致）
+                        // done 事件携带引用来源/相关推荐/消息ID（反馈关联）+ 校验修正后的内容/图片（前端覆盖，保证编号与图一致）+ 思考全文（历史恢复/兜底）
                         Map<String, Object> donePayload = new LinkedHashMap<>();
                         donePayload.put("sources", sources);
                         donePayload.put("related", related);
                         donePayload.put("messageId", messageId);
                         donePayload.put("finalContent", answer);
                         donePayload.put("finalImages", finalImgs);
+                        donePayload.put("thinking", thinkingHolder[0]);
                         sendSseEvent(emitter, "done", JSON.toJSONString(donePayload), sessionId);
                         completeEmitter(emitter);
                     })
@@ -604,6 +633,139 @@ public class RagService {
         if (content == null) return "";
         String s = content.replaceAll("\\[图片[^\\]]*\\]", " ").trim();
         return s.length() > SNIPPET_LEN ? s.substring(0, SNIPPET_LEN) + "…" : s;
+    }
+
+    // ==================== 深度思考（生产级） ====================
+
+    /** 深度思考结果：ok=是否成功（失败降级时 refinedQuery 无意义），thinking=剥离 <search> 后的展示文本 */
+    private record DeepThinkResult(boolean ok, String thinking, String refinedQuery, List<String> subQueries) {
+    }
+
+    /**
+     * 深度思考三阶段：
+     * 阶段1 流式思考（SSE thinking 增量；thinkingMode=model 从 reasoning_content 提取，prompt 从 content 提取）
+     * 阶段2 提取 <search> 检索计划（精化 query + 子问题）
+     * 阶段3 由调用方执行多路检索（本方法只返回计划）
+     * 失败/超时/提取失败 → 返回 ok=false + 已收集思考增量，调用方降级单路检索
+     */
+    private DeepThinkResult runDeepThinking(String sessionId, String question, String imgDescText, SseEmitter emitter) {
+        String thinkingMode = configService.get("deepReasoning.thinkingMode");
+        boolean enableThinking = configService.getBoolean("deepReasoning.enableThinking");
+        boolean multiRetrieval = configService.getBoolean("deepReasoning.multiRetrieval");
+        int timeoutMillis = configService.getInt("deepReasoning.timeoutMillis");
+        int maxThinkingTokens = configService.getInt("deepReasoning.maxThinkingTokens");
+
+        // 思考 system = 思考引导 prompt + 对话历史（复用 buildHistoryText 裁剪）
+        StringBuilder system = new StringBuilder(configService.get("deepReasoning.prompt"));
+        String historyText = buildHistoryText(sessionService.getRecentHistory(sessionId, 2));
+        if (!historyText.isEmpty()) {
+            system.append("\n\n对话历史：\n").append(historyText);
+        }
+        // user = 原始问题 + 图片描述（若有）
+        StringBuilder user = new StringBuilder(question);
+        if (imgDescText != null && !imgDescText.isBlank()) {
+            user.append("\n\n用户上传了图片，图片内容描述如下（仅用于辅助思考，不用输出图片标记）：\n").append(imgDescText);
+        }
+
+        OpenAiChatOptions.Builder optionsBuilder = OpenAiChatOptions.builder()
+                .model(configService.get("chat.model"))
+                .temperature(configService.getDouble("chat.temperature"));
+        // qwen 思考模式 max_tokens 会导致空输出：默认不设，仅显式配置 >0 时才设
+        if (maxThinkingTokens > 0) {
+            optionsBuilder.maxTokens(maxThinkingTokens);
+        }
+        // thinkingMode=model：extraBody 透传 enable_thinking，思考从 reasoning_content 提取
+        if ("model".equals(thinkingMode) && enableThinking) {
+            optionsBuilder.extraBody(Map.of("enable_thinking", true));
+        }
+
+        StringBuilder thinking = new StringBuilder();
+        try {
+            chatClient.prompt()
+                    .system(system.toString())
+                    .user(user.toString())
+                    .options(optionsBuilder.build())
+                    .stream()
+                    .chatResponse()
+                    .doOnNext(resp -> {
+                        String delta = extractThinkingDelta(resp, thinkingMode);
+                        if (delta != null && !delta.isBlank()) {
+                            thinking.append(delta);
+                            sendSseEvent(emitter, "thinking", delta, sessionId);
+                        }
+                    })
+                    .blockLast(Duration.ofMillis(Math.max(1000, timeoutMillis)));
+
+            // 阶段2：提取检索计划（剥离 <search> 块用于展示/持久化）
+            SearchPlan plan = extractSearchPlan(thinking.toString(), question);
+            String display = stripSearchBlock(thinking.toString(), plan.searchTag());
+            String status = multiRetrieval && !plan.subQueries().isEmpty() ? "ok" : "ok";
+            Map<String, Object> done = new LinkedHashMap<>();
+            done.put("status", status);
+            done.put("thinking", display);
+            sendSseEvent(emitter, "thinking_done", JSON.toJSONString(done), sessionId);
+            log.info("[DEEP-THINK] 思考完成 {} 字, refined={}, subs={}", display.length(), plan.refinedQuery(), plan.subQueries());
+            return new DeepThinkResult(true, display, plan.refinedQuery(), plan.subQueries());
+        } catch (Exception e) {
+            log.warn("[DEEP-THINK] 思考失败/超时，降级普通检索: {}", e.getMessage());
+            String display = stripSearchBlock(thinking.toString(), "search");
+            Map<String, Object> done = new LinkedHashMap<>();
+            done.put("status", "degraded");
+            done.put("thinking", display);
+            sendSseEvent(emitter, "thinking_done", JSON.toJSONString(done), sessionId);
+            return new DeepThinkResult(false, display, question, List.of());
+        }
+    }
+
+    /** 检索计划：精化 query + 子问题列表 */
+    private record SearchPlan(String refinedQuery, List<String> subQueries, String searchTag) {
+    }
+
+    /** 从思考文本提取 <search>精化query|子问题1|子问题2</search>；未命中返回原始问题 */
+    private SearchPlan extractSearchPlan(String thinking, String fallback) {
+        String tag = configService.get("deepReasoning.searchTag");
+        if (tag == null || tag.isBlank()) tag = "search";
+        String escapedTag = Pattern.quote(tag);
+        Pattern p = Pattern.compile("<" + escapedTag + ">([\\s\\S]*?)</" + escapedTag + ">");
+        Matcher m = p.matcher(thinking == null ? "" : thinking);
+        if (m.find()) {
+            String[] parts = m.group(1).split("\\|");
+            List<String> list = Arrays.stream(parts)
+                    .map(String::trim)
+                    .filter(s -> !s.isBlank())
+                    .toList();
+            if (!list.isEmpty()) {
+                int maxSub = configService.getInt("deepReasoning.maxSubQueries");
+                List<String> subs = list.size() > 1
+                        ? list.subList(1, Math.min(list.size(), 1 + Math.max(0, maxSub)))
+                        : List.of();
+                return new SearchPlan(list.get(0), subs, tag);
+            }
+        }
+        return new SearchPlan(fallback, List.of(), tag);
+    }
+
+    /** 剥离 <search>...</search> 块（思考展示/持久化不含检索计划） */
+    private String stripSearchBlock(String thinking, String tag) {
+        if (thinking == null || thinking.isBlank()) return "";
+        String escapedTag = Pattern.quote(tag == null || tag.isBlank() ? "search" : tag);
+        return thinking.replaceAll("<" + escapedTag + ">[\\s\\S]*?</" + escapedTag + ">", "").trim();
+    }
+
+    /** 按 thinkingMode 从 ChatResponse 提取思考增量：model=metadata.reasoningContent（回退 text）；prompt=text */
+    private String extractThinkingDelta(ChatResponse resp, String thinkingMode) {
+        if (resp == null || resp.getResult() == null || resp.getResult().getOutput() == null) return null;
+        Object output = resp.getResult().getOutput();
+        if (!(output instanceof AssistantMessage am)) return null;
+        if ("model".equals(thinkingMode)) {
+            Object rc = am.getMetadata().get("reasoningContent");
+            if (rc != null && !String.valueOf(rc).isBlank()) {
+                return String.valueOf(rc);
+            }
+        }
+        // prompt 模式或 metadata 无思考内容：回退 content 文本
+        String text = am.getText();
+        return (text == null || text.isBlank()) ? null : text;
     }
 
     private void sendSseEvent(SseEmitter emitter, String type, String content, String sessionId) {

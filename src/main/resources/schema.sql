@@ -1,6 +1,6 @@
 -- ============================================
--- DTBD AI Service 数据库表结构
--- 数据库: dtbd_ai
+-- AI 文档助手 数据库表结构
+-- 数据库: ai_doc_assistant
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS `c_ai_document` (
@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS `c_ai_message` (
     `session_id`  VARCHAR(50)  NOT NULL COMMENT '所属会话ID',
     `role`        VARCHAR(20)  NOT NULL COMMENT '角色: user / assistant',
     `content`     TEXT         NOT NULL COMMENT '消息内容',
+    `thinking`    TEXT         DEFAULT NULL COMMENT '思考过程全文(深度思考)',
     `images`      VARCHAR(2000) DEFAULT NULL COMMENT '关联图片URL (JSON数组字符串)',
     `sources`     TEXT         DEFAULT NULL COMMENT '引用来源 (JSON数组字符串)',
     `sequence`    INT          NOT NULL DEFAULT 0 COMMENT '消息序号 (会话内递增)',
@@ -68,6 +69,9 @@ CREATE TABLE IF NOT EXISTS `c_ai_message` (
 -- ALTER TABLE `c_ai_document` ADD COLUMN `fail_reason` VARCHAR(500) DEFAULT NULL COMMENT '解析失败原因(status=3)' AFTER `status`;
 -- 2026-08-13: 存量库需手动执行以下 ALTER（问答日志新增改写问题列）
 -- ALTER TABLE `c_ai_qa_log` ADD COLUMN `rewritten_query` TEXT DEFAULT NULL COMMENT '改写后的检索用问题' AFTER `question`;
+-- 2026-08-15: 存量库需手动执行以下 ALTER（深度思考功能：消息表加思考全文、日志表加深度思考标记）
+-- ALTER TABLE `c_ai_message` ADD COLUMN `thinking` TEXT DEFAULT NULL COMMENT '思考过程全文(深度思考)' AFTER `content`;
+-- ALTER TABLE `c_ai_qa_log` ADD COLUMN `deep_think` INT DEFAULT 0 COMMENT '是否深度思考: 0=否,1=是' AFTER `rewritten_query`;
 
 -- ============================================
 -- 2026-08-11: 问答数据闭环（日志 + 反馈）
@@ -78,6 +82,7 @@ CREATE TABLE IF NOT EXISTS `c_ai_qa_log` (
     `session_id`      VARCHAR(50)  DEFAULT NULL COMMENT '会话ID',
     `question`        TEXT         COMMENT '用户问题',
     `rewritten_query` TEXT         DEFAULT NULL COMMENT '改写后的检索用问题',
+    `deep_think`      INT          DEFAULT 0 COMMENT '是否深度思考: 0=否,1=是',
     `answer_summary`  VARCHAR(1000) DEFAULT NULL COMMENT '回答摘要(前500字)',
     `hit_doc_ids`     VARCHAR(1000) DEFAULT NULL COMMENT '命中文档ID列表(逗号分隔)',
     `has_citation`    INT          DEFAULT 0 COMMENT '是否有引用标注',

@@ -48,6 +48,18 @@
                   <img v-for="(u, ui) in m.images" :key="ui" :src="resolveImg(u)"
                        class="msg-img" :alt="'上传图片' + (ui + 1)" @click="openPreviewFromMsg(m, ui)" @error="onImgError" />
                 </div>
+                <!-- 深度思考折叠面板（AI 消息有 thinking 时显示，可展开/收起） -->
+                <div v-if="m.role === 'ai' && m.thinking" class="think-panel" :class="{ open: m.thinkOpen }">
+                  <div class="think-head" @click="m.thinkOpen = !m.thinkOpen">
+                    <down-outlined class="think-arrow" />
+                    <span class="think-title">深度思考</span>
+                    <a-spin v-if="m.thinkLoading" size="small" style="margin-left:6px" />
+                    <span v-else class="think-badge">已完成</span>
+                  </div>
+                  <div v-show="m.thinkOpen" class="think-body" :ref="el => thinkingBodyRefs[i] = el" @click.stop>
+                    <div class="md" v-html="render(m.thinking, [])"></div>
+                  </div>
+                </div>
                 <div class="md" :data-msg-index="i" v-html="render(m.content, m.images)"></div>
                 <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
                 <!-- 引用来源（回答中 [N] 角标点击查看原文片段） -->
@@ -189,6 +201,15 @@
         </div>
 
         <div class="input">
+          <!-- 深度思考开关（localStorage 记忆，默认关） -->
+          <div class="deep-think-toggle">
+            <span class="dt-label">深度思考</span>
+            <a-switch v-model:checked="deepThinkOn" size="small" :disabled="loading"
+                      @change="onDeepThinkChange" />
+            <a-tooltip title="开启后 AI 先展示思考过程，再基于思考结论多路检索后回答（更深入但更慢）" placement="top">
+              <question-circle-outlined style="color:#bbb;font-size:12px;margin-left:4px" />
+            </a-tooltip>
+          </div>
           <!-- 待发送图片预览（点击可放大查看） -->
           <div v-if="pendingImages.length" class="pending-imgs">
             <div v-for="(p, pi) in pendingImages" :key="pi" class="pending-img">
@@ -230,12 +251,20 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import 'highlight.js/styles/github.css'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined } from '@ant-design/icons-vue'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
 const text = ref('')
 const textareaRef = ref(null)
+// 深度思考开关（localStorage 记忆偏好，默认关）
+const deepThinkOn = ref(localStorage.getItem('ai_deep_think') === '1')
+// 思考面板 body 引用（思考中自动滚动到底部，跟随最新内容）
+const thinkingBodyRefs = []
+// 开关变更持久化（script 中访问浏览器全局 localStorage，模板内联表达式会被编译为 _ctx 属性导致 undefined）
+const onDeepThinkChange = checked => {
+  localStorage.setItem('ai_deep_think', checked ? '1' : '0')
+}
 
 // 检索调试状态
 const debugVisible = ref(false)
@@ -575,7 +604,9 @@ async function switchSession(sid) {
           messageId: m.messageId || m.id || null,
           images: Array.isArray(m.images) ? m.images : [],
           sources: Array.isArray(m.sources) ? m.sources : [],
-          related: []
+          related: [],
+          thinking: m.thinking || '',
+          thinkOpen: false
         }))
       scroll()
     } else {
@@ -751,18 +782,20 @@ const send = () => {
   if ((!q && !imgs.length) || loading.value) return
   text.value = ''
   pendingImages.value = []
-  messages.value.push({ role: 'user', content: q, images: imgs })
-  streamAnswer(q, imgs, null, messages.value.length === 1)
+  const deep = deepThinkOn.value
+  messages.value.push({ role: 'user', content: q, images: imgs, deepThink: deep })
+  streamAnswer(q, imgs, null, messages.value.length === 1, 1, deep)
 }
 
 // 统一流式回答：replaceIdx 为 null 追加新 AI 消息；否则替换该条（重新生成）
 // autoRetry：剩余自动重试次数（仅"未收到任何 token"的瞬时断连才自动重试，避免清空已生成内容）
-const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1) => {
+// deepThink：是否深度思考（开启后后端先流式下发 thinking 事件）
+const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1, deepThink = false) => {
   const idx = replaceIdx ?? messages.value.length
   if (replaceIdx == null) {
-    messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], loading: true })
+    messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], loading: true, thinking: '', thinkOpen: true, thinkLoading: false })
   } else {
-    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], loading: true, messageId: null, fb: null }
+    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], loading: true, messageId: null, fb: null, thinking: '', thinkOpen: true, thinkLoading: false }
   }
   loading.value = true
   abortController.value = new AbortController()
@@ -770,7 +803,27 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1)
   let gotToken = false
   sendQuestion(currentSessionId.value, question, imgs, {
     signal: abortController.value.signal,
-    onToken: t => { gotToken = true; full += t; messages.value[idx].content = full; scroll() },
+    deepThink,
+    onThinking: t => {
+      const m = messages.value[idx]
+      m.thinking = (m.thinking || '') + t
+      m.thinkLoading = true
+      scroll()
+      // 思考面板内部自动滚动到底（思考内容超出面板高度时跟随最新）
+      nextTick(() => {
+        const body = thinkingBodyRefs[idx]
+        if (body) body.scrollTop = body.scrollHeight
+      })
+    },
+    onThinkingDone: payload => {
+      const m = messages.value[idx]
+      m.thinkLoading = false
+      try {
+        const j = JSON.parse(payload)
+        if (j.thinking) m.thinking = j.thinking
+      } catch (e) { /* 兼容旧 payload */ }
+    },
+    onToken: t => { gotToken = true; full += t; messages.value[idx].content = full; messages.value[idx].thinkLoading = false; scroll() },
     onImage: imgs => {
       try {
         const parsed = JSON.parse(imgs)
@@ -780,13 +833,15 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1)
       }
     },
     onDone: contentJson => {
-      // done 事件 content 为 {sources, related, messageId} JSON 字符串
+      // done 事件 content 为 {sources, related, messageId, thinking} JSON 字符串
       let sources = [], related = [], messageId = null
       try {
         const p = JSON.parse(contentJson || '{}')
         sources = Array.isArray(p.sources) ? p.sources : []
         related = Array.isArray(p.related) ? p.related : []
         messageId = p.messageId || null
+        if (p.thinking) messages.value[idx].thinking = p.thinking
+        messages.value[idx].thinkLoading = false
         // 后端图片相关性校验后下发的修正内容/图片（覆盖流式中间态，保证 [图片N] 编号与图一致）
         if (typeof p.finalContent === 'string' && p.finalContent !== '') {
           messages.value[idx].content = p.finalContent
@@ -816,7 +871,7 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1)
         setTimeout(() => {
           // 等待期间消息列表可能已变化（切换/清空会话），放弃自动重试
           if (idx < messages.value.length && messages.value[idx]?.role === 'ai' && messages.value[idx]?.loading) {
-            streamAnswer(question, imgs, idx, false, 0)
+            streamAnswer(question, imgs, idx, false, 0, deepThink)
           } else {
             if (messages.value[idx]) messages.value[idx].retrying = false
             loading.value = false
@@ -843,9 +898,10 @@ const regenerate = mi => {
   if (loading.value) return
   for (let i = mi - 1; i >= 0; i--) {
     if (messages.value[i].role === 'user') {
-      // 仅本地 dataUrl 图片可重发（历史 URL 图跳过，避免后端无法处理）
+      // 仅本地 dataUrl 图片可重发（历史 URL 图跳过，避免后端无法处理）；复用原问题的深度思考开关
       const imgs = (messages.value[i].images || []).filter(u => u.startsWith('data:'))
-      streamAnswer(messages.value[i].content, imgs, mi, false)
+      const deep = !!messages.value[i].deepThink
+      streamAnswer(messages.value[i].content, imgs, mi, false, 1, deep)
       return
     }
   }
@@ -1143,6 +1199,53 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .bubble.ai { background: #f5f5f5; color: #333; }
 .input { padding: 12px 48px 16px; border-top: 1px solid #f0f0f0; }
 .input-box { position: relative; }
+/* 深度思考开关 */
+.deep-think-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #666;
+}
+.deep-think-toggle .dt-label { font-weight: 500; }
+/* 深度思考折叠面板（AI 气泡内） */
+.think-panel {
+  margin: 4px 0 8px;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  background: #fafafa;
+  overflow: hidden;
+}
+.think-panel .think-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: #888;
+}
+.think-panel .think-head:hover { background: #f0f0f0; }
+.think-panel .think-arrow {
+  font-size: 10px;
+  transition: transform .2s;
+  color: #999;
+}
+.think-panel.open .think-arrow { transform: rotate(180deg); }
+.think-panel .think-title { font-weight: 600; color: #555; }
+.think-panel .think-badge { font-size: 11px; color: #bbb; }
+.think-panel .think-body {
+  padding: 0 10px 8px;
+  border-top: 1px dashed #eee;
+  color: #666;
+  font-size: 12px;
+  line-height: 1.7;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.think-panel .think-body .md :deep(p) { margin: 4px 0; }
 /* 待发送图片预览 */
 .pending-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .pending-img { position: relative; }

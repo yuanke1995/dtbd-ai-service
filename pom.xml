@@ -12,10 +12,10 @@
     </parent>
 
     <groupId>com.wisesoft</groupId>
-    <artifactId>dtbd-ai-service</artifactId>
+    <artifactId>ai-doc-assistant</artifactId>
     <version>1.0.1-SNAPSHOT</version>
-    <name>dtbd-ai-service</name>
-    <description>DTBD AI Service - RAG Knowledge Assistant</description>
+    <name>ai-doc-assistant</name>
+    <description>AI Doc Assistant - RAG Knowledge Assistant</description>
 
     <properties>
         <java.version>17</java.version>

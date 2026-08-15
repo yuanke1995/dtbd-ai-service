@@ -1,4 +1,4 @@
-# DTBD AI Service
+# AI 文档助手
 
 报表平台独立 AI 服务，基于 Spring AI 实现 RAG 知识库问答。支持 Word/PDF/Excel 文档解析（含扫描 PDF OCR）、混合检索 + 查询改写、价值驱动上下文控制、回答中位置级展示文档原图、引用溯源、会话管理（搜索/置顶/收藏）、文档版本管理、数据看板与知识缺口闭环，是面向"操作手册问答"场景的完整智能助手。
 
@@ -8,7 +8,7 @@
 |------|------|
 | 后端 | Java 17 + Spring Boot 3.5.15 + Spring AI 1.1.8 |
 | ORM | MyBatis-Plus 3.5.12 |
-| 数据库 | OceanBase（MySQL 协议，库 `dtbd_init`） |
+| 数据库 | OceanBase（MySQL 协议，库 `ai_doc_assistant`） |
 | 向量库 | Redis Stack（RediSearch，docker 映射端口 **6380**，Jedis 客户端） |
 | LLM | 阿里云 MaaS 网关（OpenAI 兼容：chat=`qwen3.7-flash-2026-07-15`，embedding=`qwen3.7-text-embedding`，base-url 不含 `/v1`）；图片理解/OCR 走本地 Ollama `qwen3-vl:2b` |
 | 文档解析 | Apache POI 5.2.3（docx/xlsx）+ PDFBox 3.0.2（含扫描件 OCR 降级） |
@@ -17,7 +17,7 @@
 ## 目录结构
 
 ```
-dtbd-ai-service/
+ai-doc-assistant/
 ├── pom.xml                          # 后端 Maven 项目（spring-ai-bom 统一管理版本）
 ├── src/main/java/.../ai/
 │   ├── AiApplication.java           # 入口
@@ -55,9 +55,9 @@ ollama pull qwen3-vl:2b
 ```
 > 建议设置环境变量 `OLLAMA_NUM_PARALLEL=4`（否则多图描述串行排队）；4GB 显存机器并发度建议 `vision.concurrency=2`。
 
-**数据库**：现有 OceanBase 库 `dtbd_init`（库需预先存在）。表结构（`c_ai_document`/`c_ai_knowledge`/`c_ai_session`/`c_ai_message`/`c_ai_qa_log`/`c_ai_qa_feedback`/`c_ai_config`/`c_ai_document_version`）由应用启动自动执行 `schema.sql` 创建（全部 `CREATE TABLE IF NOT EXISTS`，重复启动安全）；也可手动执行：
+**数据库**：现有 OceanBase 库 `ai_doc_assistant`（库需预先存在）。表结构（`c_ai_document`/`c_ai_knowledge`/`c_ai_session`/`c_ai_message`/`c_ai_qa_log`/`c_ai_qa_feedback`/`c_ai_config`/`c_ai_document_version`）由应用启动自动执行 `schema.sql` 创建（全部 `CREATE TABLE IF NOT EXISTS`，重复启动安全）；也可手动执行：
 ```bash
-mysql -h172.168.10.65 -P2881 -uroot -p dtbd_init < src/main/resources/schema.sql
+mysql -h172.168.10.65 -P2881 -uroot -p ai_doc_assistant < src/main/resources/schema.sql
 ```
 
 ### 2. 配置环境变量
@@ -65,7 +65,7 @@ mysql -h172.168.10.65 -P2881 -uroot -p dtbd_init < src/main/resources/schema.sql
 ```bash
 # ===== 必填（无默认值，缺失将启动失败 fail-fast）=====
 export DB_PASSWORD=xxx                    # 数据库密码
-export AI_TRUSTED_TOKEN=xxx               # 内部鉴权 token（与 dtbd-core 一致）
+export AI_TRUSTED_TOKEN=xxx               # 内部鉴权 token（与平台网关一致）
 export AI_DEEPSEEK_KEY=sk-xxxx            # chat 模型密钥（MaaS 网关）
 
 # ===== 可选 =====
@@ -81,7 +81,7 @@ export AI_IMAGE_FILTER_ENABLED=true       # 回答图片相关性校验开关（
 export LOG_LEVEL_APP=info                 # 应用日志级别
 ```
 
-**本地开发**：无需 export，把真实值直接写入 `src/main/resources/application-local.yml`（私有文件，已加入 .gitignore；**数据目录 `ai-app.images.dir` 也在此配置**，Windows 机器改成 `D:/workspace/dtbd-ai-service/data` 即可，天然区分平台），然后以 `local` profile 启动（application.yml 已默认激活 local）：
+**本地开发**：无需 export，把真实值直接写入 `src/main/resources/application-local.yml`（私有文件，已加入 .gitignore；**数据目录 `ai-app.images.dir` 也在此配置**，Windows 机器改成 `D:/workspace/ai-doc-assistant/data` 即可，天然区分平台），然后以 `local` profile 启动（application.yml 已默认激活 local）：
 - IDEA：Run Configuration → Active profiles 填 `local`
 - 命令行：`SPRING_PROFILES_ACTIVE=local mvn spring-boot:run`
 
@@ -93,7 +93,7 @@ mvn spring-boot:run
 
 # 方式二：打包后运行
 mvn clean package -DskipTests
-java -jar target/dtbd-ai-service-1.0.1-SNAPSHOT.jar
+java -jar target/ai-doc-assistant-1.0.1-SNAPSHOT.jar
 
 # 方式三：Docker Compose（含 redis-stack）
 docker compose up -d
@@ -156,7 +156,7 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 
 ## 与报表平台集成
 
-生产环境由 dtbd-core 的 `AiProxyController` 做 JWT 鉴权并透传请求（前端调 `/dtbd/api/ai/*`，见 `web/.env.production`）。
+生产环境由平台网关做 JWT 鉴权并透传请求（前端调 `/api/ai/*`，见 `web/.env.production`）。
 **注意**：
 1. 平台网关需额外透传图片路径 `/ai/images/**`（生产开启图片鉴权时，图片 URL 带 HMAC 签名与过期时间，由本服务动态生成）
 2. SSE 接口（`/chat`）网关需关闭响应缓冲，否则流式 token 无法实时到达
@@ -246,7 +246,7 @@ spring:
     base-url: <MaaS 网关 /compatible-mode> # 不含 /v1（Spring AI 自动补）
     chat: { options: { model: qwen3.7-flash-2026-07-15, temperature: 0.3 } }
     embedding: { base-url: ... , options: { model: qwen3.7-text-embedding } }
-  ai.vectorstore.redis: { initialize-schema: true, index-name: dtbd-ai-index, prefix: "ai:chunk:" }  # Spring AI 1.1 起属性为 index-name
+  ai.vectorstore.redis: { initialize-schema: true, index-name: ai-doc-index, prefix: "ai:chunk:" }  # Spring AI 1.1 起属性为 index-name
 ```
 
 > **System Prompt 外置边界**：仅"角色与回答风格"段可编辑（设置页）；引用 `[N]` / 图片 `[图片N]` / 追问 `<related>` 规则与后端解析器强耦合，保留代码固定，避免改坏导致解析失效。

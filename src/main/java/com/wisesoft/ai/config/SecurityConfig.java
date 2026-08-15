@@ -16,7 +16,7 @@ import java.security.MessageDigest;
 
 /**
  * 内部鉴权拦截器
- * 只允许携带正确 X-Trusted-Token 的请求（来自 dtbd-core 代理）
+ * 只允许携带正确 X-Trusted-Token 的请求（来自平台网关代理）
  * token 必须通过环境变量 AI_TRUSTED_TOKEN 配置（缺失则启动失败），
  * 比较采用恒定时间算法防止时序攻击
  *

@@ -5,7 +5,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
- * DTBD AI 服务入口
+ * AI 文档助手服务入口
  *
  * @author yuanke
  */

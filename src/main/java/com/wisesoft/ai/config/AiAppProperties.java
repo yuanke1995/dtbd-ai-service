@@ -22,13 +22,15 @@ public class AiAppProperties {
 
     private QueryRewrite queryRewrite = new QueryRewrite();
 
+    private DeepReasoning deepReasoning = new DeepReasoning();
+
     private Context context = new Context();
 
     /** 主回答 System Prompt 角色段（DB 可编辑覆盖，保存即生效；此处为兜底默认值） */
     private String systemPrompt = "你是\"小报\"，一个基于操作手册知识库回答系统使用问题的AI助手。"
             + "回答应准确、简洁，优先依据参考资料，不要编造不存在的内容。";
 
-    /** 内部信任 token（dtbd-core 代理调用时携带；必须通过环境变量配置，无默认值） */
+    /** 内部信任 token（平台网关代理调用时携带；必须通过环境变量配置，无默认值） */
     private String trustedToken;
 
     @Data
@@ -134,6 +136,38 @@ public class AiAppProperties {
         private String promptMultiTurn = "以下是一段对话历史。请根据上下文，将最后一条用户消息改写为一个独立、精准的检索关键词或短语，用于检索操作手册知识库。"
                 + "要求：1) 只输出改写后的文本，不要解释；2) 如果最后一条消息是追问（如'那删除呢'），结合历史补全为完整问题；"
                 + "3) 保留核心动作和对象。\n\n对话历史：\n%s";
+    }
+
+    /**
+     * 深度思考（生产级）：
+     * 阶段1 思考流式输出思维链（enable_thinking 透传 / 提示词引导双模式）
+     * → 阶段2 从思考文本提取 <search> 检索计划（精化 query + 子问题）
+     * → 阶段3 多路并行检索合并 → 复用现有上下文构建与回答流
+     */
+    @Data
+    public static class DeepReasoning {
+        /** 总开关（前端开关关闭时不进本流程） */
+        private boolean enabled = true;
+        /** 思考模式：model=extraBody 透传 enable_thinking 从 reasoning_content 提取；prompt=提示词引导输出到 content */
+        private String thinkingMode = "model";
+        /** 是否透传 enable_thinking=true（thinkingMode=model 时生效） */
+        private boolean enableThinking = true;
+        /** 思考引导 prompt（要求先分析不答答案，末尾输出 <search> 检索计划） */
+        private String prompt = "你是一个严谨的分析助手。请只输出对用户问题的深度思考过程，不要直接给出最终答案。"
+                + "要求：1) 先拆解问题关键点，分析可能的知识来源与回答方向；2) 思考要条理清晰、覆盖全面；"
+                + "3) 思考结束后，在最后单独一行输出检索计划，严格按格式：\n"
+                + "<search>精化后的检索query|子问题1|子问题2</search>\n"
+                + "第一个是用于检索知识库的精化查询短语，| 分隔的子问题是需要分别检索的子问题（最多3个）。";
+        /** 检索计划标签名（<search>/</search>） */
+        private String searchTag = "search";
+        /** 最大子问题数（不含精化 query） */
+        private int maxSubQueries = 3;
+        /** 多路并行检索开关 */
+        private boolean multiRetrieval = true;
+        /** 思考阶段超时(ms)，超时用已有内容降级 */
+        private int timeoutMillis = 30000;
+        /** 思考输出上限 token（0=不设，规避 qwen 思考模式 max_tokens 空输出） */
+        private int maxThinkingTokens = 0;
     }
 
     /**

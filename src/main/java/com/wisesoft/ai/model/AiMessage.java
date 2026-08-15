@@ -29,6 +29,9 @@ public class AiMessage {
     /** 消息内容 */
     private String content;
 
+    /** 思考过程全文（深度思考） */
+    private String thinking;
+
     /** 关联图片URL (JSON数组字符串) */
     private String images;
 

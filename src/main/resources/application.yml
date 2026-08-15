@@ -5,7 +5,7 @@ server:
 
 spring:
   application:
-    name: dtbd-ai-service
+    name: ai-doc-assistant
   profiles:
     # 本地开发：local（每台机器独立的本地配置，含密钥与数据目录，已被 gitignore）
     # 生产部署：不激活 local，通过环境变量提供密钥与 AI_IMAGES_DIR
@@ -20,7 +20,7 @@ spring:
   # 数据库（独立库，密码必须通过环境变量 DB_PASSWORD 提供，缺失启动即失败）
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://127.0.0.1:3306/dtbd_init?useUnicode=true&useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8&nullCatalogMeansCurrent=true
+    url: jdbc:mysql://127.0.0.1:3306/ai_doc_assistant?useUnicode=true&useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8&nullCatalogMeansCurrent=true
     username: root
     password: ${DB_PASSWORD}
 
@@ -60,7 +60,7 @@ spring:
     vectorstore:
       redis:
         initialize-schema: true
-        index-name: dtbd-ai-index
+        index-name: ai-doc-index
         prefix: "ai:chunk:"
 
 # MyBatis-Plus（SQL 日志默认走 slf4j，级别由 LOG_LEVEL_SQL 控制）
@@ -151,7 +151,24 @@ ai-app:
     # 知识块命中片段窗口（命中关键词前后各 N 字，0=整块）
     snippet-window-chars: 150
     max-context-hits: 8
-  # 内部鉴权 token（与 dtbd-core 一致；必须通过环境变量 AI_TRUSTED_TOKEN 提供，缺失启动即失败）
+  # 深度思考（生产级：思考流式 → 提取检索计划 → 多路并行检索 → 回答）
+  deep-reasoning:
+    enabled: ${AI_DEEP_REASONING_ENABLED:true}
+    # 思考模式：model=透传 enable_thinking 从 reasoning_content 提取；prompt=提示词引导输出到 content
+    thinking-mode: ${AI_DEEP_REASONING_MODE:model}
+    # 是否透传 enable_thinking=true（thinkingMode=model 时生效）
+    enable-thinking: true
+    # 检索计划标签名
+    search-tag: search
+    # 最大子问题数（不含精化 query）
+    max-sub-queries: 3
+    # 多路并行检索开关
+    multi-retrieval: true
+    # 思考阶段超时(ms)
+    timeout-millis: 30000
+    # 思考输出上限 token（0=不设，规避 qwen 思考模式 max_tokens 空输出）
+    max-thinking-tokens: 0
+  # 内部鉴权 token（与平台网关一致；必须通过环境变量 AI_TRUSTED_TOKEN 提供，缺失启动即失败）
   trusted-token: ${AI_TRUSTED_TOKEN}
 
 logging:

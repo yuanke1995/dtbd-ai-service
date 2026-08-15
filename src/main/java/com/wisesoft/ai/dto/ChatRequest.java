@@ -23,4 +23,7 @@ public class ChatRequest {
 
     @Schema(description = "用户上传图片（data URL 格式，如 data:image/jpeg;base64,xxx）")
     private List<String> images;
+
+    @Schema(description = "是否深度思考（思考流式展示 + 多路检索增强）", example = "false")
+    private boolean deepThink;
 }

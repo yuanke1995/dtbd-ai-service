@@ -105,6 +105,51 @@ public class HybridRetrievalService {
         return result;
     }
 
+    /** 多路并行检索线程池（daemon，供深度思考多路检索用） */
+    private final ExecutorService multiSearchPool = Executors.newFixedThreadPool(4, r -> {
+        Thread t = new Thread(r, "multi-search");
+        t.setDaemon(true);
+        return t;
+    });
+
+    @jakarta.annotation.PreDestroy
+    void shutdownMultiSearch() {
+        multiSearchPool.shutdownNow();
+    }
+
+    /**
+     * 多路并行检索（深度思考用）：多个 query 并行调用 search()，按 knowledgeId 合并去重，保留最高分
+     * 单 query 直接委托 search()；并行总超时 8s（超时用已完成结果）
+     */
+    public List<Hit> searchMulti(List<String> queries) {
+        if (queries == null || queries.isEmpty()) return List.of();
+        List<String> qs = queries.stream().map(String::trim).filter(q -> !q.isBlank()).distinct().toList();
+        if (qs.size() <= 1) {
+            return qs.isEmpty() ? List.of() : search(qs.get(0));
+        }
+        try {
+            List<CompletableFuture<List<Hit>>> futures = qs.stream()
+                    .map(q -> CompletableFuture.supplyAsync(() -> search(q), multiSearchPool))
+                    .toList();
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .get(8000, TimeUnit.MILLISECONDS);
+            // 合并：同一 knowledgeId 保留 score 最高者（跨 query 分数同体系可直接 max）
+            Map<String, Hit> merged = new LinkedHashMap<>();
+            for (CompletableFuture<List<Hit>> f : futures) {
+                List<Hit> hits = f.isDone() ? f.getNow(List.of()) : List.of();
+                for (Hit h : hits) {
+                    merged.merge(h.knowledgeId(), h, (a, b) -> a.score() >= b.score() ? a : b);
+                }
+            }
+            List<Hit> result = new ArrayList<>(merged.values());
+            result.sort((a, b) -> Double.compare(b.score(), a.score()));
+            return result;
+        } catch (Exception e) {
+            log.warn("多路检索失败，降级首路: {}", e.getMessage());
+            return search(qs.get(0));
+        }
+    }
+
     /**
      * 向量召回（独立方法，供检索调试复用）
      */
