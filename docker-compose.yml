@@ -25,6 +25,8 @@ services:
       # 可选
       REDIS_HOST: redis-stack
       REDIS_PORT: "6379"
+      # 数据目录必须指向容器内挂载卷的路径（与下方 volumes app-data:/app/data 一致）
+      AI_IMAGES_DIR: /app/data
       AI_IMAGES_AUTH_ENABLED: ${AI_IMAGES_AUTH_ENABLED:-true}
       LOG_LEVEL_APP: ${LOG_LEVEL_APP:-info}
     volumes:

@@ -1,24 +1,23 @@
 <template>
   <a-card title="文档管理">
-    <template #extra>
-      <div style="display:flex;align-items:center;gap:12px">
-        <a-input v-model:value="desc" placeholder="文档描述（可选）" style="width:180px" allow-clear />
-        <a-input v-model:value="uploadCategory" placeholder="分类（可选）" style="width:120px" allow-clear />
+    <!-- 工具栏：左侧筛选 / 右侧上传操作 -->
+    <div class="toolbar">
+      <div class="toolbar-filter">
+        <span class="filter-label">分类筛选</span>
+        <a-select v-model:value="filterCategory" style="width:150px" allow-clear placeholder="全部"
+                  :options="categoryOptions" @change="fetchList()" />
+      </div>
+      <div class="toolbar-upload">
+        <a-input v-model:value="desc" placeholder="文档描述（可选）" style="width:170px" allow-clear />
+        <a-input v-model:value="uploadCategory" placeholder="上传分类（可选）" style="width:130px" allow-clear />
         <a-upload :before-upload="beforeUpload" :show-upload-list="false" accept=".docx,.pdf,.xlsx" multiple :disabled="uploading">
           <a-button type="primary" :loading="uploading">
             <upload-outlined /> {{ uploading ? '上传中...' : '上传文档' }}
           </a-button>
         </a-upload>
       </div>
-      <a-progress v-if="uploading" :percent="uploadPercent" size="small" style="margin-top:8px" />
-    </template>
-
-    <!-- 分类筛选 -->
-    <div style="margin-bottom:12px;display:flex;align-items:center;gap:8px">
-      <span style="color:#888;font-size:13px">分类筛选：</span>
-      <a-select v-model:value="filterCategory" style="width:160px" allow-clear placeholder="全部"
-                :options="categoryOptions" @change="fetchList()" />
     </div>
+    <a-progress v-if="uploading" :percent="uploadPercent" size="small" class="upload-progress" />
 
     <!-- 批量操作栏 -->
     <div v-if="selectedKeys.length" class="batch-bar">
@@ -439,6 +438,35 @@ const fmtTime = t => {
 </script>
 
 <style scoped>
+/* 工具栏：筛选在左、上传操作在右，窄屏自动换行 */
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-bottom: 14px;
+}
+.toolbar-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.filter-label {
+  color: #888;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.toolbar-upload {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.upload-progress {
+  margin-bottom: 14px;
+  max-width: 420px;
+}
 .batch-bar {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 12px; margin-bottom: 10px;

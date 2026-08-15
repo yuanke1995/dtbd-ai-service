@@ -22,6 +22,8 @@ public class AiAppProperties {
 
     private QueryRewrite queryRewrite = new QueryRewrite();
 
+    private Context context = new Context();
+
     /** 主回答 System Prompt 角色段（DB 可编辑覆盖，保存即生效；此处为兜底默认值） */
     private String systemPrompt = "你是\"小报\"，一个基于操作手册知识库回答系统使用问题的AI助手。"
             + "回答应准确、简洁，优先依据参考资料，不要编造不存在的内容。";
@@ -132,5 +134,31 @@ public class AiAppProperties {
         private String promptMultiTurn = "以下是一段对话历史。请根据上下文，将最后一条用户消息改写为一个独立、精准的检索关键词或短语，用于检索操作手册知识库。"
                 + "要求：1) 只输出改写后的文本，不要解释；2) 如果最后一条消息是追问（如'那删除呢'），结合历史补全为完整问题；"
                 + "3) 保留核心动作和对象。\n\n对话历史：\n%s";
+    }
+
+    /**
+     * 上下文与长度控制（价值驱动填充）：
+     * 预算 = min(模型窗口 × 安全系数 − 预留输出, 成本软上限)；块按相关度降序累积填充，历史按预算裁剪
+     */
+    @Data
+    public static class Context {
+        /** 模型上下文窗口映射（格式 "模型名子串=token,模型名子串=token"，按当前 chat.model 子串匹配；未匹配用默认值） */
+        private String modelWindows = "qwen-plus=131072,qwen3=131072,qwen-max=32768,deepseek=65536,default=32768";
+        /** 未匹配到模型时的默认窗口（token） */
+        private int defaultWindowTokens = 32768;
+        /** 窗口安全系数（0~1，预留余量防超窗） */
+        private double safetyFactor = 0.7;
+        /** 成本软上限（token，0=不限制）：即使模型窗口很大，单次请求输入也不超过此值，防止账单失控 */
+        private int costCapTokens = 8000;
+        /** 输出限制 maxTokens（同时从窗口预算中预留） */
+        private int maxOutputTokens = 2000;
+        /** 注入对话历史的 token 上限（超出按"保留用户问题优先"裁剪） */
+        private int historyMaxTokens = 1200;
+        /** 单条历史消息截断字符数 */
+        private int historyPerMsgChars = 200;
+        /** 知识块命中片段窗口（字符，命中关键词前后各取 N 字；0=整块塞入） */
+        private int snippetWindowChars = 150;
+        /** 上下文填充的最大块数（兜底上限，防候选极多时预算失控） */
+        private int maxContextHits = 8;
     }
 }

@@ -28,15 +28,24 @@ import java.util.Map;
 public class ConfigService {
 
     /** 可编辑白名单 */
-    private static final Map<String, String> EDITABLE = Map.of(
-            "chat.model", "智能问答模型名",
-            "chat.temperature", "回答温度(0~2)",
-            "chat.systemPrompt", "AI助手系统提示词（角色与回答风格）",
-            "vision.model", "视觉识别模型名",
-            "vision.prompt", "视觉识别提示词",
-            "retrieval.vectorWeight", "混合检索：向量权重(0~1)",
-            "retrieval.keywordWeight", "混合检索：关键词权重(0~1)",
-            "retrieval.titleBonus", "混合检索：标题命中奖励(0~1)");
+    private static final Map<String, String> EDITABLE = Map.ofEntries(
+            Map.entry("chat.model", "智能问答模型名"),
+            Map.entry("chat.temperature", "回答温度(0~2)"),
+            Map.entry("chat.systemPrompt", "AI助手系统提示词（角色与回答风格）"),
+            Map.entry("vision.model", "视觉识别模型名"),
+            Map.entry("vision.prompt", "视觉识别提示词"),
+            Map.entry("retrieval.vectorWeight", "混合检索：向量权重(0~1)"),
+            Map.entry("retrieval.keywordWeight", "混合检索：关键词权重(0~1)"),
+            Map.entry("retrieval.titleBonus", "混合检索：标题命中奖励(0~1)"),
+            Map.entry("context.modelWindows", "上下文：模型窗口映射（模型名=token,逗号分隔）"),
+            Map.entry("context.defaultWindowTokens", "上下文：模型默认窗口(token)"),
+            Map.entry("context.safetyFactor", "上下文：窗口安全系数(0~1)"),
+            Map.entry("context.costCapTokens", "上下文：成本软上限(token,0=不限制)"),
+            Map.entry("context.maxOutputTokens", "上下文：输出限制(token)"),
+            Map.entry("context.historyMaxTokens", "上下文：对话历史注入上限(token)"),
+            Map.entry("context.historyPerMsgChars", "上下文：单条历史截断(字符)"),
+            Map.entry("context.snippetWindowChars", "上下文：知识块命中片段窗口(字符,0=整块)"),
+            Map.entry("context.maxContextHits", "上下文：知识块填充上限(块)"));
 
     private final AiConfigMapper configMapper;
     private final AiAppProperties properties;
@@ -98,6 +107,15 @@ public class ConfigService {
         d.put("retrieval.vectorWeight", String.valueOf(properties.getRetrieval().getVectorWeight()));
         d.put("retrieval.keywordWeight", String.valueOf(properties.getRetrieval().getKeywordWeight()));
         d.put("retrieval.titleBonus", String.valueOf(properties.getRetrieval().getTitleBonus()));
+        d.put("context.modelWindows", properties.getContext().getModelWindows());
+        d.put("context.defaultWindowTokens", String.valueOf(properties.getContext().getDefaultWindowTokens()));
+        d.put("context.safetyFactor", String.valueOf(properties.getContext().getSafetyFactor()));
+        d.put("context.costCapTokens", String.valueOf(properties.getContext().getCostCapTokens()));
+        d.put("context.maxOutputTokens", String.valueOf(properties.getContext().getMaxOutputTokens()));
+        d.put("context.historyMaxTokens", String.valueOf(properties.getContext().getHistoryMaxTokens()));
+        d.put("context.historyPerMsgChars", String.valueOf(properties.getContext().getHistoryPerMsgChars()));
+        d.put("context.snippetWindowChars", String.valueOf(properties.getContext().getSnippetWindowChars()));
+        d.put("context.maxContextHits", String.valueOf(properties.getContext().getMaxContextHits()));
         return d;
     }
 
@@ -117,6 +135,14 @@ public class ConfigService {
             return Double.parseDouble(get(key));
         } catch (Exception e) {
             return 0.3;
+        }
+    }
+
+    public int getInt(String key) {
+        try {
+            return Integer.parseInt(get(key).trim());
+        } catch (Exception e) {
+            return 0;
         }
     }
 
@@ -145,7 +171,7 @@ public class ConfigService {
             if (t < 0 || t > 2) throw new IllegalArgumentException("temperature 需在 0~2 之间");
         }
         // 检索权重校验：必须是 0~1 的数字（防非法值导致检索排序异常）
-        for (String wKey : new String[]{"retrieval.vectorWeight", "retrieval.keywordWeight", "retrieval.titleBonus"}) {
+        for (String wKey : new String[]{"retrieval.vectorWeight", "retrieval.keywordWeight", "retrieval.titleBonus", "context.safetyFactor"}) {
             String w = updates.get(wKey);
             if (w != null && !w.isBlank()) {
                 try {
@@ -153,6 +179,18 @@ public class ConfigService {
                     if (v < 0 || v > 1) throw new IllegalArgumentException(wKey + " 需在 0~1 之间");
                 } catch (NumberFormatException e) {
                     throw new IllegalArgumentException(wKey + " 必须是数字");
+                }
+            }
+        }
+        // 上下文长度参数校验：必须是非负整数
+        for (String iKey : new String[]{"context.defaultWindowTokens", "context.costCapTokens", "context.maxOutputTokens",
+                "context.historyMaxTokens", "context.historyPerMsgChars", "context.snippetWindowChars", "context.maxContextHits"}) {
+            String v = updates.get(iKey);
+            if (v != null && !v.isBlank()) {
+                try {
+                    if (Integer.parseInt(v.trim()) < 0) throw new IllegalArgumentException(iKey + " 不能为负数");
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(iKey + " 必须是整数");
                 }
             }
         }
@@ -181,7 +219,7 @@ public class ConfigService {
     /** 全量配置（供配置界面展示；apiKey 脱敏） */
     public Map<String, Object> snapshot() {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] groups = {"chat", "vision", "embedding", "retrieval"};
+        String[] groups = {"chat", "vision", "embedding", "retrieval", "context"};
         for (String g : groups) {
             Map<String, Object> items = new LinkedHashMap<>();
             for (Map.Entry<String, String> d : defaults().entrySet()) {

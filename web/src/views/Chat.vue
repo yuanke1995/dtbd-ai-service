@@ -524,6 +524,7 @@ async function switchSession(sid) {
         .map(m => ({
           role: m.role === 'user' ? 'user' : 'ai',
           content: String(m.content || ''),
+          messageId: m.messageId || m.id || null,
           images: Array.isArray(m.images) ? m.images : [],
           sources: Array.isArray(m.sources) ? m.sources : [],
           related: []

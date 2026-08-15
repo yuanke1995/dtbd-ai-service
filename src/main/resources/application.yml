@@ -7,6 +7,8 @@ spring:
   application:
     name: dtbd-ai-service
   profiles:
+    # 本地开发：local（每台机器独立的本地配置，含密钥与数据目录，已被 gitignore）
+    # 生产部署：不激活 local，通过环境变量提供密钥与 AI_IMAGES_DIR
     active: local
 
   # 文件上传限制（Word/PDF 等文档，默认 1MB 太小）
@@ -92,9 +94,10 @@ ai-app:
     expire-minutes: 30
   # 文档图片提取
   images:
-    # 数据根目录（源文件/图片落盘）。必须是稳定绝对路径：
-    # 相对路径在 Tomcat/war 部署下会解析到临时解压目录（重启即清空导致上传失败）
-    dir: ${AI_IMAGES_DIR:D:/workspace/dtbd-ai-service/data}
+    # 数据根目录（源文件/图片落盘）。默认 ./data（跨平台兜底）。
+    # 本地开发在 application-local.yml（每机独立）配置本机绝对路径；
+    # 生产必须通过 AI_IMAGES_DIR 指定容器内绝对路径（docker-compose 已设 /app/data）。
+    dir: ${AI_IMAGES_DIR:./data}
     # 图片压缩：最长边像素，超过则等比缩小（0=不压缩）。
     # 768 是"识别速度"与"截图文字清晰度"的平衡点：视觉 token 数约为 1280 的 1/3，推理显著提速
     max-width: 768
@@ -132,6 +135,22 @@ ai-app:
   query-rewrite:
     enabled: ${AI_QUERY_REWRITE_ENABLED:true}
     timeout-millis: 5000
+  # 上下文与长度控制（价值驱动填充：预算 = min(窗口×系数−输出, 成本上限)，块按相关度累积）
+  context:
+    # 模型窗口映射（子串匹配当前 chat.model，未匹配用 default-window-tokens）
+    model-windows: ${AI_CONTEXT_MODEL_WINDOWS:qwen-plus=131072,qwen3=131072,qwen-max=32768,deepseek=65536,default=32768}
+    default-window-tokens: 32768
+    safety-factor: 0.7
+    # 成本软上限（token，0=不限制）：大窗口模型也防账单失控
+    cost-cap-tokens: ${AI_CONTEXT_COST_CAP:8000}
+    # 输出限制（同时从窗口预算中预留）
+    max-output-tokens: 2000
+    # 对话历史注入上限与单条截断
+    history-max-tokens: 1200
+    history-per-msg-chars: 200
+    # 知识块命中片段窗口（命中关键词前后各 N 字，0=整块）
+    snippet-window-chars: 150
+    max-context-hits: 8
   # 内部鉴权 token（与 dtbd-core 一致；必须通过环境变量 AI_TRUSTED_TOKEN 提供，缺失启动即失败）
   trusted-token: ${AI_TRUSTED_TOKEN}
 

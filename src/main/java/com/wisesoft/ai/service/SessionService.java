@@ -298,6 +298,7 @@ public class SessionService {
                 Map<String, Object> map = new HashMap<>();
                 map.put("role", m.getRole());
                 map.put("content", m.getContent());
+                map.put("messageId", m.getId()); // 与 SSE done 事件字段名一致，供前端反馈/导出等操作
                 if (m.getImages() != null && !m.getImages().isBlank()) {
                     try {
                         map.put("images", JSON.parseArray(m.getImages(), String.class));

@@ -19,6 +19,7 @@ import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -60,6 +61,14 @@ public class DocumentService {
     @PostConstruct
     void init() {
         parseExecutor = Executors.newFixedThreadPool(2);
+        // 跨平台保护：Windows 绝对路径（如 D:/xxx、C:\xxx）在非 Windows 系统上会被 Paths.get() 当作
+        // 相对路径，拼到 Tomcat 工作目录下导致上传/落盘失败。检测到即回退默认 ./data 并告警。
+        String dir = properties.getImages().getDir();
+        if (!File.separator.equals("\\") && dir != null && dir.matches("^[A-Za-z]:[\\\\/].*")) {
+            log.warn("images.dir 配置为 Windows 路径 {}，当前系统非 Windows，已回退为默认 ./data；"
+                    + "请在启动时通过环境变量 AI_IMAGES_DIR 指定正确的绝对路径", dir);
+            properties.getImages().setDir("data");
+        }
     }
 
     @PreDestroy
