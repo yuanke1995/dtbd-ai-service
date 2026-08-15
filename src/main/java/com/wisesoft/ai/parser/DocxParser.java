@@ -105,18 +105,9 @@ public class DocxParser implements DocumentParser {
                         }
                     }
                 } else if (element.getElementType() == BodyElementType.TABLE) {
-                    // 表格：行×列提取文本
+                    // 表格：解析为 Markdown 表格（保留行/列结构，LLM 可理解、前端可渲染）
                     XWPFTable table = (XWPFTable) element;
-                    StringBuilder tableText = new StringBuilder();
-                    for (XWPFTableRow row : table.getRows()) {
-                        for (XWPFTableCell cell : row.getTableCells()) {
-                            String ct = cell.getTextRecursively().trim();
-                            if (!ct.isEmpty()) {
-                                if (tableText.length() > 0) tableText.append(" | ");
-                                tableText.append(ct);
-                            }
-                        }
-                    }
+                    StringBuilder tableText = buildMarkdownTable(table);
                     if (tableText.length() > 0) {
                         if (content.length() > 0) content.append("\n");
                         content.append(tableText);
@@ -131,6 +122,42 @@ public class DocxParser implements DocumentParser {
             flushChunk(title, content, currentImages, chunks);
         }
         return chunks;
+    }
+
+    /**
+     * 将 Word 表格解析为 Markdown 表格文本（保留行/列结构）
+     * - 空单元格保留占位（保持列对齐）
+     * - 单元格内竖线转义（防止破坏表格语法）
+     * - 表头分隔行使用 | --- |
+     */
+    private StringBuilder buildMarkdownTable(XWPFTable table) {
+        List<List<String>> grid = new ArrayList<>();
+        int colCount = 0;
+        for (XWPFTableRow row : table.getRows()) {
+            List<String> cells = new ArrayList<>();
+            for (XWPFTableCell cell : row.getTableCells()) {
+                String ct = cell.getTextRecursively().trim();
+                // 单元格内换行折叠为空格，竖线转义防破坏表格
+                ct = ct.replaceAll("\\s+", " ").replace("|", "\\|");
+                cells.add(ct);
+            }
+            colCount = Math.max(colCount, cells.size());
+            grid.add(cells);
+        }
+        if (grid.isEmpty()) return new StringBuilder();
+
+        StringBuilder sb = new StringBuilder();
+        // 补齐每行到统一列数（合并单元格/不规则表格），并输出
+        for (int r = 0; r < grid.size(); r++) {
+            List<String> row = grid.get(r);
+            while (row.size() < colCount) row.add("");
+            // 先输出当前行，再在首行（表头）之后紧跟分隔行（Markdown 语法：| 表头 | → | --- | → | 数据 |）
+            sb.append("| ").append(String.join(" | ", row)).append(" |\n");
+            if (r == 0 && grid.size() > 1) {
+                sb.append("| ").append(String.join(" | ", java.util.Collections.nCopies(colCount, "---"))).append(" |\n");
+            }
+        }
+        return sb;
     }
 
     /**

@@ -4,122 +4,126 @@
              message="base-url / api-key / 向量模型为只读配置（变更需修改 yml 或环境变量后重启服务）；其余参数保存后立即生效。鼠标悬停参数名旁的 ? 可查看调整该参数的影响。" />
 
     <a-spin :spinning="loading">
-      <a-card title="智能问答模型" style="margin-bottom:16px">
-        <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.chatModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input v-model:value="form.chat.model" placeholder="如 qwen3.7-flash-2026-07-15" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.temperature" placement="top">温度 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.chat.temperature" :min="0" :max="2" :step="0.1" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.systemPrompt" placement="top">System Prompt <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-textarea v-model:value="form.chat.systemPrompt" :rows="4"
-                        placeholder="AI 助手的角色与回答风格（引用/图片/追问规则由系统固定，不可修改）" />
-          </a-form-item>
-          <a-form-item label="Base URL">
-            <a-input :value="ro.chat.baseUrl" disabled />
-          </a-form-item>
-          <a-form-item label="API Key">
-            <a-input :value="ro.chat.apiKey" disabled />
-          </a-form-item>
-        </a-form>
-      </a-card>
+      <a-collapse v-model:activeKey="activeKeys" :bordered="false" class="cfg-collapse">
 
-      <a-card title="视觉模型（图片识别）" style="margin-bottom:16px">
-        <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.visionModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input v-model:value="form.vision.model" placeholder="如 qwen3-vl:2b" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.visionPrompt" placement="top">识别提示词 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-textarea v-model:value="form.vision.prompt" :rows="3"
-                        placeholder="图片描述提示词（50字内描述界面/元素）" />
-          </a-form-item>
-          <a-form-item label="Base URL">
-            <a-input :value="ro.vision.baseUrl" disabled />
-          </a-form-item>
-          <a-form-item label="API Key">
-            <a-input :value="ro.vision.apiKey" disabled />
-          </a-form-item>
-        </a-form>
-      </a-card>
+        <a-collapse-panel key="chat" header="智能问答模型">
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.chatModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.chat.model" placeholder="如 qwen3.7-flash-2026-07-15" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.temperature" placement="top">温度 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chat.temperature" :min="0" :max="2" :step="0.1" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.systemPrompt" placement="top">System Prompt <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-textarea v-model:value="form.chat.systemPrompt" :rows="4"
+                          placeholder="AI 助手的角色与回答风格（引用/图片/追问规则由系统固定，不可修改）" />
+            </a-form-item>
+            <a-form-item label="Base URL">
+              <a-input :value="ro.chat.baseUrl" disabled />
+            </a-form-item>
+            <a-form-item label="API Key">
+              <a-input :value="ro.chat.apiKey" disabled />
+            </a-form-item>
+          </a-form>
+        </a-collapse-panel>
 
-      <a-card title="向量模型（Embedding）">
-        <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
-          <a-form-item label="模型名">
-            <a-input :value="ro.embedding.model" disabled />
-          </a-form-item>
-        </a-form>
-        <a-alert type="warning" show-icon style="margin:0 24px 16px"
-                 message="向量模型不支持页面修改：更换模型后维度可能变化，历史向量全部失效，需删除知识库重新上传文档。" />
-      </a-card>
+        <a-collapse-panel key="vision" header="视觉模型（图片识别）">
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.visionModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.vision.model" placeholder="如 qwen3-vl:2b" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.visionPrompt" placement="top">识别提示词 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-textarea v-model:value="form.vision.prompt" :rows="3"
+                          placeholder="图片描述提示词（50字内描述界面/元素）" />
+            </a-form-item>
+            <a-form-item label="Base URL">
+              <a-input :value="ro.vision.baseUrl" disabled />
+            </a-form-item>
+            <a-form-item label="API Key">
+              <a-input :value="ro.vision.apiKey" disabled />
+            </a-form-item>
+          </a-form>
+        </a-collapse-panel>
 
-      <a-card title="检索设置（混合检索权重）" style="margin-top:16px">
-        <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.vectorWeight" placement="top">向量权重 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.retrieval.vectorWeight" :min="0" :max="1" :step="0.05" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.keywordWeight" placement="top">关键词权重 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.retrieval.keywordWeight" :min="0" :max="1" :step="0.05" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.titleBonus" placement="top">标题命中奖励 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.retrieval.titleBonus" :min="0" :max="1" :step="0.05" style="width:200px" />
-          </a-form-item>
-        </a-form>
-        <a-alert type="info" show-icon style="margin:0 24px 16px"
-                 message="融合分 = 向量权重×向量相似度 + 关键词权重×命中率 + 标题命中奖励。保存后立即生效，可配合「检索调试」对比效果。" />
-      </a-card>
+        <a-collapse-panel key="embedding" header="向量模型（Embedding）">
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item label="模型名">
+              <a-input :value="ro.embedding.model" disabled />
+            </a-form-item>
+          </a-form>
+          <a-alert type="warning" show-icon style="margin:0 24px 16px"
+                   message="向量模型不支持页面修改：更换模型后维度可能变化，历史向量全部失效，需删除知识库重新上传文档。" />
+        </a-collapse-panel>
 
-      <a-card title="上下文与长度控制" style="margin-top:16px">
-        <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.modelWindows" placement="top">模型窗口映射 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input v-model:value="form.context.modelWindows"
-                     placeholder="模型名=token,逗号分隔，如 qwen3=131072" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.defaultWindow" placement="top">默认窗口 token <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.context.defaultWindowTokens" :min="1000" :step="1000" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.safetyFactor" placement="top">窗口安全系数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.context.safetyFactor" :min="0.1" :max="1" :step="0.05" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.costCap" placement="top">成本软上限 token <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.context.costCapTokens" :min="0" :step="500" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.maxOutput" placement="top">输出限制 token <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.context.maxOutputTokens" :min="100" :step="100" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.historyMax" placement="top">历史注入上限 token <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.context.historyMaxTokens" :min="0" :step="100" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.historyPerMsg" placement="top">单条历史截断字符 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.context.historyPerMsgChars" :min="0" :step="20" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.snippetWindow" placement="top">命中片段窗口字符 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.context.snippetWindowChars" :min="0" :step="20" style="width:200px" />
-          </a-form-item>
-          <a-form-item>
-            <template #label><a-tooltip :title="tips.maxContextHits" placement="top">知识块填充上限 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-            <a-input-number v-model:value="form.context.maxContextHits" :min="1" :max="30" style="width:200px" />
-          </a-form-item>
-        </a-form>
-        <a-alert type="info" show-icon style="margin:0 24px 16px"
-                 message="预算 = min(模型窗口×安全系数−输出限制, 成本上限)，知识块按相关度降序累积填充，超出预算的块自动被裁；每块只取命中关键词±窗口片段。历史单条截断+总量限制，[图片N] 标记自动剥离避免编号冲突。保存后立即生效。" />
-      </a-card>
+        <a-collapse-panel key="retrieval" header="检索设置（混合检索权重）">
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.vectorWeight" placement="top">向量权重 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.vectorWeight" :min="0" :max="1" :step="0.05" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.keywordWeight" placement="top">关键词权重 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.keywordWeight" :min="0" :max="1" :step="0.05" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.titleBonus" placement="top">标题命中奖励 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.titleBonus" :min="0" :max="1" :step="0.05" style="width:200px" />
+            </a-form-item>
+          </a-form>
+          <a-alert type="info" show-icon style="margin:0 24px 16px"
+                   message="融合分 = 向量权重×向量相似度 + 关键词权重×命中率 + 标题命中奖励。保存后立即生效，可配合「检索调试」对比效果。" />
+        </a-collapse-panel>
+
+        <a-collapse-panel key="context" header="上下文与长度控制">
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.modelWindows" placement="top">模型窗口映射 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.context.modelWindows"
+                       placeholder="模型名=token,逗号分隔，如 qwen3=131072" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.defaultWindow" placement="top">默认窗口 token <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.context.defaultWindowTokens" :min="1000" :step="1000" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.safetyFactor" placement="top">窗口安全系数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.context.safetyFactor" :min="0.1" :max="1" :step="0.05" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.costCap" placement="top">成本软上限 token <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.context.costCapTokens" :min="0" :step="500" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.maxOutput" placement="top">输出限制 token <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.context.maxOutputTokens" :min="100" :step="100" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.historyMax" placement="top">历史注入上限 token <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.context.historyMaxTokens" :min="0" :step="100" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.historyPerMsg" placement="top">单条历史截断字符 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.context.historyPerMsgChars" :min="0" :step="20" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.snippetWindow" placement="top">命中片段窗口字符 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.context.snippetWindowChars" :min="0" :step="20" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.maxContextHits" placement="top">知识块填充上限 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.context.maxContextHits" :min="1" :max="30" style="width:200px" />
+            </a-form-item>
+          </a-form>
+          <a-alert type="info" show-icon style="margin:0 24px 16px"
+                   message="预算 = min(模型窗口×安全系数−输出限制, 成本上限)，知识块按相关度降序累积填充，超出预算的块自动被裁；每块只取命中关键词±窗口片段。历史单条截断+总量限制，[图片N] 标记自动剥离避免编号冲突。保存后立即生效。" />
+        </a-collapse-panel>
+
+      </a-collapse>
 
       <div style="margin-top:20px">
         <a-button type="primary" :loading="saving" @click="save">
@@ -135,6 +139,9 @@ import { ref, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 import { getConfig, saveConfig } from '../api'
+
+// 折叠面板：默认展开常用分组（chat / retrieval / context），vision / embedding 收起
+const activeKeys = ref(['chat', 'retrieval', 'context'])
 
 // 参数说明（hover ? 查看"调整该参数会影响什么"）
 const tips = {
@@ -234,5 +241,18 @@ const save = async () => {
 }
 .tip-icon:hover {
   color: #1677ff;
+}
+/* 折叠面板：去掉卡片默认背景与边框，保持与页面一致的浅色观感 */
+.cfg-collapse {
+  background: transparent;
+}
+.cfg-collapse :deep(.ant-collapse-item) {
+  background: #fff;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  border: 1px solid #f0f0f0;
+}
+.cfg-collapse :deep(.ant-collapse-header) {
+  font-weight: 500;
 }
 </style>

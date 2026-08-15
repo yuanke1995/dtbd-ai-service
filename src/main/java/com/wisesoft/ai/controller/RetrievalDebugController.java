@@ -2,9 +2,11 @@ package com.wisesoft.ai.controller;
 
 import com.wisesoft.ai.common.BizException;
 import com.wisesoft.ai.dto.ResultJson;
+import com.wisesoft.ai.mapper.AiKnowledgeMapper;
 import com.wisesoft.ai.model.AiKnowledge;
 import com.wisesoft.ai.service.DocumentMetaCache;
 import com.wisesoft.ai.service.HybridRetrievalService;
+import com.wisesoft.ai.service.KeywordExtractor;
 import com.wisesoft.ai.service.RerankService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -35,6 +37,8 @@ public class RetrievalDebugController {
     private final HybridRetrievalService hybridRetrievalService;
     private final RerankService rerankService;
     private final DocumentMetaCache documentMetaCache;
+    private final KeywordExtractor keywordExtractor;
+    private final AiKnowledgeMapper knowledgeMapper;
 
     @Operation(summary = "检索链路调试",
             description = "分步展示检索全链路：关键词命中、向量命中（含相似度分）、合并结果、重排结果、最终上下文（Top 8）、被排除的候选。用于排查召回质量问题")
@@ -48,6 +52,8 @@ public class RetrievalDebugController {
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("query", query);
+        // 检索词元（分词结果，便于验证分词/子词元召回效果）
+        result.put("keywordTerms", keywordExtractor.extract(query));
 
         // 1. 关键词命中（含命中率/标题命中）
         List<AiKnowledge> kwDocs = hybridRetrievalService.keywordSearch(query);
@@ -67,9 +73,24 @@ public class RetrievalDebugController {
         List<Document> vectorDocs = hybridRetrievalService.vectorSearch(query);
         result.put("vectorHits", vectorDocs.stream().map(doc -> {
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("knowledgeId", doc.getId());
-            m.put("title", String.valueOf(doc.getMetadata().getOrDefault("title", "")));
-            m.put("docName", documentMetaCache.getFileName(String.valueOf(doc.getMetadata().get("docId"))));
+            String kid = String.valueOf(doc.getId());
+            Object titleObj = doc.getMetadata().get("title");
+            String title = titleObj == null ? "" : String.valueOf(titleObj);
+            // M6 RedisVectorStore 查询还原 metadata 可能缺失 title/docId，按 knowledgeId 查 MySQL 兜底（与 buildHit 一致）
+            String docId = doc.getMetadata().get("docId") == null ? "" : String.valueOf(doc.getMetadata().get("docId"));
+            if (title.isEmpty() || docId.isEmpty()) {
+                try {
+                    AiKnowledge k = knowledgeMapper.selectById(kid);
+                    if (k != null) {
+                        if (title.isEmpty()) title = k.getTitle() == null ? "" : k.getTitle();
+                        if (docId.isEmpty() && k.getDocId() != null) docId = String.valueOf(k.getDocId());
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            m.put("knowledgeId", kid);
+            m.put("title", title);
+            m.put("docName", documentMetaCache.getFileName(docId));
             m.put("score", doc.getScore() == null ? 0 : Math.round(doc.getScore() * 100.0) / 100.0);
             m.put("snippet", snippet(doc.getText()));
             return m;

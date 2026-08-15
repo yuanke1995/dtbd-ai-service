@@ -145,6 +145,7 @@ public class RagService {
                             + "不要把图片标记堆到回答结尾，也不要编造不存在的编号。")
                     .append("\n注意：插入 [图片N] 时，标记前后不要紧贴任何标点，[图片N] 应独立成行；"
                             + "若句末需要标点，放在标记之前的文字末尾，如\"布局组件[图片1]\"，不要写成\"布局组件[图片1]、\"。")
+                    .append("\n参考资料中包含表格时（以 | 分隔的 Markdown 表格），若回答涉及表格内容，请用同样的 Markdown 表格格式呈现，不要改写成一长串用竖线连起来的文字。")
                     .append("\n回答末尾用 <related>问题1|问题2|问题3</related> 输出 3 个用户可能追问的相关问题（用 | 分隔），如无合适问题可不输出。");
             String historyText = buildHistoryText(sessionService.getRecentHistory(sessionId, 5));
             if (!historyText.isEmpty()) {

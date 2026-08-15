@@ -129,6 +129,11 @@
           </div>
           <a-spin :spinning="debugLoading">
             <template v-if="debugResult">
+              <!-- 检索词元：分词结果（主词元+子词元），便于验证分词/召回 -->
+              <div v-if="debugResult.keywordTerms?.length" class="dbg-terms">
+                <span class="dbg-terms-label">检索词元</span>
+                <a-tag v-for="(t, ti) in debugResult.keywordTerms" :key="ti" color="blue" style="margin:2px">{{ t }}</a-tag>
+              </div>
               <a-collapse :bordered="false" :default-active-key="['final']">
                 <a-collapse-panel v-for="(s, si) in debugStages" :key="si" :name="si === 4 ? 'final' : String(si)"
                                   :header="s.name">
@@ -1131,6 +1136,9 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .md :deep(hr) { border: none; border-top: 1px solid #e8e8e8; margin: 10px 0; }
 /* 检索调试面板 */
 .dbg-item { padding: 6px 8px; margin-bottom: 6px; border: 1px solid #f0f0f0; border-radius: 6px; background: #fafafa; }
+/* 检索词元展示行 */
+.dbg-terms { padding: 8px 10px; margin-bottom: 10px; border: 1px solid #e6f4ff; border-radius: 6px; background: #f0f7ff; }
+.dbg-terms-label { font-size: 12px; color: #888; margin-right: 6px; }
 .dbg-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .dbg-title { font-weight: 500; font-size: 13px; }
 .dbg-snippet { margin-top: 3px; font-size: 12px; color: #888; word-break: break-all; }

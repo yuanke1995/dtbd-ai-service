@@ -58,4 +58,8 @@ public class AiKnowledge {
     /** 标题是否命中 */
     @TableField(exist = false)
     private boolean titleHit;
+
+    /** 关键词加权分（tf×idf 归一化到 0~1，A3 检索排序用） */
+    @TableField(exist = false)
+    private double kwScore;
 }
