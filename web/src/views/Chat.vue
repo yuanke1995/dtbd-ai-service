@@ -40,33 +40,32 @@
           </div>
           <div v-for="(m,i) in messages" :key="i" class="row" :class="m.role">
             <a-avatar :style="{ background: m.role==='user'?'#87d068':'#1677ff', flexShrink:0 }">{{ m.role==='user'?'我':'AI' }}</a-avatar>
-            <div class="bubble" :class="m.role">
-              <!-- 用户消息编辑（问题回填输入框重发） -->
-              <a-tooltip v-if="m.role === 'user'" title="编辑此问题重新发送" placement="top">
-                <edit-outlined class="msg-edit-btn" @click="editMessage(i)" />
-              </a-tooltip>
-              <!-- 用户上传图片（本地 dataUrl 预览 / 历史 URL） -->
-              <div v-if="m.role === 'user' && m.images && m.images.length" class="msg-imgs">
-                <img v-for="(u, ui) in m.images" :key="ui" :src="resolveImg(u)"
-                     class="msg-img" :alt="'上传图片' + (ui + 1)" @click="openPreviewFromMsg(m, ui)" @error="onImgError" />
+            <div class="msg-block" :class="m.role">
+              <div class="bubble" :class="m.role">
+                <!-- 用户上传图片（本地 dataUrl 预览 / 历史 URL） -->
+                <div v-if="m.role === 'user' && m.images && m.images.length" class="msg-imgs">
+                  <img v-for="(u, ui) in m.images" :key="ui" :src="resolveImg(u)"
+                       class="msg-img" :alt="'上传图片' + (ui + 1)" @click="openPreviewFromMsg(m, ui)" @error="onImgError" />
+                </div>
+                <div class="md" :data-msg-index="i" v-html="render(m.content, m.images)"></div>
+                <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
+                <!-- 引用来源（回答中 [N] 角标点击查看原文片段） -->
+                <div v-if="m.role === 'ai' && m.sources && m.sources.length" class="src-chips">
+                  <a-tag
+                    v-for="(s, si) in m.sources" :key="si" color="blue"
+                    style="cursor:pointer;margin:2px" @click="openSource(m.sources[si])"
+                  >
+                    [{{ s.ref }}] {{ (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '') }}
+                  </a-tag>
+                </div>
+                <!-- 相关推荐问题 -->
+                <div v-if="m.role === 'ai' && m.related && m.related.length" class="related">
+                  <span class="related-label">猜你想问：</span>
+                  <a-tag v-for="(q, qi) in m.related" :key="qi" color="green"
+                         style="cursor:pointer;margin:2px" @click="ask(q)">{{ q }}</a-tag>
+                </div>
               </div>
-              <div class="md" :data-msg-index="i" v-html="render(m.content, m.images)"></div>
-              <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
-              <!-- 引用来源（回答中 [N] 角标点击查看原文片段） -->
-              <div v-if="m.role === 'ai' && m.sources && m.sources.length" class="src-chips">
-                <a-tag
-                  v-for="(s, si) in m.sources" :key="si" color="blue"
-                  style="cursor:pointer;margin:2px" @click="openSource(m.sources[si])"
-                >
-                  [{{ s.ref }}] {{ (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '') }}
-                </a-tag>
-              </div>
-              <!-- 相关推荐问题 -->
-              <div v-if="m.role === 'ai' && m.related && m.related.length" class="related">
-                <span class="related-label">猜你想问：</span>
-                <a-tag v-for="(q, qi) in m.related" :key="qi" color="green"
-                       style="cursor:pointer;margin:2px" @click="ask(q)">{{ q }}</a-tag>
-              </div>
+              <!-- ===== 操作区（气泡外部：重试按钮 + 操作按钮行 + 重试提示 + 编辑图标） ===== -->
               <!-- 流式中断/失败：重试入口（保留已生成内容，重新生成完整回答） -->
               <div v-if="m.role === 'ai' && m.failed && !m.loading" class="retry-row">
                 <a-button size="small" type="primary" ghost :disabled="loading" @click="regenerate(i)">
@@ -97,6 +96,17 @@
                           :class="{ 'fb-active': m.fb === 0 }" @click="openFeedback(m, 0)">
                   <dislike-outlined /> 没帮助
                 </a-button>
+              </div>
+              <!-- 断连自动重试中：内联提示（位于 AI 回答气泡整体下方，替代全局弹窗） -->
+              <div v-if="m.retrying" class="retry-tip">
+                <a-spin size="small" />
+                <span>连接中断，正在自动重试…</span>
+              </div>
+              <!-- 用户消息编辑：悬浮在问题气泡整体下方（hover 显示） -->
+              <div v-if="m.role === 'user'" class="msg-edit-row">
+                <a-tooltip title="编辑此问题重新发送" placement="top">
+                  <edit-outlined class="msg-edit-btn" @click="editMessage(i)" />
+                </a-tooltip>
               </div>
             </div>
           </div>
@@ -491,6 +501,7 @@ onMounted(async () => {
   } else {
     await createNewSession()
   }
+  focusInput()
 })
 
 // 加载会话列表（支持关键词搜索）
@@ -597,6 +608,7 @@ async function createNewSession() {
     } else {
       messages.value = []
     }
+    focusInput()
     return
   }
   creatingSession.value = true
@@ -606,6 +618,7 @@ async function createNewSession() {
       currentSessionId.value = r.data.sessionId
       messages.value = []
       await loadSessions()   // 立即刷新会话列表（新会话置顶显示）
+      focusInput()
     }
   } catch (e) {
     message.error('创建会话失败: ' + (e.message || '未知错误'))
@@ -613,6 +626,9 @@ async function createNewSession() {
     creatingSession.value = false
   }
 }
+
+// 聚焦输入框（新建/切换会话后调用；输入区固定在页面底部，nextTick 确保渲染完成）
+const focusInput = () => nextTick(() => textareaRef.value?.focus())
 
 // 删除会话
 async function handleDeleteSession(sid) {
@@ -762,12 +778,15 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1)
       // 用户主动停止不走到这里（AbortError 在 api.js 按正常结束处理）
       // 瞬时断连自动重试：未收到任何 token 时静默重试（2.5s 退避），替换当前消息而非追加
       if (autoRetry > 0 && !gotToken) {
-        message.warning('连接中断，正在自动重试…')
+        // 内联提示（回答框下方），替代全局弹窗 message.warning
+        messages.value[idx].retrying = true
+        scroll()
         setTimeout(() => {
           // 等待期间消息列表可能已变化（切换/清空会话），放弃自动重试
           if (idx < messages.value.length && messages.value[idx]?.role === 'ai' && messages.value[idx]?.loading) {
             streamAnswer(question, imgs, idx, false, 0)
           } else {
+            if (messages.value[idx]) messages.value[idx].retrying = false
             loading.value = false
             abortController.value = null
           }
@@ -777,6 +796,7 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1)
       // 已收到部分回答：保留已生成内容（不自动重连清空重来），标记 failed 显示「重试」按钮
       messages.value[idx].content = '😅 ' + e
       messages.value[idx].loading = false
+      messages.value[idx].retrying = false
       messages.value[idx].failed = true
       loading.value = false
       abortController.value = null
@@ -1063,7 +1083,11 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .welcome p { color: #888; margin-bottom: 24px; }
 .row { display: flex; gap: 12px; margin-bottom: 20px; }
 .row.user { flex-direction: row-reverse; }
-.bubble { max-width: min(720px, 70%); padding: 12px 16px; border-radius: 12px; line-height: 1.6; }
+/* 消息块：承载气泡 + 气泡下方悬浮操作区（编辑等）；宽度约束由外层承担 */
+.msg-block { position: relative; display: flex; flex-direction: column; max-width: min(720px, 70%); min-width: 0; }
+.msg-block.user { align-items: flex-end; }
+.msg-block.ai { align-items: flex-start; }
+.bubble { width: 100%; padding: 12px 16px; border-radius: 12px; line-height: 1.6; }
 .bubble.user { background: #1677ff; color: #fff; }
 .bubble.ai { background: #f5f5f5; color: #333; }
 .input { padding: 12px 48px 16px; border-top: 1px solid #f0f0f0; }
@@ -1080,20 +1104,30 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .msg-img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px;
   border: 1px solid rgba(255,255,255,.35); cursor: zoom-in; }
 .msg-img:hover { opacity: .85; }
-/* 用户消息编辑按钮（hover 显示，气泡右上角） */
-.bubble.user { position: relative; }
+/* 用户消息编辑按钮：悬浮显示；图标所在整行都可 hover 触发（图标仍靠右），移开消失 */
+.msg-edit-row {
+  position: absolute;
+  top: calc(100% + 4px);      /* 紧贴气泡下边缘外侧 */
+  left: 0; right: 0;           /* 占满整行宽度：整行 hover 都显示图标 */
+  height: 24px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;   /* 用户消息在右侧，图标靠右 */
+  opacity: 0;
+  transition: opacity .15s;
+}
+.msg-block.user:hover .msg-edit-row,
+.msg-edit-row:hover { opacity: 1; }
 .msg-edit-btn {
-  position: absolute; top: 6px; right: 8px;
-  z-index: 1;                        /* 浮在图片缩略图之上 */
   width: 20px; height: 20px;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(0,0,0,.35);       /* 半透明圆底，图片上仍清晰可见 */
+  background: rgba(22,119,255,.15);   /* 浅蓝底，贴合气泡色调 */
   border-radius: 50%;
-  color: #fff; font-size: 12px; cursor: pointer;
-  opacity: 0; transition: opacity .15s;
+  color: #1677ff; font-size: 12px; cursor: pointer;
+  transition: background .15s;
 }
-.bubble.user:hover .msg-edit-btn { opacity: 1; }
-.msg-edit-btn:hover { color: #fff; }
+.msg-edit-btn:hover { background: rgba(22,119,255,.28); }
 /* 多行自适应输入框：随内容增高（1~6 行），右侧留出发送/停止按钮位 */
 .input-area {
   resize: none;
@@ -1123,8 +1157,8 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .md :deep(h2), .md :deep(h3), .md :deep(h4), .md :deep(h5) { margin: 12px 0 6px; font-weight: 600; }
 .md :deep(h2) { font-size: 17px; } .md :deep(h3) { font-size: 15px; } .md :deep(h4) { font-size: 14px; }
 .md :deep(code) { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
-.md :deep(pre) { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 8px 0; position: relative; }
-.md :deep(pre code) { background: none; padding: 0; display: block; white-space: pre; }
+.md :deep(pre) { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 8px 0; position: relative; max-height: 360px; overflow-y: auto; }
+.md :deep(pre code) { background: none; padding: 0; display: block; white-space: pre-wrap; word-break: break-word; }
 .md :deep(table) { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px; }
 .md :deep(th), .md :deep(td) { border: 1px solid #e0e0e0; padding: 6px 10px; text-align: left; word-break: break-word; }
 .md :deep(th) { background: #fafafa; font-weight: 600; white-space: nowrap; }
@@ -1167,12 +1201,34 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 /* 相关推荐 */
 .related { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .related-label { font-size: 12px; color: #888; margin-right: 4px; }
-/* 回答反馈 */
-.fb-row { margin-top: 10px; display: flex; gap: 4px; opacity: .55; transition: opacity .2s; }
-.fb-row:hover { opacity: 1; }
+/* 回答反馈（默认隐藏，hover 消息块时悬浮显示；保留整行可 hover 避免移过去按钮消失） */
+.fb-row {
+  margin-top: 10px;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  opacity: 0;
+  transition: opacity .2s;
+  pointer-events: none;
+}
+.msg-block:hover .fb-row, .fb-row:hover { opacity: 1; pointer-events: auto; }
 .fb-row :deep(.fb-active) { color: #1677ff; font-weight: 600; }
 /* 流式中断重试 */
 .retry-row { margin-top: 10px; }
+/* 断连自动重试内联提示（AI 回答框下方） */
+.retry-tip {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #d48806;            /* 警示黄 */
+  font-size: 12px;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 6px;
+  padding: 4px 10px;
+  width: fit-content;
+}
 
 /* 图片灯箱（z-index 须高于 antd modal 默认 1000，避免被引用/反馈弹窗盖住） */
 .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.78); display: flex;

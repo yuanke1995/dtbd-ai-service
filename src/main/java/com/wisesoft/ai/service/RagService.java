@@ -502,6 +502,21 @@ public class RagService {
         // 窗口边界避免切断 [图片N] 标记：若边界落在 "[图片" 中，向前/向后对齐
         start = adjustBoundaryStart(text, start);
         end = adjustBoundaryEnd(text, end);
+        // 窗口边界对齐行边界：截断点落在行中间时（长代码行/长命令），推进到整行末尾，
+        // 避免把 pip install 之类的长命令拦腰切断产生 "open..." 半截内容
+        if (end < text.length()) {
+            int nl = text.indexOf('\n', end);
+            if (nl >= 0 && nl - end <= window) {
+                end = nl + 1; // 对齐到该行行尾（代价小于一个窗口则接受）
+            }
+        }
+        // 起点对齐到行首：让截断片段从完整行开始，避免从行中间开始
+        if (start > 0) {
+            int ls = text.lastIndexOf('\n', start);
+            if (start - ls <= window) {
+                start = ls + 1;
+            }
+        }
         StringBuilder sb = new StringBuilder();
         if (start > 0) sb.append("…");
         sb.append(text, start, end);

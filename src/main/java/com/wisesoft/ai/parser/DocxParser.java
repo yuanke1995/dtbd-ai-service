@@ -125,10 +125,10 @@ public class DocxParser implements DocumentParser {
     }
 
     /**
-     * 将 Word 表格解析为 Markdown 表格文本（保留行/列结构）
-     * - 空单元格保留占位（保持列对齐）
+     * 将 Word 表格解析为 Markdown：
+     * - 单列表格（作者常用表格排版代码/命令/模板）→ 输出为代码块，保留原始换行
+     * - 多列表格 → Markdown 表格（保留行/列结构），单元格内多段改用 &lt;br&gt; 保留换行
      * - 单元格内竖线转义（防止破坏表格语法）
-     * - 表头分隔行使用 | --- |
      */
     private StringBuilder buildMarkdownTable(XWPFTable table) {
         List<List<String>> grid = new ArrayList<>();
@@ -136,23 +136,46 @@ public class DocxParser implements DocumentParser {
         for (XWPFTableRow row : table.getRows()) {
             List<String> cells = new ArrayList<>();
             for (XWPFTableCell cell : row.getTableCells()) {
-                String ct = cell.getTextRecursively().trim();
-                // 单元格内换行折叠为空格，竖线转义防破坏表格
-                ct = ct.replaceAll("\\s+", " ").replace("|", "\\|");
-                cells.add(ct);
+                // 逐段落提取，保留单元格内换行（getTextRecursively 会丢失段落分隔，导致多行命令粘连）
+                StringBuilder ct = new StringBuilder();
+                for (XWPFParagraph p : cell.getParagraphs()) {
+                    String t = p.getText().trim();
+                    if (t.isEmpty()) continue;
+                    if (ct.length() > 0) ct.append('\n');
+                    ct.append(t);
+                }
+                cells.add(ct.toString());
             }
             colCount = Math.max(colCount, cells.size());
             grid.add(cells);
         }
         if (grid.isEmpty()) return new StringBuilder();
 
+        // 单列表格：极可能是"代码/命令/模板容器"，输出为代码块（LLM 识别为代码、前端渲染代码样式）
+        if (colCount == 1) {
+            StringBuilder code = new StringBuilder("```\n");
+            for (List<String> row : grid) {
+                for (String c : row) {
+                    if (c.isEmpty()) continue;
+                    code.append(c).append('\n');
+                }
+            }
+            code.append("```");
+            return code;
+        }
+
         StringBuilder sb = new StringBuilder();
         // 补齐每行到统一列数（合并单元格/不规则表格），并输出
         for (int r = 0; r < grid.size(); r++) {
             List<String> row = grid.get(r);
             while (row.size() < colCount) row.add("");
+            // 单元格内换行用 <br>（Markdown 表格标准写法），竖线转义防破坏语法
+            List<String> escaped = new ArrayList<>();
+            for (String c : row) {
+                escaped.add(c.replace("|", "\\|").replace("\n", "<br>"));
+            }
             // 先输出当前行，再在首行（表头）之后紧跟分隔行（Markdown 语法：| 表头 | → | --- | → | 数据 |）
-            sb.append("| ").append(String.join(" | ", row)).append(" |\n");
+            sb.append("| ").append(String.join(" | ", escaped)).append(" |\n");
             if (r == 0 && grid.size() > 1) {
                 sb.append("| ").append(String.join(" | ", java.util.Collections.nCopies(colCount, "---"))).append(" |\n");
             }

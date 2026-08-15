@@ -10,7 +10,7 @@ RUN mvn -B clean package -DskipTests
 # ============ 运行阶段 ============
 FROM eclipse-temurin:17-jre
 WORKDIR /app
-COPY --from=build /app/target/dtbd-ai-service-1.0.0-SNAPSHOT.jar app.jar
+COPY --from=build /app/target/dtbd-ai-service-1.0.1-SNAPSHOT.jar app.jar
 # 图片存储目录（挂载卷）
 RUN mkdir -p /app/data/images
 EXPOSE 8090
