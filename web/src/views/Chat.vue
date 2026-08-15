@@ -26,7 +26,8 @@
     <div class="chat">
       <div class="chat-box">
         <div class="head">
-          <span><robot-outlined style="color:#1677ff;margin-right:8px" />AI 助手 - 小报</span>
+          <span class="head-title">{{ currentSessionTitle }}</span>
+          <span class="disclaimer"><info-circle-outlined style="margin-right:4px" />AI 回答可能有误，重要信息请核实</span>
         </div>
 
         <div class="messages" ref="box" @click="openPreview">
@@ -112,8 +113,10 @@
           </div>
         </div>
 
-        <!-- 引用来源详情弹窗（灯箱打开时禁用 ESC 关闭：ESC 优先关灯箱） -->
-        <a-modal v-model:open="sourceVisible" :title="sourceTitle" :footer="null" width="720"
+        <!-- 引用来源详情弹窗（灯箱打开时禁用 ESC 关闭：ESC 优先关灯箱；宽度按内容自适应 + 右下角可拖拽伸缩） -->
+        <a-modal v-model:open="sourceVisible" :title="sourceTitle" :footer="null"
+                 :width="sourceImages.length ? 720 : 560"
+                 wrap-class-name="source-modal"
                  :keyboard="!previewUrl" :mask-closable="!previewUrl">
           <a-spin v-if="sourceLoading" style="display:block;margin:40px auto" />
           <template v-else>
@@ -121,6 +124,8 @@
             <div class="md src-content" @click="openPreview"
                  v-html="render(prepKnowledgeContent(sourceContent || sourceSnippet, sourceImages), sourceImages)"></div>
           </template>
+          <!-- 右下角拖拽伸缩手柄（JS 实现，antd modal teleport 场景 CSS resize 不可靠） -->
+          <div class="src-resizer" title="拖拽调整大小" @mousedown="onSrcResizeStart" />
         </a-modal>
 
         <!-- 回答反馈弹窗 -->
@@ -225,7 +230,7 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import 'highlight.js/styles/github.css'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons-vue'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
@@ -241,6 +246,11 @@ const loading = ref(false)
 const sessionsLoading = ref(false)
 const currentSessionId = ref(null)
 const sessions = ref([])
+// 顶部标题：当前会话标题（列表里查不到时回退"新对话"）
+const currentSessionTitle = computed(() => {
+  const s = sessions.value.find(x => x.id === currentSessionId.value)
+  return s?.title || '新对话'
+})
 const messages = ref([])
 const box = ref(null)
 // 灯箱多图状态：previewList（resolveImg 后 URL）+ previewIndex；previewUrl 为 computed
@@ -406,6 +416,28 @@ const openSource = async s => {
     }
   } catch (e) { /* 接口失败：回退显示 snippet */ }
   finally { sourceLoading.value = false }
+}
+
+// 引用弹窗右下角拖拽伸缩（JS 实现：mousedown 记录起点，mousemove 更新 modal 宽高）
+const onSrcResizeStart = e => {
+  e.preventDefault()
+  e.stopPropagation()
+  const modal = document.querySelector('.source-modal .ant-modal')
+  if (!modal) return
+  const startX = e.clientX, startY = e.clientY
+  const startW = modal.offsetWidth, startH = modal.offsetHeight
+  const onMove = ev => {
+    modal.style.width = Math.max(420, startW + ev.clientX - startX) + 'px'
+    modal.style.height = Math.max(240, startH + ev.clientY - startY) + 'px'
+  }
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+    document.body.style.userSelect = ''
+  }
+  document.body.style.userSelect = 'none' // 拖拽中防选中文本
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
 }
 // 灯箱切换：重置缩放/平移，到头禁用（不循环）
 const resetView = () => { zoom.value = 1; offset.value = { x: 0, y: 0 } }
@@ -730,7 +762,7 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1)
   if (replaceIdx == null) {
     messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], loading: true })
   } else {
-    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], loading: true, messageId: null, fb: 0 }
+    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], loading: true, messageId: null, fb: null }
   }
   loading.value = true
   abortController.value = new AbortController()
@@ -1064,11 +1096,30 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 }
 .head {
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;   /* 上下两行：标题 + 免责声明，同一框内 */
   align-items: center;
-  padding: 16px 24px;
+  justify-content: center;
+  gap: 4px;
+  padding: 12px 24px;
   border-bottom: 1px solid #f0f0f0;
   font-weight: 600;
+}
+.head-title {
+  font-size: 15px;
+  color: #333;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 免责声明：标题下方、同一框内，弱化显示不抢焦点 */
+.disclaimer {
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 400;
+  color: #999;
+  text-align: center;
 }
 .messages {
   flex: 1;
@@ -1198,6 +1249,23 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
   padding-right: 6px; scrollbar-width: thin; }
 .src-content :deep(img) { max-width: 100%; max-height: 260px; border: 1px solid #e0e0e0;
   border-radius: 6px; display: block; margin: 8px 0; cursor: zoom-in; }
+/* 引用弹窗：可拖拽伸缩（JS 手柄）——modal 变 flex 容器，body 内容跟随高度
+   （antd modal teleport 到 body，scoped/:deep 均无法命中，必须 :global） */
+.source-modal :global(.ant-modal) { display: flex; flex-direction: column; min-width: 420px; min-height: 240px; }
+.source-modal :global(.ant-modal-content) { display: flex; flex-direction: column; flex: 1; overflow: hidden; position: relative; }
+.source-modal :global(.ant-modal-body) { flex: 1; overflow: auto; min-height: 0; }
+/* 右下角拖拽手柄（单三角，hover 高亮） */
+.source-modal :global(.src-resizer) {
+  position: absolute; right: 0; bottom: 0; z-index: 10;
+  width: 0; height: 0;
+  border-left: 14px solid transparent;
+  border-bottom: 14px solid #bfbfbf;
+  cursor: nwse-resize;
+  opacity: .8;
+}
+.source-modal :global(.src-resizer:hover) { border-bottom-color: #1677ff; opacity: 1; }
+/* 伸缩后内容区跟随弹窗高度（不再受固定 45vh 限制） */
+.source-modal :global(.src-content) { max-height: none; height: 100%; }
 /* 相关推荐 */
 .related { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .related-label { font-size: 12px; color: #888; margin-right: 4px; }
