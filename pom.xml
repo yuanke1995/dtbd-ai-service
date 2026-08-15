@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.5</version>
+        <version>3.5.15</version>
         <relativePath/>
     </parent>
 
@@ -19,8 +19,8 @@
 
     <properties>
         <java.version>17</java.version>
-        <spring-ai.version>1.0.0-M6</spring-ai.version>
-        <mybatis-plus.version>3.5.9</mybatis-plus.version>
+        <spring-ai.version>1.1.8</spring-ai.version>
+        <mybatis-plus.version>3.5.12</mybatis-plus.version>
         <poi.version>5.2.3</poi.version>
         <lombok.version>1.18.46</lombok.version>
     </properties>
@@ -50,21 +50,14 @@
             <artifactId>jedis</artifactId>
         </dependency>
 
-        <!-- Spring AI -->
+        <!-- Spring AI（1.1 起 starter 更名，由 spring-ai-bom 管理版本） -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-openai-spring-boot-starter</artifactId>
-            <version>${spring-ai.version}</version>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-redis-store-spring-boot-starter</artifactId>
-            <version>${spring-ai.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-tika-document-reader</artifactId>
-            <version>${spring-ai.version}</version>
+            <artifactId>spring-ai-starter-vector-store-redis</artifactId>
         </dependency>
 
         <!-- MyBatis-Plus -->
@@ -105,11 +98,11 @@
             <artifactId>fastjson2</artifactId>
             <version>2.0.31</version>
         </dependency>
-        <!-- SpringDoc OpenAPI (Swagger UI) -->
+        <!-- SpringDoc OpenAPI (Swagger UI)，Boot 3.5 对应 2.8.x -->
         <dependency>
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
-            <version>2.5.0</version>
+            <version>2.8.8</version>
         </dependency>
         <!-- 测试 -->
         <dependency>
@@ -118,6 +111,19 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <!-- Spring AI BOM 统一管理各模块版本（1.1 GA 起无需 milestone 仓库，Maven Central 即可） -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <build>
         <plugins>
@@ -148,15 +154,4 @@
             </plugin>
         </plugins>
     </build>
-
-    <repositories>
-        <repository>
-            <id>spring-milestones</id>
-            <name>Spring Milestones</name>
-            <url>https://repo.spring.io/milestone</url>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-    </repositories>
 </project>

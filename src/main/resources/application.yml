@@ -56,11 +56,11 @@ spring:
         options:
           model: ${AI_EMBEDDING_MODEL:qwen3.7-text-embedding}
 
-    # Redis 向量库配置
+    # Redis 向量库配置（Spring AI 1.1：index 更名 index-name；initialize-schema 默认 false，需显式开启）
     vectorstore:
       redis:
         initialize-schema: true
-        index: dtbd-ai-index
+        index-name: dtbd-ai-index
         prefix: "ai:chunk:"
 
 # MyBatis-Plus（SQL 日志默认走 slf4j，级别由 LOG_LEVEL_SQL 控制）
