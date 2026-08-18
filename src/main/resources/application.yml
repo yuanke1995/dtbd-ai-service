@@ -88,6 +88,13 @@ ai-app:
     vector-weight: 0.6
     keyword-weight: 0.4
     title-bonus: 0.1
+    # 重排（Ollama 无 rerank 端点，社区 rerank 模型走 /api/embed 近似；也可接独立 OpenAI 兼容服务）
+    rerank:
+      provider: ${AI_RERANK_PROVIDER:ollama}
+      enabled: ${AI_RERANK_ENABLED:false}
+      base-url: ${AI_RERANK_BASE_URL:http://localhost:11434}
+      model: ${AI_RERANK_MODEL:qllama/bge-reranker-v2-m3}
+      timeout-ms: 5000
   # 会话
   session:
     max-history: 10

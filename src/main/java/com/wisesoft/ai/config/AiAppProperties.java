@@ -53,6 +53,22 @@ public class AiAppProperties {
         private double keywordWeight = 0.4;
         /** 混合检索：标题命中额外奖励（0~1，加在融合分上） */
         private double titleBonus = 0.1;
+        /** 重排（独立 reranker 服务，OpenAI 兼容 /v1/rerank；Ollama 无 rerank 能力，勿配 Ollama 地址） */
+        private Rerank rerank = new Rerank();
+    }
+
+    @Data
+    public static class Rerank {
+        /** 重排实现：ollama=Ollama /api/embed 近似重排（社区 rerank 模型仅支持 embedding 调用）；openai=独立服务 /v1/rerank（Infinity/TEI 兼容网关） */
+        private String provider = "ollama";
+        /** 是否启用重排（需先拉取 rerank 模型：ollama pull qllama/bge-reranker-v2-m3） */
+        private boolean enabled = false;
+        /** reranker 服务 base-url（ollama=http://localhost:11434；openai=独立服务地址） */
+        private String baseUrl = "http://localhost:11434";
+        /** rerank 模型名 */
+        private String model = "qllama/bge-reranker-v2-m3";
+        /** 单次重排超时(ms) */
+        private int timeoutMillis = 5000;
     }
 
     @Data
