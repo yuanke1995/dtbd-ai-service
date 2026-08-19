@@ -44,7 +44,7 @@ public class AiKnowledgeController {
     @Operation(summary = "按文档列知识块", description = "获取指定文档下的所有知识块（含标题、正文、图片），用于知识块预览")
     @GetMapping("/knowledge/list")
     public ResultJson listByDoc(
-            @Parameter(description = "文档 ID") @RequestParam String docId) {
+            @Parameter(description = "文档 ID") @RequestParam("docId") String docId) {
         if (docId == null || docId.isBlank()) {
             throw new BizException("缺少 docId");
         }
@@ -106,7 +106,7 @@ public class AiKnowledgeController {
     @Operation(summary = "编辑知识块", description = "修改知识块标题/正文（图片保留），并重新向量化")
     @PutMapping("/knowledge/{id}")
     public ResultJson updateKnowledge(
-            @Parameter(description = "知识块 ID") @PathVariable String id,
+            @Parameter(description = "知识块 ID") @PathVariable("id") String id,
             @Parameter(description = "{\"title\": \"新标题\", \"content\": \"新内容\"}")
             @RequestBody Map<String, String> body) {
         documentService.updateKnowledge(id, body.get("title"), body.get("content"));
@@ -116,7 +116,7 @@ public class AiKnowledgeController {
     @Operation(summary = "删除知识块", description = "删除知识块（同步移除向量并扣减文档知识块数）")
     @DeleteMapping("/knowledge/{id}")
     public ResultJson deleteKnowledge(
-            @Parameter(description = "知识块 ID") @PathVariable String id) {
+            @Parameter(description = "知识块 ID") @PathVariable("id") String id) {
         documentService.deleteKnowledge(id);
         return ResultJson.ok("知识块已删除");
     }

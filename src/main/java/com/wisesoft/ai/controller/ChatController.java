@@ -64,7 +64,7 @@ public class ChatController {
     @GetMapping("/sessions")
     public ResultJson listSessions(
             @Parameter(description = "搜索关键词（可选，按标题/消息内容模糊匹配）")
-            @RequestParam(required = false) String keyword) {
+            @RequestParam(value = "keyword", required = false) String keyword) {
         List<SessionInfo> sessions = sessionService.listSessions(keyword);
         return ResultJson.ok(sessions);
     }
@@ -72,7 +72,7 @@ public class ChatController {
     @Operation(summary = "置顶/取消置顶会话", description = "设置会话置顶状态，置顶会话排在列表最前")
     @PutMapping("/session/{sessionId}/pin")
     public ResultJson updatePin(
-            @Parameter(description = "会话 ID") @PathVariable String sessionId,
+            @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId,
             @RequestBody Map<String, Boolean> body) {
         boolean pinned = Boolean.TRUE.equals(body.get("pinned"));
         sessionService.updatePin(sessionId, pinned);
@@ -82,7 +82,7 @@ public class ChatController {
     @Operation(summary = "收藏/取消收藏会话", description = "设置会话收藏状态，收藏会话可在侧边栏筛选")
     @PutMapping("/session/{sessionId}/favorite")
     public ResultJson updateFavorite(
-            @Parameter(description = "会话 ID") @PathVariable String sessionId,
+            @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId,
             @RequestBody Map<String, Boolean> body) {
         boolean favorite = Boolean.TRUE.equals(body.get("favorite"));
         sessionService.updateFavorite(sessionId, favorite);
@@ -92,7 +92,7 @@ public class ChatController {
     @Operation(summary = "会话历史", description = "获取指定会话的完整对话历史（含图片与引用来源）")
     @GetMapping("/session/{sessionId}")
     public ResultJson getHistory(
-            @Parameter(description = "会话 ID") @PathVariable String sessionId) {
+            @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId) {
         List<Map<String, Object>> history = sessionService.getHistory(sessionId);
         // 历史图片存的是原始 URL，响应时动态签名（避免签名过期导致恢复会话图片 401）
         for (Map<String, Object> msg : history) {
@@ -110,7 +110,7 @@ public class ChatController {
     @Operation(summary = "删除会话", description = "删除指定会话（MySQL 软删除 + Redis 清理）")
     @DeleteMapping("/session/{sessionId}")
     public ResultJson deleteSession(
-            @Parameter(description = "会话 ID") @PathVariable String sessionId) {
+            @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId) {
         sessionService.deleteSession(sessionId);
         return ResultJson.ok("会话已删除");
     }
@@ -131,7 +131,7 @@ public class ChatController {
     @Operation(summary = "知识块详情", description = "获取指定知识块的全文内容（引用溯源：弹窗展示来源知识块全文与图片）")
     @GetMapping("/knowledge/{knowledgeId}")
     public ResultJson knowledgeDetail(
-            @Parameter(description = "知识块 ID") @PathVariable String knowledgeId) {
+            @Parameter(description = "知识块 ID") @PathVariable("knowledgeId") String knowledgeId) {
         AiKnowledge k = knowledgeMapper.selectById(knowledgeId);
         if (k == null) {
             return ResultJson.error(404, "知识块不存在");

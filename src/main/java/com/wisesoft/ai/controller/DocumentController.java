@@ -81,7 +81,7 @@ public class DocumentController {
     @Operation(summary = "修改文档分类", description = "设置文档分类；category 传空串/空白清除分类")
     @PutMapping("/{id}/category")
     public ResultJson updateCategory(
-            @Parameter(description = "文档 ID") @PathVariable String id,
+            @Parameter(description = "文档 ID") @PathVariable("id") String id,
             @RequestBody Map<String, String> body) {
         documentService.updateCategory(id, body.get("category"));
         return ResultJson.ok("操作成功");
@@ -90,7 +90,7 @@ public class DocumentController {
     @Operation(summary = "删除文档", description = "删除指定文档（同时清理向量、知识块、图片、源文件）")
     @DeleteMapping("/{id}")
     public ResultJson delete(
-            @Parameter(description = "文档 ID") @PathVariable String id) {
+            @Parameter(description = "文档 ID") @PathVariable("id") String id) {
         documentService.delete(id);
         return ResultJson.ok("删除成功");
     }
@@ -98,7 +98,7 @@ public class DocumentController {
     @Operation(summary = "启停用文档", description = "设置文档状态：0=生效（参与检索），1=弃用（不参与检索）")
     @PutMapping("/{id}/status")
     public ResultJson updateStatus(
-            @Parameter(description = "文档 ID") @PathVariable String id,
+            @Parameter(description = "文档 ID") @PathVariable("id") String id,
             @RequestBody Map<String, Integer> body) {
         Integer status = body.get("status");
         if (status == null) throw new BizException("缺少 status 参数");
@@ -109,7 +109,7 @@ public class DocumentController {
     @Operation(summary = "重解析文档", description = "复用源文件重新解析+向量化，适用于文档内容更新后重新入库")
     @PostMapping("/{id}/reparse")
     public ResultJson reparse(
-            @Parameter(description = "文档 ID") @PathVariable String id) {
+            @Parameter(description = "文档 ID") @PathVariable("id") String id) {
         documentService.reparse(id);
         return ResultJson.ok("已重新提交解析");
     }
@@ -145,14 +145,14 @@ public class DocumentController {
     @Operation(summary = "文档版本列表", description = "获取文档的历史版本列表（倒序）")
     @GetMapping("/{id}/versions")
     public ResultJson versions(
-            @Parameter(description = "文档 ID") @PathVariable String id) {
+            @Parameter(description = "文档 ID") @PathVariable("id") String id) {
         return ResultJson.ok(documentService.listVersions(id));
     }
 
     @Operation(summary = "回滚文档版本", description = "回滚到指定版本：重建该版本的知识块与向量（历史引用仍可溯源）")
     @PostMapping("/{id}/rollback")
     public ResultJson rollback(
-            @Parameter(description = "文档 ID") @PathVariable String id,
+            @Parameter(description = "文档 ID") @PathVariable("id") String id,
             @Parameter(description = "{\"version\": 2}") @RequestBody Map<String, Integer> body) {
         Integer version = body.get("version");
         if (version == null) throw new BizException("缺少 version 参数");
