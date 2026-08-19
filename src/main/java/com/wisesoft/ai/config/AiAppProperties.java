@@ -88,7 +88,7 @@ public class AiAppProperties {
         /** 图片最长边像素，超过则等比缩小（0=不压缩） */
         private int maxWidth = 1280;
         /** JPEG 压缩质量（0~1） */
-        private float quality = 0.8f;
+        private float quality = 0.9f;
         /** 图片 URL 访问前缀（含 context-path /ai） */
         private String urlPrefix = "/ai/images";
         /** 图片访问鉴权开关（HMAC 签名 URL，生产开启） */
@@ -127,6 +127,8 @@ public class AiAppProperties {
         private int retryCount = 1;
         /** Ollama keep_alive 保持模型常驻(分钟)，0=不发送（云端服务不支持此参数需设 0） */
         private int keepAliveMinutes = 30;
+        /** Ollama 上下文窗口 num_ctx：1280px 识别图视觉 token 约 1600-2500，默认 4096 会截断；0=不设置 */
+        private int numCtx = 16384;
         /** 请求超时兜底(ms)，若单请求处理超长则不等待直接降级 */
         private int abortMillis = 0;
         /**

@@ -257,8 +257,9 @@ public class DocxParser implements DocumentParser {
         SavedImage saved = imageCache.get(checksum);
         if (saved == null) {
             try {
+                // 双图策略：压缩图只进内存供视觉模型识别（不落盘）；原图落盘用于回答/知识库展示（保持清晰）
                 CompressedImage ci = compress(data.getData(), ext);
-                String url = persistImage(ci.bytes(), ci.ext(), docId, imageCount[0]);
+                String url = persistImage(data.getData(), ext, docId, imageCount[0]);
                 // 并发限流（动态信号量，保存即生效）
                 Semaphore sem = visionSemaphore();
                 sem.acquire();
@@ -349,13 +350,16 @@ public class DocxParser implements DocumentParser {
             if (img == null) return new CompressedImage(original, ext);
 
             int maxWidth = properties.getImages().getMaxWidth();
-            if (maxWidth > 0 && img.getWidth() > maxWidth) {
-                int height = (int) Math.round(img.getHeight() * (double) maxWidth / img.getWidth());
+            // 按最长边缩放（宽或高超限都等比缩小，竖长图不再绕过）
+            int longest = Math.max(img.getWidth(), img.getHeight());
+            if (maxWidth > 0 && longest > maxWidth) {
+                int w = (int) Math.round(img.getWidth() * (double) maxWidth / longest);
+                int h = (int) Math.round(img.getHeight() * (double) maxWidth / longest);
                 int type = img.getType() == 0 ? BufferedImage.TYPE_INT_RGB : img.getType();
-                BufferedImage scaled = new BufferedImage(maxWidth, height, type);
+                BufferedImage scaled = new BufferedImage(w, h, type);
                 Graphics2D g = scaled.createGraphics();
-                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-                g.drawImage(img, 0, 0, maxWidth, height, null);
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                g.drawImage(img, 0, 0, w, h, null);
                 g.dispose();
                 img = scaled;
             }

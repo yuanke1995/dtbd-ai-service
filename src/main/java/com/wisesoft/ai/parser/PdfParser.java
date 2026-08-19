@@ -2,6 +2,7 @@ package com.wisesoft.ai.parser;
 
 import com.wisesoft.ai.config.AiAppProperties;
 import com.wisesoft.ai.model.Chunk;
+import com.wisesoft.ai.service.ConfigService;
 import com.wisesoft.ai.service.VisionService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -29,13 +30,14 @@ import java.util.List;
 @RequiredArgsConstructor
 public class PdfParser implements DocumentParser {
 
-    /** 文本少于该长度判定为扫描件（图片型 PDF），触发 OCR */
-    private static final int OCR_MIN_TEXT = 20;
+    /** 文本少于该长度判定为扫描件（图片型 PDF），触发 OCR；parse.ocrMinText 可调 */
+    private int ocrMinText() { return configService.getInt("parse.ocrMinText", 20); }
     /** OCR 专用提示词：原样输出文字，不做描述/评论 */
     private static final String OCR_PROMPT = "请识别图片中的全部文字内容，按原文原样输出。不要描述界面、不要评论、不要输出多余内容。如果图片中几乎没有文字，返回空。";
 
     private final AiAppProperties properties;
     private final VisionService visionService;
+    private final ConfigService configService;
 
     @Override
     public boolean supports(String ext) {
@@ -74,7 +76,7 @@ public class PdfParser implements DocumentParser {
             }
 
             // 扫描件/图片型 PDF：文本极少 → OCR 降级
-            if (pageBuffer.length() < OCR_MIN_TEXT) {
+            if (pageBuffer.length() < ocrMinText()) {
                 log.info("[PDF] {} 文本极少({}字符)，判定为扫描件，走 OCR（每页本地视觉模型识别）", fileName, pageBuffer.length());
                 chunks = ocrParse(doc, maxSize);
             } else if (pageBuffer.length() > 0) {
@@ -109,9 +111,12 @@ public class PdfParser implements DocumentParser {
         return chunks;
     }
 
+    /** PDF 页 OCR 渲染 DPI：150→200 提高小字识别清晰度（内存/耗时小幅增加） */
+    private static final int OCR_DPI = 200;
+
     private String ocrPage(PDFRenderer renderer, int page) {
         try {
-            BufferedImage img = renderer.renderImageWithDPI(page, 150);
+            BufferedImage img = renderer.renderImageWithDPI(page, OCR_DPI);
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             ImageIO.write(img, "png", bos);
             String text = visionService.describe(bos.toByteArray(), "png", OCR_PROMPT);

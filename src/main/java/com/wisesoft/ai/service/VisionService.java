@@ -89,6 +89,12 @@ public class VisionService {
         if (keepAlive > 0) {
             body.put("keep_alive", keepAlive + "m");
         }
+        // Ollama num_ctx：1280px 识别图视觉 token 约 1600-2500，默认 4096 会截断描述输出；
+        // 云端服务（阿里云 MaaS 等）通常忽略未知字段，若报错可将 vision.num-ctx 置 0 关闭
+        int numCtx = properties.getVision().getNumCtx();
+        if (numCtx > 0) {
+            body.put("options", Map.of("num_ctx", numCtx));
+        }
         body.put("messages", List.of(Map.of("role", "user", "content", List.of(
                 Map.of("type", "image_url", "image_url",
                         Map.of("url", "data:" + mime + ";base64," + base64)),
