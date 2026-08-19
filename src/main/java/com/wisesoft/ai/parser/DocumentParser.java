@@ -34,4 +34,21 @@ public interface DocumentParser {
      * @param docId    文档ID（用于图片落盘目录等）
      */
     List<Chunk> parse(byte[] bytes, String fileName, String docId) throws Exception;
+
+    /**
+     * 解析进度回调：解析器在耗时子任务（如逐张图片视觉识别）完成时上报
+     */
+    @FunctionalInterface
+    interface ParseProgress {
+        void onProgress(int percent, String desc);
+    }
+
+    /**
+     * 带进度回调的解析（默认实现不回调，保持与旧调用兼容）
+     *
+     * @param progress 进度回调（可为 null 表示不关心进度）
+     */
+    default List<Chunk> parse(byte[] bytes, String fileName, String docId, ParseProgress progress) throws Exception {
+        return parse(bytes, fileName, docId);
+    }
 }

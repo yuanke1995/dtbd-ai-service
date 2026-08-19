@@ -155,31 +155,21 @@ export const deleteSessionApi = sid => request(`/session/${sid}`, { method: 'DEL
 /** 清空所有会话 */
 export const clearAllSessionsApi = () => request('/sessions', { method: 'DELETE' })
 
-/** 文档列表（可按分类筛选） */
-export const listDocuments = (category = '') =>
-  request('/document/list' + (category ? '?category=' + encodeURIComponent(category) : ''))
-
-/** 文档分类列表 */
-export const getDocumentCategories = () => request('/document/categories')
-
-/** 修改文档分类（category 传空串清除） */
-export const updateDocumentCategory = (id, category) =>
-  request(`/document/${id}/category`, { method: 'PUT', body: JSON.stringify({ category }) })
+/** 文档列表 */
+export const listDocuments = () => request('/document/list')
 
 /** 上传文档（onProgress 接收 0-100 百分比） */
-export function uploadDocument(file, description, onProgress, category) {
+export function uploadDocument(file, description, onProgress) {
   const fd = new FormData()
   fd.append('file', file)
   if (description) fd.append('description', description)
-  if (category) fd.append('category', category)
   return upload('/document/upload', fd, onProgress)
 }
 
-/** 批量上传（onProgress 接收 0-100 百分比；category 应用到所有文件） */
-export function uploadDocumentsBatch(files, onProgress, category) {
+/** 批量上传（onProgress 接收 0-100 百分比） */
+export function uploadDocumentsBatch(files, onProgress) {
   const fd = new FormData()
   files.forEach(f => fd.append('file', f))
-  if (category) fd.append('category', category)
   return upload('/document/upload/batch', fd, onProgress)
 }
 

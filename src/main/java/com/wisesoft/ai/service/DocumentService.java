@@ -2,6 +2,7 @@ package com.wisesoft.ai.service;
 
 import com.alibaba.fastjson2.JSON;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.wisesoft.ai.common.BizException;
 import com.wisesoft.ai.config.AiAppProperties;
 import com.wisesoft.ai.mapper.AiDocumentMapper;
@@ -30,6 +31,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -55,6 +57,8 @@ public class DocumentService {
     private final com.wisesoft.ai.mapper.AiQaLogMapper qaLogMapper;
     private final List<DocumentParser> parsers;
     private final ConfigService configService;
+    /** 解析进度节流守卫：docId -> 已上报 progress（值未变化不写库） */
+    private final Map<String, Integer> progressGuard = new ConcurrentHashMap<>();
 
     /** 解析线程池（并发 2：避免多文档同时解析打爆 embedding/Ollama） */
     private ExecutorService parseExecutor;
@@ -105,8 +109,7 @@ public class DocumentService {
         doc.setFileType(ext);
         doc.setFileSize(file.getSize());
         doc.setStatus(2); // 解析中
-        doc.setDescription(description);
-        if (category != null && !category.isBlank()) {
+        doc.setDescription(description);        if (category != null && !category.isBlank()) {
             if (category.trim().length() > 50) {
                 throw new BizException("分类过长（最多50字）");
             }
@@ -114,6 +117,7 @@ public class DocumentService {
         }
         documentMapper.insert(doc);
         documentMetaCache.invalidate(doc.getId());
+        updateProgress(doc.getId(), 0, "已提交,等待解析");
 
         Path source;
         try {
@@ -155,6 +159,42 @@ public class DocumentService {
     }
 
     /**
+     * 删除感知：文档记录是否仍存在（delete() 为物理删除，删除后 selectById 返回 null）
+     */
+    private boolean isDocAlive(String docId) {
+        return documentMapper.selectById(docId) != null;
+    }
+
+    /**
+     * 解析中途停止时的补偿清理：删已写向量 + MySQL 元数据 + 图片目录（文档已被删除，不恢复状态）
+     */
+    private void cleanupPartial(String docId, List<Document> aiDocs) {
+        log.info("[{}] 解析过程中文档已被删除，停止解析并清理本次产物", docId);
+        try {
+            List<String> vectorIds = aiDocs.stream().map(Document::getId).toList();
+            if (!vectorIds.isEmpty()) vectorStore.delete(vectorIds);
+        } catch (Exception e) {
+            log.warn("[{}] 补偿删除向量失败: {}", docId, e.getMessage());
+        }
+        knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+        cleanupImages(docId);
+    }
+
+    /**
+     * 解析进度上报（节流：progress 未变化且非终态时不写库；只更新进度两字段，避免整行 update）
+     */
+    private void updateProgress(String docId, int progress, String desc) {
+        boolean terminal = "解析完成".equals(desc) || "解析失败".equals(desc);
+        Integer last = progressGuard.get(docId);
+        if (last != null && last.equals(progress) && !terminal) return;
+        progressGuard.put(docId, progress);
+        documentMapper.update(null, new LambdaUpdateWrapper<AiDocument>()
+                .eq(AiDocument::getId, docId)
+                .set(AiDocument::getParseProgress, progress)
+                .set(AiDocument::getParseDesc, desc));
+    }
+
+    /**
      * 异步解析核心：解析 → MySQL 元数据 + 向量 → 状态置 0；失败置 3 + 原因 + 补偿清理
      */
     private void processUpload(String docId, String fileName, Path source, DocumentParser parser) {
@@ -162,8 +202,12 @@ public class DocumentService {
         if (doc == null) return;
         List<Document> aiDocs = new ArrayList<>();
         try {
+            updateProgress(docId, 5, "开始解析");
             byte[] bytes = Files.readAllBytes(source);
-            List<Chunk> chunks = parser.parse(bytes, fileName, docId);
+            // parse 为黑盒（含图片视觉描述，可能较慢），期间进度显示静态值；DocxParser 会逐张图片上报精确进度
+            updateProgress(docId, 10, "解析文档内容(图片较多时较慢)");
+            List<Chunk> chunks = parser.parse(bytes, fileName, docId,
+                    (percent, desc) -> updateProgress(docId, percent, desc));
             // 截断保护：超大文档只保留前 maxChunks 块（防止 embedding 调用数万次/解析失控）
             int maxChunks = configService.getInt("chunk.maxChunks");
             if (maxChunks > 0 && chunks.size() > maxChunks) {
@@ -173,9 +217,13 @@ public class DocumentService {
             if (chunks.isEmpty()) {
                 throw new BizException("文档未解析出任何内容");
             }
+            // 删除感知：解析过程中文档被删除则立即停止并清理本次产物（避免孤儿数据/白耗资源）
+            if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
+            updateProgress(docId, 30, "分块完成,准备入库");
 
             // 构建 Spring AI Document 列表（VectorStore 会自动向量化）
-            for (int i = 0; i < chunks.size(); i++) {
+            int total = chunks.size();
+            for (int i = 0; i < total; i++) {
                 Chunk chunk = chunks.get(i);
                 AiKnowledge knowledge = new AiKnowledge();
                 knowledge.setDocId(docId);
@@ -196,17 +244,33 @@ public class DocumentService {
                 }
                 aiDocs.add(new Document(knowledge.getId(),
                         chunk.title() + "\n" + chunk.content(), metadata));
+                // 入库进度：30 → 50（每 10 块上报一次）
+                if ((i + 1) % 10 == 0 || i == total - 1) {
+                    updateProgress(docId, 30 + Math.min(20, (i + 1) * 20 / total), "入库 " + (i + 1) + "/" + total);
+                }
             }
+            // 删除感知：入库后、向量化前再查一次
+            if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
 
             // 写入向量库（embedding 接口单次请求上限 10 条，需分批）
             if (!aiDocs.isEmpty()) {
                 int batchSize = 10;
+                int totalBatch = (aiDocs.size() + batchSize - 1) / batchSize;
+                int batchNo = 0;
                 for (int i = 0; i < aiDocs.size(); i += batchSize) {
                     int end = Math.min(i + batchSize, aiDocs.size());
                     vectorStore.add(aiDocs.subList(i, end));
+                    batchNo++;
+                    // 向量化进度：50 → 95（每批精确上报）
+                    updateProgress(docId, 50 + Math.min(45, batchNo * 45 / totalBatch), "向量化 " + end + "/" + aiDocs.size());
                     log.info("[{}] 向量化 {}-{} / {}", docId, i + 1, end, aiDocs.size());
                 }
             }
+
+            // 删除感知：向量化后、回写状态前最后确认
+            if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
+
+            updateProgress(docId, 100, "解析完成");
 
             doc.setChunkCount(chunks.size());
             doc.setStatus(0);
@@ -236,6 +300,8 @@ public class DocumentService {
             doc.setStatus(3);
             doc.setFailReason(truncate(e.getMessage()));
             documentMapper.updateById(doc);
+            // 失败：进度保留最后值，desc 置"解析失败"
+            updateProgress(docId, progressGuard.getOrDefault(docId, 0), "解析失败");
         }
     }
 
@@ -603,6 +669,7 @@ public class DocumentService {
         doc.setFailReason(null);
         documentMapper.updateById(doc);
         documentMetaCache.invalidate(docId);
+        updateProgress(docId, 0, "重新解析中");
 
         final DocumentParser fp = parser;
         parseExecutor.submit(() -> processUpload(docId, doc.getFileName(), source, fp));

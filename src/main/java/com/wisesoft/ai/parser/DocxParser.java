@@ -24,6 +24,7 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -93,6 +94,11 @@ public class DocxParser implements DocumentParser {
 
     @Override
     public List<Chunk> parse(byte[] bytes, String fileName, String docId) throws IOException {
+        return parse(bytes, fileName, docId, null);
+    }
+
+    @Override
+    public List<Chunk> parse(byte[] bytes, String fileName, String docId, ParseProgress progress) throws IOException {
         List<Chunk> chunks = new ArrayList<>();
         int maxSize = properties.getChunk().getMaxSize();
         String title = "概述";
@@ -102,6 +108,17 @@ public class DocxParser implements DocumentParser {
         // checksum -> 已保存图片（文档内去重，复用 URL 与描述）
         Map<Long, SavedImage> imageCache = new HashMap<>();
         int[] imageCount = {0};
+        // 图片识别进度：预扫描总数，每张描述完成上报（10→30 区间由调用方映射）
+        ImageProgress imageProgress = null;
+        if (progress != null) {
+            int total = 0;
+            try (XWPFDocument scan = new XWPFDocument(new java.io.ByteArrayInputStream(bytes))) {
+                total = countImages(scan);
+            } catch (Exception e) {
+                log.warn("图片预扫描失败，跳过图片进度上报: {}", e.getMessage());
+            }
+            imageProgress = new ImageProgress(total, progress);
+        }
 
         try (XWPFDocument document = new XWPFDocument(new java.io.ByteArrayInputStream(bytes))) {
             for (IBodyElement element : document.getBodyElements()) {
@@ -127,7 +144,7 @@ public class DocxParser implements DocumentParser {
                     // 占位符 [图片] 立即写入原文位置，flush 时按序替换为 [图片：描述]
                     for (XWPFRun run : p.getRuns()) {
                         for (XWPFPicture pic : run.getEmbeddedPictures()) {
-                            handlePicture(pic.getPictureData(), docId, currentImages, imageCache, imageCount);
+                            handlePicture(pic.getPictureData(), docId, currentImages, imageCache, imageCount, imageProgress);
                             if (content.length() > 0 && content.charAt(content.length() - 1) != '\n') {
                                 content.append("\n");
                             }
@@ -218,7 +235,8 @@ public class DocxParser implements DocumentParser {
      */
     private void handlePicture(XWPFPictureData data, String docId,
                                List<SavedImage> currentImages,
-                               Map<Long, SavedImage> imageCache, int[] imageCount) {
+                               Map<Long, SavedImage> imageCache, int[] imageCount,
+                               ImageProgress imageProgress) {
         String ext = data.suggestFileExtension().toLowerCase();
         if (!ALLOWED_EXTS.contains(ext)) {
             log.debug("跳过不支持的图片类型: {}", ext);
@@ -252,6 +270,14 @@ public class DocxParser implements DocumentParser {
                                 sem.release();
                             }
                         }, visionExecutor);
+                // 图片识别进度：每张描述完成（成功/失败均计数）上报一次
+                if (imageProgress != null) {
+                    final ImageProgress p = imageProgress;
+                    descFuture.whenComplete((d, ex) -> {
+                        p.done();
+                        p.report();
+                    });
+                }
                 saved = new SavedImage(url, descFuture);
                 imageCache.put(checksum, saved);
                 imageCount[0]++;
@@ -265,6 +291,53 @@ public class DocxParser implements DocumentParser {
             }
         }
         currentImages.add(saved);
+    }
+
+    /**
+     * 图片识别进度计数器（每张描述完成上报一次；跨线程安全）
+     * 进度映射 10→30 区间，desc="识别图片 k/total"
+     */
+    private static final class ImageProgress {
+        private final int total;
+        private final ParseProgress callback;
+        private final AtomicInteger done = new AtomicInteger(0);
+
+        ImageProgress(int total, ParseProgress callback) {
+            this.total = Math.max(1, total);
+            this.callback = callback;
+        }
+
+        void done() { done.incrementAndGet(); }
+
+        void report() {
+            if (callback == null) return;
+            int k = Math.min(done.get(), total);
+            callback.onProgress(10 + 20 * k / total, "识别图片 " + k + "/" + total);
+        }
+    }
+
+    /**
+     * 预扫描文档段落内嵌图片总数（与 handlePicture 同构过滤：类型→去重→maxImages 截断），供进度上报
+     */
+    private int countImages(XWPFDocument document) {
+        int total = 0;
+        int maxImages = configService.getInt("chunk.maxImages");
+        Set<Long> seen = new HashSet<>();
+        outer:
+        for (IBodyElement element : document.getBodyElements()) {
+            if (element.getElementType() != BodyElementType.PARAGRAPH) continue;
+            for (XWPFRun run : ((XWPFParagraph) element).getRuns()) {
+                for (XWPFPicture pic : run.getEmbeddedPictures()) {
+                    XWPFPictureData data = pic.getPictureData();
+                    String ext = data.suggestFileExtension().toLowerCase();
+                    if (!ALLOWED_EXTS.contains(ext)) continue;
+                    if (!seen.add(data.getChecksum())) continue;
+                    total++;
+                    if (maxImages > 0 && total >= maxImages) break outer;
+                }
+            }
+        }
+        return total;
     }
 
     /**

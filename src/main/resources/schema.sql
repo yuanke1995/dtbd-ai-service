@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS `c_ai_document` (
     `chunk_count`  INT          DEFAULT 0 COMMENT '分块数量',
     `status`       INT          DEFAULT 0 COMMENT '状态: 0=生效, 1=已弃用, 2=解析中, 3=解析失败',
     `fail_reason`  VARCHAR(500) DEFAULT NULL COMMENT '解析失败原因(status=3)',
+    `parse_progress` INT        DEFAULT 0 COMMENT '解析进度0-100',
+    `parse_desc`   VARCHAR(64)  DEFAULT '' COMMENT '解析阶段描述',
     `file_size`    BIGINT       DEFAULT 0 COMMENT '文件大小(字节)',
     `description`  VARCHAR(500) DEFAULT NULL COMMENT '文档描述',
     `create_time`  DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -67,6 +69,8 @@ CREATE TABLE IF NOT EXISTS `c_ai_message` (
 -- ALTER TABLE `c_ai_message` ADD COLUMN `sources` TEXT DEFAULT NULL COMMENT '引用来源 (JSON数组字符串)' AFTER `images`;
 -- 2026-08-11: 文档表新增解析失败原因列
 -- ALTER TABLE `c_ai_document` ADD COLUMN `fail_reason` VARCHAR(500) DEFAULT NULL COMMENT '解析失败原因(status=3)' AFTER `status`;
+-- ALTER TABLE `c_ai_document` ADD COLUMN `parse_progress` INT NOT NULL DEFAULT 0 COMMENT '解析进度0-100' AFTER `fail_reason`;
+-- ALTER TABLE `c_ai_document` ADD COLUMN `parse_desc` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '解析阶段描述' AFTER `parse_progress`;
 -- 2026-08-13: 存量库需手动执行以下 ALTER（问答日志新增改写问题列）
 -- ALTER TABLE `c_ai_qa_log` ADD COLUMN `rewritten_query` TEXT DEFAULT NULL COMMENT '改写后的检索用问题' AFTER `question`;
 -- 2026-08-15: 存量库需手动执行以下 ALTER（深度思考功能：消息表加思考全文、日志表加深度思考标记）

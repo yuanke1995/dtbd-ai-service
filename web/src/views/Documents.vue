@@ -1,15 +1,9 @@
 <template>
   <a-card title="文档管理">
-    <!-- 工具栏：左侧筛选 / 右侧上传操作 -->
+    <!-- 工具栏：右侧上传操作 -->
     <div class="toolbar">
-      <div class="toolbar-filter">
-        <span class="filter-label">分类筛选</span>
-        <a-select v-model:value="filterCategory" style="width:150px" allow-clear placeholder="全部"
-                  :options="categoryOptions" @change="fetchList()" />
-      </div>
       <div class="toolbar-upload">
         <a-input v-model:value="desc" placeholder="文档描述（可选）" style="width:170px" allow-clear />
-        <a-input v-model:value="uploadCategory" placeholder="上传分类（可选）" style="width:130px" allow-clear />
         <a-upload :before-upload="beforeUpload" :show-upload-list="false" :accept="'.' + uploadCfg.allowedExts.join(',.')" multiple :disabled="uploading">
           <a-button type="primary" :loading="uploading">
             <upload-outlined /> {{ uploading ? '上传中...' : '上传文档' }}
@@ -40,23 +34,17 @@
         <template v-if="column.key === 'status'">
           <a-tag v-if="text === 0" color="green">生效</a-tag>
           <a-tag v-else-if="text === 1" color="orange">已弃用</a-tag>
-          <a-tag v-else-if="text === 2" color="processing"><a-spin size="small" style="margin-right:4px" />解析中</a-tag>
+          <div v-else-if="text === 2" style="display:flex;flex-direction:column;gap:2px">
+            <a-progress :percent="record.parseProgress || 0" size="small" style="width:110px;margin:0" />
+            <span style="font-size:12px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px"
+                  :title="record.parseDesc || '解析中'">{{ record.parseDesc || '解析中' }}</span>
+          </div>
           <a-tag v-else color="red" style="cursor:pointer"
                  @click="showFailReason(record)">解析失败</a-tag>
         </template>
         <template v-else-if="column.key === 'hitCount'">{{ text || 0 }}</template>
         <template v-else-if="column.key === 'fileSize'">{{ fmtSize(text) }}</template>
         <template v-else-if="column.key === 'createTime'">{{ fmtTime(text) }}</template>
-        <template v-else-if="column.key === 'category'">
-          <a-select
-            :value="record.category || undefined"
-            placeholder="未分类"
-            size="small"
-            style="width:110px"
-            :options="categoryOptions"
-            @change="val => saveCategory(record, val)"
-          />
-        </template>
         <template v-else-if="column.key === 'action'">
           <a-button v-if="record.status === 0" type="link" size="small" @click="openKb(record)">知识块</a-button>
           <a-button v-if="record.status === 0" type="link" size="small" @click="openVersions(record)">版本</a-button>
@@ -151,7 +139,7 @@ import { message, Modal } from 'ant-design-vue'
 import { UploadOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocument, deleteDocument,
          batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats, listKnowledgeByDoc, getKnowledgeDetail,
-         updateKnowledge, deleteKnowledge, listDocumentVersions, rollbackDocument, getDocumentCategories, updateDocumentCategory,
+         updateKnowledge, deleteKnowledge, listDocumentVersions, rollbackDocument,
          getRuntimeConfig } from '../api'
 
 // 知识块预览：图片 URL 兼容（/ai/ 前缀走 /proxy）
@@ -260,30 +248,7 @@ const doRollback = async version => {
   } catch (e) { message.error(e.message || '回滚失败') }
 }
 
-// ==================== 文档分类 ====================
-const categoryOptions = ref([])
-const filterCategory = ref(undefined)
-const uploadCategory = ref('')
-const loadCategories = async () => {
-  try {
-    const r = await getDocumentCategories()
-    if (r.success && Array.isArray(r.data)) {
-      categoryOptions.value = r.data.filter(Boolean).map(c => ({ label: c, value: c }))
-    }
-  } catch (e) { /* 分类加载失败不阻塞 */ }
-}
-const saveCategory = async (record, val) => {
-  try {
-    const r = await updateDocumentCategory(record.id, val || '')
-    if (r.success) {
-      record.category = val || null
-      message.success(val ? `已分类：${val}` : '已清除分类')
-      loadCategories()
-    } else message.error(r.msg || '保存失败')
-  } catch (e) { message.error(e.message || '保存失败') }
-}
-
-// 上传限制（默认与后端 multipart 一致；启动时从 /config/public 动态获取，改后端配置前端自动同步）
+// ==================== 上传限制（默认与后端 multipart 一致；启动时从 /config/public 动态获取，改后端配置前端自动同步）====================
 const MAX_SIZE = 200 * 1024 * 1024
 const ALLOWED = ['docx', 'pdf', 'xlsx']
 const uploadCfg = ref({ maxFileSize: MAX_SIZE, maxFileSizeLabel: '200MB', allowedExts: ALLOWED })
@@ -304,11 +269,10 @@ const cols = [
   { title: '文件名', dataIndex: 'fileName', key: 'fileName', ellipsis: true },
   { title: '类型', dataIndex: 'fileType', key: 'fileType', width: 70 },
   { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true },
-  { title: '分类', dataIndex: 'category', key: 'category', width: 130 },
   { title: '知识片段数', dataIndex: 'chunkCount', key: 'chunkCount', width: 110 },
   { title: '命中次数', dataIndex: 'hitCount', key: 'hitCount', width: 90 },
   { title: '文件大小', dataIndex: 'fileSize', key: 'fileSize', width: 110 },
-  { title: '状态', dataIndex: 'status', key: 'status', width: 100 },
+  { title: '状态', dataIndex: 'status', key: 'status', width: 170 },
   { title: '上传时间', dataIndex: 'createTime', key: 'createTime', width: 170 },
   { title: '操作', key: 'action', width: 220 }
 ]
@@ -323,13 +287,13 @@ const desc = ref('')
 const selectedKeys = ref([])
 let pollTimer = null
 
-onMounted(() => { fetchList(); loadCategories(); loadUploadCfg() })
+onMounted(() => { fetchList(); loadUploadCfg() })
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 
 async function fetchList() {
   loading.value = true
   try {
-    const [r, stats] = await Promise.all([listDocuments(filterCategory.value), getDocumentStats()])
+    const [r, stats] = await Promise.all([listDocuments(), getDocumentStats()])
     if (r.success) {
       const hitMap = (stats && stats.success && stats.data) ? stats.data : {}
       list.value = (r.data || []).map(d => ({ ...d, hitCount: hitMap[d.id] || 0 }))
@@ -345,7 +309,7 @@ function startPolling() {
   if (pollTimer) return
   pollTimer = setInterval(async () => {
     try {
-      const r = await listDocuments(filterCategory.value)
+      const r = await listDocuments()
       if (r.success) {
         list.value = r.data || []
         if (!list.value.some(d => d.status === 2)) stopPolling()
@@ -371,7 +335,7 @@ async function beforeUpload(fileList) {
   uploading.value = true
   uploadPercent.value = 0
   try {
-    const r = await uploadDocumentsBatch(files, pct => { uploadPercent.value = pct }, uploadCategory.value.trim() || '')
+    const r = await uploadDocumentsBatch(files, pct => { uploadPercent.value = pct })
     if (r.success) {
       const failed = (r.data || []).filter(x => !x.success)
       if (failed.length) {
@@ -380,9 +344,7 @@ async function beforeUpload(fileList) {
         message.success(`已提交 ${files.length} 个文档解析`)
       }
       desc.value = ''
-      uploadCategory.value = ''
       fetchList()
-      loadCategories()
     } else {
       message.error(r.msg || '上传失败')
     }
@@ -461,16 +423,6 @@ const fmtTime = t => {
   flex-wrap: wrap;
   gap: 10px 16px;
   margin-bottom: 14px;
-}
-.toolbar-filter {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.filter-label {
-  color: #888;
-  font-size: 13px;
-  white-space: nowrap;
 }
 .toolbar-upload {
   display: flex;

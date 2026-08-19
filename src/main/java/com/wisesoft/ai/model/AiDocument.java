@@ -35,6 +35,12 @@ public class AiDocument {
     /** 解析失败原因（status=3 时可见） */
     private String failReason;
 
+    /** 解析进度 0-100（解析中递增） */
+    private Integer parseProgress;
+
+    /** 解析阶段描述（如"向量化 128/300"） */
+    private String parseDesc;
+
     /** 文件大小(字节) */
     private Long fileSize;
 

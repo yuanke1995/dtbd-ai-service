@@ -35,6 +35,9 @@ public class RerankService {
     private volatile RestClient client;          // 按当前 baseUrl/timeout 懒构建
     private volatile String clientBaseUrl = "";  // 已构建 client 对应的 baseUrl（变化时重建）
     private volatile int clientTimeout = 0;      // 已构建 client 对应的 timeout
+    /** 最近一次失败时间戳（失败冷却：短暂故障后自动恢复，避免永久禁用） */
+    private volatile long lastFailTs = 0L;
+    private static final long FAIL_COOLDOWN_MS = 60_000L;  // 失败后冷却 60s 再重新探测
 
     public RerankService(ConfigService configService) {
         this.configService = configService;
@@ -102,9 +105,10 @@ public class RerankService {
             log.info("[Rerank] 候选 {} 条重排完成", candidates.size());
             return ranked;
         } catch (Exception e) {
-            // 失败记忆：标记不可用，避免每个请求都重试
+            // 失败记录：冷却期内不重试（避免每个请求都撞一次），冷却结束后自动恢复探测
             rerankSupported = false;
-            log.warn("[Rerank] 服务调用失败，回退融合分排序（进程内已记忆禁用）: {}", e.getMessage());
+            lastFailTs = System.currentTimeMillis();
+            log.warn("[Rerank] 服务调用失败，回退融合分排序（{}s 后自动重试）: {}", FAIL_COOLDOWN_MS / 1000, e.getMessage());
             return candidates;
         }
     }
@@ -157,17 +161,24 @@ public class RerankService {
      * GET /v1/models 确认 OpenAI 兼容服务在线
      */
     private boolean checkSupport() {
-        if (supportChecked.get()) return rerankSupported;
+        // 已探测过：成功直接返回；失败且冷却未过 → 仍不可用；冷却已过 → 重新探测（瞬时故障自动恢复）
+        if (supportChecked.get()) {
+            if (rerankSupported) return true;
+            if (System.currentTimeMillis() - lastFailTs < FAIL_COOLDOWN_MS) return false;
+            supportChecked.set(false);  // 冷却结束，允许重新探测
+        }
         synchronized (this) {
             if (supportChecked.get()) return rerankSupported;
             try {
                 String resp = client().get().uri("/v1/models").retrieve().body(String.class);
                 rerankSupported = resp != null && resp.contains("data");
                 if (!rerankSupported) {
+                    lastFailTs = System.currentTimeMillis();
                     log.warn("[Rerank] /v1/models 无有效响应，重排不可用（回退融合分排序）");
                 }
             } catch (Exception e) {
                 rerankSupported = false;
+                lastFailTs = System.currentTimeMillis();
                 log.warn("[Rerank] 服务探测失败（回退融合分排序）baseUrl={}: {}", baseUrl(), e.getMessage());
             }
             supportChecked.set(true);
