@@ -3,6 +3,7 @@ package com.wisesoft.ai.parser;
 import com.wisesoft.ai.model.Chunk;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * 文档解析器接口
@@ -17,6 +18,13 @@ public interface DocumentParser {
      * 是否支持该文件扩展名（小写，不含点，如 "docx"、"pdf"、"xlsx"）
      */
     boolean supports(String ext);
+
+    /**
+     * 支持的文件扩展名集合（小写不含点；供前端上传校验与接口动态获取，默认空）
+     */
+    default Set<String> supportedExts() {
+        return Set.of();
+    }
 
     /**
      * 解析文件为分块列表

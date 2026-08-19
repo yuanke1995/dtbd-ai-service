@@ -2,6 +2,7 @@ package com.wisesoft.ai.parser;
 
 import com.wisesoft.ai.config.AiAppProperties;
 import com.wisesoft.ai.model.Chunk;
+import com.wisesoft.ai.service.ConfigService;
 import com.wisesoft.ai.service.VisionService;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -42,13 +43,37 @@ public class DocxParser implements DocumentParser {
 
     private final AiAppProperties properties;
     private final VisionService visionService;
+    private final ConfigService configService;
     private final ExecutorService visionExecutor;
+    /** 图片描述并发限流（容量随配置动态调整，保存即生效） */
+    private volatile Semaphore visionSemaphore;
 
-    public DocxParser(AiAppProperties properties, VisionService visionService) {
+    public DocxParser(AiAppProperties properties, VisionService visionService, ConfigService configService) {
         this.properties = properties;
         this.visionService = visionService;
-        this.visionExecutor = Executors.newFixedThreadPool(
-                Math.max(1, properties.getVision().getConcurrency()));
+        this.configService = configService;
+        this.visionSemaphore = new Semaphore(Math.max(1, properties.getVision().getConcurrency()));
+        this.visionExecutor = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "vision-desc");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    /** 动态并发信号量：配置变更时重建（cached 线程池 + 信号量限流，保存即生效） */
+    private Semaphore visionSemaphore() {
+        int want = Math.max(1, configService.getInt("vision.concurrency"));
+        Semaphore s = visionSemaphore;
+        if (s.availablePermits() != want) {
+            synchronized (this) {
+                if (visionSemaphore.availablePermits() != want) {
+                    visionSemaphore = new Semaphore(want);
+                    s = visionSemaphore;
+                    log.info("[DocxParser] 图片描述并发调整: {} -> {}", s.availablePermits(), want);
+                }
+            }
+        }
+        return s;
     }
 
     @PreDestroy
@@ -59,6 +84,11 @@ public class DocxParser implements DocumentParser {
     @Override
     public boolean supports(String ext) {
         return "docx".equalsIgnoreCase(ext);
+    }
+
+    @Override
+    public java.util.Set<String> supportedExts() {
+        return java.util.Set.of("docx");
     }
 
     @Override
@@ -184,7 +214,7 @@ public class DocxParser implements DocumentParser {
     }
 
     /**
-     * 处理单张图片：类型过滤 → 去重 → 压缩保存 → 异步并发生成描述
+     * 处理单张图片：类型过滤 → 数量上限 → 去重 → 压缩保存 → 异步并发生成描述
      */
     private void handlePicture(XWPFPictureData data, String docId,
                                List<SavedImage> currentImages,
@@ -195,17 +225,40 @@ public class DocxParser implements DocumentParser {
             return;
         }
 
+        // 数量上限截断（防图片爆炸导致视觉描述数小时；配置保存即生效）
+        int maxImages = configService.getInt("chunk.maxImages");
+        if (maxImages > 0 && imageCount[0] >= maxImages) {
+            if (imageCount[0] == maxImages) {
+                log.warn("[{}] 图片数量达到上限 {}，后续图片不再提取描述", docId, maxImages);
+                imageCount[0]++;  // 只记一次 warn
+            }
+            return;
+        }
+
         long checksum = data.getChecksum();
         SavedImage saved = imageCache.get(checksum);
         if (saved == null) {
             try {
                 CompressedImage ci = compress(data.getData(), ext);
                 String url = persistImage(ci.bytes(), ci.ext(), docId, imageCount[0]);
+                // 并发限流（动态信号量，保存即生效）
+                Semaphore sem = visionSemaphore();
+                sem.acquire();
                 CompletableFuture<String> descFuture = CompletableFuture.supplyAsync(
-                        () -> visionService.describe(ci.bytes(), ci.ext()), visionExecutor);
+                        () -> {
+                            try {
+                                return visionService.describe(ci.bytes(), ci.ext());
+                            } finally {
+                                sem.release();
+                            }
+                        }, visionExecutor);
                 saved = new SavedImage(url, descFuture);
                 imageCache.put(checksum, saved);
                 imageCount[0]++;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("图片描述并发等待被中断: {}", e.getMessage());
+                return;
             } catch (IOException e) {
                 log.warn("图片保存失败: {}", e.getMessage());
                 return;

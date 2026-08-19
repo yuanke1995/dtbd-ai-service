@@ -221,6 +221,9 @@ export const getDocumentStats = () => request('/document/stats')
 /** 模型配置：获取全量（分组 + editable 标记） */
 export const getConfig = () => request('/config')
 
+/** 前端运行时配置（文档上传上限/支持格式等，与后端一致） */
+export const getRuntimeConfig = () => request('/config/public')
+
 /** 模型配置：保存可编辑项 {"chat":{...},"vision":{...}} */
 export const saveConfig = payload => request('/config', { method: 'PUT', body: JSON.stringify(payload) })
 

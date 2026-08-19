@@ -34,6 +34,10 @@ public class ConfigService {
             Map.entry("chat.systemPrompt", "AI助手系统提示词（角色与回答风格）"),
             Map.entry("vision.model", "视觉识别模型名"),
             Map.entry("vision.prompt", "视觉识别提示词"),
+            Map.entry("vision.concurrency", "图片描述并发数（保存即生效）"),
+            Map.entry("chunk.maxChunks", "单文档最大知识块数(0=不限制)"),
+            Map.entry("chunk.maxImages", "单文档最多提取图片数(0=不限制)"),
+            Map.entry("upload.maxFileSize", "文档上传大小上限(字节,保存即生效)"),
             Map.entry("retrieval.vectorWeight", "混合检索：向量权重(0~1)"),
             Map.entry("retrieval.keywordWeight", "混合检索：关键词权重(0~1)"),
             Map.entry("retrieval.titleBonus", "混合检索：标题命中奖励(0~1)"),
@@ -116,7 +120,11 @@ public class ConfigService {
         d.put("vision.prompt", properties.getVision().getPrompt());
         d.put("vision.baseUrl", properties.getVision().getBaseUrl());
         d.put("vision.apiKey", properties.getVision().getApiKey());
+        d.put("vision.concurrency", String.valueOf(properties.getVision().getConcurrency()));
         d.put("embedding.model", env("spring.ai.openai.embedding.options.model", ""));
+        d.put("chunk.maxChunks", String.valueOf(properties.getChunk().getMaxChunks()));
+        d.put("chunk.maxImages", String.valueOf(properties.getChunk().getMaxImages()));
+        d.put("upload.maxFileSize", String.valueOf(200L * 1024 * 1024));  // 业务上传上限（字节），默认 200MB
         d.put("retrieval.vectorWeight", String.valueOf(properties.getRetrieval().getVectorWeight()));
         d.put("retrieval.keywordWeight", String.valueOf(properties.getRetrieval().getKeywordWeight()));
         d.put("retrieval.titleBonus", String.valueOf(properties.getRetrieval().getTitleBonus()));
@@ -169,6 +177,14 @@ public class ConfigService {
             return Integer.parseInt(get(key).trim());
         } catch (Exception e) {
             return 0;
+        }
+    }
+
+    public long getLong(String key) {
+        try {
+            return Long.parseLong(get(key).trim());
+        } catch (Exception e) {
+            return 0L;
         }
     }
 
@@ -262,6 +278,29 @@ public class ConfigService {
                 throw new IllegalArgumentException("rerank.timeoutMillis 必须是整数");
             }
         }
+        // 解析参数校验：非负整数（0 表示不限制）
+        for (String iKey : new String[]{"chunk.maxChunks", "chunk.maxImages", "vision.concurrency"}) {
+            String v = updates.get(iKey);
+            if (v != null && !v.isBlank()) {
+                try {
+                    if (Integer.parseInt(v.trim()) < 0) throw new IllegalArgumentException(iKey + " 不能为负数");
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(iKey + " 必须是整数");
+                }
+            }
+        }
+        // 上传上限校验：必须 ≥1MB 且 ≤1GB（物理上限由 multipart 兜底）
+        String uf = updates.get("upload.maxFileSize");
+        if (uf != null && !uf.isBlank()) {
+            try {
+                long v = Long.parseLong(uf.trim());
+                if (v < 1024 * 1024 || v > 1024L * 1024 * 1024) {
+                    throw new IllegalArgumentException("upload.maxFileSize 需在 1MB ~ 1GB 之间");
+                }
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("upload.maxFileSize 必须是整数(字节)");
+            }
+        }
 
         for (Map.Entry<String, String> kv : updates.entrySet()) {
             AiConfig c = configMapper.selectById(kv.getKey());
@@ -287,7 +326,7 @@ public class ConfigService {
     /** 全量配置（供配置界面展示；apiKey 脱敏） */
     public Map<String, Object> snapshot() {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] groups = {"chat", "vision", "embedding", "retrieval", "context", "deepReasoning"};
+        String[] groups = {"chat", "vision", "embedding", "chunk", "upload", "retrieval", "context", "deepReasoning"};
         for (String g : groups) {
             Map<String, Object> items = new LinkedHashMap<>();
             for (Map.Entry<String, String> d : defaults().entrySet()) {

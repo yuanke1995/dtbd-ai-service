@@ -2,6 +2,7 @@ package com.wisesoft.ai.controller;
 
 import com.wisesoft.ai.common.BizException;
 import com.wisesoft.ai.dto.ResultJson;
+import com.wisesoft.ai.service.ConfigService;
 import com.wisesoft.ai.service.DocumentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -31,13 +32,28 @@ import java.util.Map;
 public class DocumentController {
 
     private final DocumentService documentService;
+    private final ConfigService configService;
 
-    @Operation(summary = "上传文档", description = "上传单个文档（docx/pdf/xlsx，≤50MB），异步解析，返回文档 ID 和解析状态")
+    /** 上传大小业务校验（DB 配置 upload.maxFileSize，保存即生效；multipart 物理上限由容器兜底） */
+    private void checkUploadSize(MultipartFile file) {
+        long limit = configService.getLong("upload.maxFileSize");
+        if (limit > 0 && file.getSize() > limit) {
+            throw new BizException("文件大小超过上限 " + fmtSize(limit) + "!");
+        }
+    }
+
+    private String fmtSize(long bytes) {
+        if (bytes >= 1024L * 1024 * 1024) return String.format("%.1fGB", bytes / (1024.0 * 1024 * 1024));
+        return String.format("%.0fMB", bytes / (1024.0 * 1024));
+    }
+
+    @Operation(summary = "上传文档", description = "上传单个文档（docx/pdf/xlsx），异步解析，返回文档 ID 和解析状态")
     @PostMapping("/upload")
     public ResultJson upload(
             @Parameter(description = "文档文件") @RequestParam("file") MultipartFile file,
             @Parameter(description = "文档描述（可选）") @RequestParam(value = "description", required = false) String description,
             @Parameter(description = "文档分类（可选，≤50字）") @RequestParam(value = "category", required = false) String category) throws Exception {
+        checkUploadSize(file);
         var doc = documentService.upload(file, description, category);
         return ResultJson.ok(doc, "已提交解析");
     }
@@ -52,6 +68,7 @@ public class DocumentController {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("fileName", file.getOriginalFilename());
             try {
+                checkUploadSize(file);
                 var doc = documentService.upload(file, null, category);
                 item.put("docId", doc.getId());
                 item.put("success", true);

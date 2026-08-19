@@ -43,6 +43,11 @@ public class PdfParser implements DocumentParser {
     }
 
     @Override
+    public java.util.Set<String> supportedExts() {
+        return java.util.Set.of("pdf");
+    }
+
+    @Override
     public List<Chunk> parse(byte[] bytes, String fileName, String docId) throws Exception {
         int maxSize = properties.getChunk().getMaxSize();
         List<Chunk> chunks = new ArrayList<>();

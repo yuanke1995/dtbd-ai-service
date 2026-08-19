@@ -54,6 +54,7 @@ public class DocumentService {
     private final DocumentMetaCache documentMetaCache;
     private final com.wisesoft.ai.mapper.AiQaLogMapper qaLogMapper;
     private final List<DocumentParser> parsers;
+    private final ConfigService configService;
 
     /** 解析线程池（并发 2：避免多文档同时解析打爆 embedding/Ollama） */
     private ExecutorService parseExecutor;
@@ -163,6 +164,12 @@ public class DocumentService {
         try {
             byte[] bytes = Files.readAllBytes(source);
             List<Chunk> chunks = parser.parse(bytes, fileName, docId);
+            // 截断保护：超大文档只保留前 maxChunks 块（防止 embedding 调用数万次/解析失控）
+            int maxChunks = configService.getInt("chunk.maxChunks");
+            if (maxChunks > 0 && chunks.size() > maxChunks) {
+                log.warn("[{}] 文档过大，解析出 {} 块，按配置截断保留前 {} 块", docId, chunks.size(), maxChunks);
+                chunks = new ArrayList<>(chunks.subList(0, maxChunks));
+            }
             if (chunks.isEmpty()) {
                 throw new BizException("文档未解析出任何内容");
             }

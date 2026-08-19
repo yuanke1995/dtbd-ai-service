@@ -10,7 +10,7 @@
       <div class="toolbar-upload">
         <a-input v-model:value="desc" placeholder="文档描述（可选）" style="width:170px" allow-clear />
         <a-input v-model:value="uploadCategory" placeholder="上传分类（可选）" style="width:130px" allow-clear />
-        <a-upload :before-upload="beforeUpload" :show-upload-list="false" accept=".docx,.pdf,.xlsx" multiple :disabled="uploading">
+        <a-upload :before-upload="beforeUpload" :show-upload-list="false" :accept="'.' + uploadCfg.allowedExts.join(',.')" multiple :disabled="uploading">
           <a-button type="primary" :loading="uploading">
             <upload-outlined /> {{ uploading ? '上传中...' : '上传文档' }}
           </a-button>
@@ -151,7 +151,8 @@ import { message, Modal } from 'ant-design-vue'
 import { UploadOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocument, deleteDocument,
          batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats, listKnowledgeByDoc, getKnowledgeDetail,
-         updateKnowledge, deleteKnowledge, listDocumentVersions, rollbackDocument, getDocumentCategories, updateDocumentCategory } from '../api'
+         updateKnowledge, deleteKnowledge, listDocumentVersions, rollbackDocument, getDocumentCategories, updateDocumentCategory,
+         getRuntimeConfig } from '../api'
 
 // 知识块预览：图片 URL 兼容（/ai/ 前缀走 /proxy）
 const resolveImg = u => u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
@@ -282,8 +283,22 @@ const saveCategory = async (record, val) => {
   } catch (e) { message.error(e.message || '保存失败') }
 }
 
-const MAX_SIZE = 50 * 1024 * 1024 // 与后端 multipart 限制一致
+// 上传限制（默认与后端 multipart 一致；启动时从 /config/public 动态获取，改后端配置前端自动同步）
+const MAX_SIZE = 200 * 1024 * 1024
 const ALLOWED = ['docx', 'pdf', 'xlsx']
+const uploadCfg = ref({ maxFileSize: MAX_SIZE, maxFileSizeLabel: '200MB', allowedExts: ALLOWED })
+
+async function loadUploadCfg() {
+  try {
+    const r = await getRuntimeConfig()
+    if (r.success && r.data?.upload) {
+      const u = r.data.upload
+      if (Number(u.maxFileSize) > 0) uploadCfg.value.maxFileSize = Number(u.maxFileSize)
+      if (u.maxFileSizeLabel) uploadCfg.value.maxFileSizeLabel = u.maxFileSizeLabel
+      if (Array.isArray(u.allowedExts) && u.allowedExts.length) uploadCfg.value.allowedExts = u.allowedExts
+    }
+  } catch (e) { /* 接口失败保持默认值 */ }
+}
 
 const cols = [
   { title: '文件名', dataIndex: 'fileName', key: 'fileName', ellipsis: true },
@@ -308,7 +323,7 @@ const desc = ref('')
 const selectedKeys = ref([])
 let pollTimer = null
 
-onMounted(() => { fetchList(); loadCategories() })
+onMounted(() => { fetchList(); loadCategories(); loadUploadCfg() })
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 
 async function fetchList() {
@@ -347,10 +362,10 @@ async function beforeUpload(fileList) {
   const files = Array.isArray(fileList) ? fileList : [fileList]
   const bad = files.find(f => {
     const ext = (f.name.split('.').pop() || '').toLowerCase()
-    return !ALLOWED.includes(ext) || f.size > MAX_SIZE
+    return !uploadCfg.value.allowedExts.includes(ext) || f.size > uploadCfg.value.maxFileSize
   })
   if (bad) {
-    message.error(`${bad.name} 不支持或超过 50MB（支持 docx/pdf/xlsx）`)
+    message.error(`${bad.name} 不支持或超过 ${uploadCfg.value.maxFileSizeLabel}（支持 ${uploadCfg.value.allowedExts.join('/')}）`)
     return false
   }
   uploading.value = true

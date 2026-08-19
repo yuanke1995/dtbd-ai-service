@@ -39,6 +39,10 @@ public class AiAppProperties {
         private int maxSize = 800;
         /** 分块重叠字符数 */
         private int overlap = 100;
+        /** 单文档解析的最大知识块数（0=不限制；防止超大文档 embedding 调用数万次） */
+        private int maxChunks = 3000;
+        /** 单文档最多提取图片数（0=不限制；防止图片爆炸导致视觉描述数小时） */
+        private int maxImages = 100;
     }
 
     @Data

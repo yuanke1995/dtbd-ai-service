@@ -41,6 +41,10 @@
               <a-textarea v-model:value="form.vision.prompt" :rows="3"
                           placeholder="图片描述提示词（50字内描述界面/元素）" />
             </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.visionConcurrency" placement="top">图片描述并发 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.vision.concurrency" :min="1" :max="16" style="width:200px" />
+            </a-form-item>
             <a-form-item label="Base URL">
               <a-input :value="ro.vision.baseUrl" disabled />
             </a-form-item>
@@ -48,6 +52,28 @@
               <a-input :value="ro.vision.apiKey" disabled />
             </a-form-item>
           </a-form>
+        </a-collapse-panel>
+
+        <a-collapse-panel key="chunk" header="文档解析（上传上限/分块/图片）">
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.uploadMaxSize" placement="top">上传大小上限 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.upload.maxFileSizeMB" :min="1" :max="1024" :step="50" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">MB，保存即生效</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.maxChunks" placement="top">最大知识块数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chunk.maxChunks" :min="0" :step="500" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">0=不限制</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.maxImages" placement="top">最多提取图片 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chunk.maxImages" :min="0" :step="20" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">0=不限制</span>
+            </a-form-item>
+          </a-form>
+          <a-alert type="info" show-icon style="margin:0 24px 16px"
+                   message="上传大小上限保存即生效（新上传按新限制校验）；分块/图片上限对超大文档保护：知识块数超上限截断入库，图片数超上限不再提取描述。保存后对新上传文档立即生效。" />
         </a-collapse-panel>
 
         <a-collapse-panel key="embedding" header="向量模型（Embedding）">
@@ -216,6 +242,10 @@ const tips = {
   systemPrompt: '定义 AI 的角色与回答风格，会注入每次问答的系统提示。改动立即影响所有回答的语气与行为；引用标注、配图、追问的硬性规则由系统固定，不可在此修改。',
   visionModel: '图片识别所用的多模态模型，影响文档截图、流程图的描述质量（描述越准，回答配图与检索召回越准）。',
   visionPrompt: '图片描述的要求（如提取关键文字/界面元素、说明流程要点）。改动影响图片描述的内容倾向，进而影响检索与配图准确性。',
+  visionConcurrency: '文档解析时图片描述的最大并发数。调高解析更快，但占用更多显存/推理资源（本地 Ollama 需设 OLLAMA_NUM_PARALLEL 才能并行）；调低更稳。',
+  maxChunks: '单文档解析的最大知识块数（0=不限制）。超大文档超出部分截断不入库，防止 embedding 调用数万次导致解析失控。',
+  maxImages: '单文档最多提取并描述的图片数（0=不限制）。图片爆炸的文档（上百张图）解析会非常慢，设上限可避免。',
+  uploadMaxSize: '文档上传大小上限（MB）。保存即生效（新上传按新限制校验）；物理上限 1GB 由容器兜底，不可超过。',
   vectorWeight: '向量语义相似度在最终排序分中的占比。调高更侧重"意思相近"的匹配（适合口语化、换说法的提问）；过高可能引入字面无关但语义相近的块。',
   keywordWeight: '关键词精确命中在排序分中的占比。调高更侧重"字面命中"（适合操作手册中的专有名词、按钮名）；过高会漏掉语义相关但字面不同的内容。',
   titleBonus: '知识块标题命中关键词时的额外加分。调高更倾向返回标题相关的块；适合章节结构清晰的文档，但可能挤占正文命中的块。',
@@ -245,7 +275,9 @@ const tips = {
 
 const loading = ref(false)
 const saving = ref(false)
-const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '' }, vision: { model: '', prompt: '' },
+const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '' }, vision: { model: '', prompt: '', concurrency: 4 },
+                    chunk: { maxChunks: 3000, maxImages: 100 },
+                    upload: { maxFileSizeMB: 200 },
                     retrieval: { vectorWeight: 0.6, keywordWeight: 0.4, titleBonus: 0.1,
                                  rerank: { enabled: false, baseUrl: 'http://localhost:7997',
                                            model: 'BAAI/bge-reranker-v2-m3', timeoutMillis: 5000 } },
@@ -268,6 +300,12 @@ onMounted(async () => {
       form.value.chat.systemPrompt = d.chat?.systemPrompt?.value || ''
       form.value.vision.model = d.vision?.model?.value || ''
       form.value.vision.prompt = d.vision?.prompt?.value || ''
+      form.value.vision.concurrency = Number(d.vision?.concurrency?.value ?? 4)
+      const ck = d.chunk || {}
+      form.value.chunk.maxChunks = Number(ck.maxChunks?.value ?? 3000)
+      form.value.chunk.maxImages = Number(ck.maxImages?.value ?? 100)
+      const up = d.upload || {}
+      form.value.upload.maxFileSizeMB = Math.round(Number(up.maxFileSize?.value ?? 209715200) / 1024 / 1024)
       form.value.retrieval.vectorWeight = Number(d.retrieval?.vectorWeight?.value ?? 0.6)
       form.value.retrieval.keywordWeight = Number(d.retrieval?.keywordWeight?.value ?? 0.4)
       form.value.retrieval.titleBonus = Number(d.retrieval?.titleBonus?.value ?? 0.1)
@@ -310,7 +348,10 @@ const save = async () => {
     const r = await saveConfig({
       chat: { model: form.value.chat.model?.trim(), temperature: String(form.value.chat.temperature),
               systemPrompt: form.value.chat.systemPrompt?.trim() },
-      vision: { model: form.value.vision.model?.trim(), prompt: form.value.vision.prompt?.trim() },
+      vision: { model: form.value.vision.model?.trim(), prompt: form.value.vision.prompt?.trim(),
+                concurrency: String(form.value.vision.concurrency) },
+      chunk: { maxChunks: String(form.value.chunk.maxChunks), maxImages: String(form.value.chunk.maxImages) },
+      upload: { maxFileSize: String(form.value.upload.maxFileSizeMB * 1024 * 1024) },
       retrieval: { vectorWeight: String(form.value.retrieval.vectorWeight),
                    keywordWeight: String(form.value.retrieval.keywordWeight),
                    titleBonus: String(form.value.retrieval.titleBonus),
