@@ -3,10 +3,17 @@
     <a-alert type="info" show-icon style="margin-bottom:16px"
              message="base-url / api-key / 向量模型为只读配置（变更需修改 yml 或环境变量后重启服务）；其余参数保存后立即生效。鼠标悬停参数名旁的 ? 可查看调整该参数的影响。" />
 
+    <!-- 分区锚点：点击展开并平滑定位到对应配置分组 -->
+    <div class="cfg-anchor">
+      <template v-for="a in anchors" :key="a.key">
+        <a :class="{ 'anchor-active': currentAnchor === a.key }" href="javascript:void(0)" @click="jumpTo(a.key)">{{ a.label }}</a>
+      </template>
+    </div>
+
     <a-spin :spinning="loading">
       <a-collapse v-model:activeKey="activeKeys" :bordered="false" class="cfg-collapse">
 
-        <a-collapse-panel key="chat" header="智能问答模型">
+        <a-collapse-panel key="chat" header="智能问答模型" :id="'cfg-anchor-chat'">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item>
               <template #label><a-tooltip :title="tips.chatModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -42,7 +49,7 @@
           </a-form>
         </a-collapse-panel>
 
-        <a-collapse-panel key="vision" header="视觉模型（图片识别）">
+        <a-collapse-panel key="vision" :id="'cfg-anchor-vision'" header="视觉模型（图片识别）">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item>
               <template #label><a-tooltip :title="tips.visionModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -70,7 +77,7 @@
           </a-form>
         </a-collapse-panel>
 
-        <a-collapse-panel key="chunk" header="文档解析（上传上限/分块/图片）">
+        <a-collapse-panel key="chunk" :id="'cfg-anchor-chunk'" header="文档解析（上传上限/分块/图片）">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item>
               <template #label><a-tooltip :title="tips.uploadMaxSize" placement="top">上传大小上限 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -101,7 +108,7 @@
                    message="上传大小上限保存即生效（新上传按新限制校验）；分块/图片上限对超大文档保护：知识块数超上限截断入库，图片数超上限不再提取描述。保存后对新上传文档立即生效。" />
         </a-collapse-panel>
 
-        <a-collapse-panel key="embedding" header="向量模型（Embedding）">
+        <a-collapse-panel key="embedding" :id="'cfg-anchor-embedding'" header="向量模型（Embedding）">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item label="模型名">
               <a-input :value="ro.embedding.model" disabled />
@@ -111,7 +118,7 @@
                    message="向量模型不支持页面修改：更换模型后维度可能变化，历史向量全部失效，需删除知识库重新上传文档。" />
         </a-collapse-panel>
 
-        <a-collapse-panel key="retrieval" header="检索设置（混合检索权重 + 重排）">
+        <a-collapse-panel key="retrieval" :id="'cfg-anchor-retrieval'" header="检索设置（混合检索权重 + 重排）">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item>
               <template #label><a-tooltip :title="tips.vectorWeight" placement="top">向量权重 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -179,7 +186,7 @@
                    message="重排：OpenAI 兼容 /v1/rerank 服务（sentence-transformers CrossEncoder，bge-reranker-v2-m3）。未启动或不可用时自动回退融合分排序，不影响正常问答。" />
         </a-collapse-panel>
 
-        <a-collapse-panel key="context" header="上下文与长度控制">
+        <a-collapse-panel key="context" :id="'cfg-anchor-context'" header="上下文与长度控制">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item>
               <template #label><a-tooltip :title="tips.modelWindows" placement="top">模型窗口映射 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -223,7 +230,7 @@
                    message="预算 = min(模型窗口×安全系数−输出限制, 成本上限)，知识块按相关度降序累积填充，超出预算的块自动被裁；每块只取命中关键词±窗口片段。历史单条截断+总量限制，[图片N] 标记自动剥离避免编号冲突。保存后立即生效。" />
         </a-collapse-panel>
 
-        <a-collapse-panel key="deepReasoning" header="深度思考设置">
+        <a-collapse-panel key="deepReasoning" :id="'cfg-anchor-deepReasoning'" header="深度思考设置">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item>
               <template #label><a-tooltip :title="tips.drEnabled" placement="top">总开关 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -285,13 +292,35 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { QuestionCircleOutlined, SaveOutlined } from '@ant-design/icons-vue'
 import { getConfig, saveConfig, checkRerank } from '../api'
 
 // 折叠面板：默认展开常用分组（chat / retrieval / context / deepReasoning），vision / embedding 收起
 const activeKeys = ref(['chat', 'retrieval', 'context', 'deepReasoning'])
+
+// 分区锚点：点击展开 + 平滑滚动定位
+const anchors = [
+  { key: 'chat', label: '智能问答' },
+  { key: 'vision', label: '视觉模型' },
+  { key: 'chunk', label: '文档解析' },
+  { key: 'embedding', label: '向量模型' },
+  { key: 'retrieval', label: '检索设置' },
+  { key: 'context', label: '上下文控制' },
+  { key: 'deepReasoning', label: '深度思考' }
+]
+const currentAnchor = ref('')
+let anchorObserver = null
+const jumpTo = (key) => {
+  currentAnchor.value = key
+  // 展开该分组（若收起）
+  if (!activeKeys.value.includes(key)) activeKeys.value = [...activeKeys.value, key]
+  // 平滑滚动到分组
+  requestAnimationFrame(() => {
+    document.getElementById('cfg-anchor-' + key)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
+}
 
 // 参数说明（hover ? 查看"调整该参数会影响什么"）
 const tips = {
@@ -453,6 +482,21 @@ onMounted(async () => {
     }
   } catch (e) { message.error(e.message || '加载配置失败') }
   finally { loading.value = false }
+
+  // 滚动高亮跟随：视口内最靠上的分组自动点亮对应锚点
+  anchorObserver = new IntersectionObserver(entries => {
+    entries.forEach(en => {
+      if (en.isIntersecting) currentAnchor.value = en.target.id.replace('cfg-anchor-', '')
+    })
+  }, { rootMargin: '-20px 0px -70% 0px', threshold: 0 })
+  anchors.forEach(a => {
+    const el = document.getElementById('cfg-anchor-' + a.key)
+    if (el) anchorObserver.observe(el)
+  })
+})
+
+onUnmounted(() => {
+  if (anchorObserver) { anchorObserver.disconnect(); anchorObserver = null }
 })
 
 const save = async () => {
@@ -528,6 +572,37 @@ const save = async () => {
 /* 折叠面板：去掉卡片默认背景与边框，保持与页面一致的浅色观感 */
 .cfg-collapse {
   background: transparent;
+}
+/* 分区锚点导航条：吸顶常驻（滚动时保持可见，随时可跳任意分组） */
+.cfg-anchor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 6px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+.cfg-anchor a {
+  font-size: 13px;
+  color: #555;
+  padding: 3px 10px;
+  border-radius: 12px;
+  text-decoration: none;
+  transition: all 0.2s;
+}
+.cfg-anchor a:hover {
+  color: #1677ff;
+  background: #e6f4ff;
+}
+.cfg-anchor a.anchor-active {
+  color: #fff;
+  background: #1677ff;
 }
 .cfg-collapse :deep(.ant-collapse-item) {
   background: #fff;
