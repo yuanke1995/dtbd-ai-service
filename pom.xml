@@ -131,6 +131,8 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
+                    <!-- 保留方法参数名（Spring MVC @RequestParam/@PathVariable 反射需要；IDE 直跑可能不带） -->
+                    <parameters>true</parameters>
                     <annotationProcessorPaths>
                         <path>
                             <groupId>org.projectlombok</groupId>

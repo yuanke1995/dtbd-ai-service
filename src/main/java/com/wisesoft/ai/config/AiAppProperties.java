@@ -59,14 +59,12 @@ public class AiAppProperties {
 
     @Data
     public static class Rerank {
-        /** 重排实现：ollama=Ollama /api/embed 近似重排（社区 rerank 模型仅支持 embedding 调用）；openai=独立服务 /v1/rerank（Infinity/TEI 兼容网关） */
-        private String provider = "ollama";
-        /** 是否启用重排（需先拉取 rerank 模型：ollama pull qllama/bge-reranker-v2-m3） */
+        /** 是否启用重排（需先启动本地 reranker 服务：scripts/win|mac/start_rerank_server.*） */
         private boolean enabled = false;
-        /** reranker 服务 base-url（ollama=http://localhost:11434；openai=独立服务地址） */
-        private String baseUrl = "http://localhost:11434";
+        /** reranker 服务 base-url（OpenAI 兼容，POST /v1/rerank） */
+        private String baseUrl = "http://localhost:7997";
         /** rerank 模型名 */
-        private String model = "qllama/bge-reranker-v2-m3";
+        private String model = "BAAI/bge-reranker-v2-m3";
         /** 单次重排超时(ms) */
         private int timeoutMillis = 5000;
     }

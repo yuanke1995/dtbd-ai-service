@@ -55,8 +55,7 @@ public class ConfigService {
             Map.entry("deepReasoning.multiRetrieval", "深度思考：多路并行检索开关"),
             Map.entry("deepReasoning.timeoutMillis", "深度思考：思考阶段超时(ms)"),
             Map.entry("deepReasoning.maxThinkingTokens", "深度思考：思考输出上限(token,0=不设)"),
-            Map.entry("rerank.provider", "重排：实现方式(ollama=embed近似/openai=/v1/rerank服务)"),
-            Map.entry("rerank.enabled", "重排：是否启用（需已拉取 rerank 模型）"),
+            Map.entry("rerank.enabled", "重排：是否启用（需先启动本地 reranker 服务）"),
             Map.entry("rerank.baseUrl", "重排：服务地址"),
             Map.entry("rerank.model", "重排：模型名"),
             Map.entry("rerank.timeoutMillis", "重排：单次超时(ms)"));
@@ -121,7 +120,6 @@ public class ConfigService {
         d.put("retrieval.vectorWeight", String.valueOf(properties.getRetrieval().getVectorWeight()));
         d.put("retrieval.keywordWeight", String.valueOf(properties.getRetrieval().getKeywordWeight()));
         d.put("retrieval.titleBonus", String.valueOf(properties.getRetrieval().getTitleBonus()));
-        d.put("rerank.provider", properties.getRetrieval().getRerank().getProvider());
         d.put("rerank.enabled", String.valueOf(properties.getRetrieval().getRerank().isEnabled()));
         d.put("rerank.baseUrl", properties.getRetrieval().getRerank().getBaseUrl());
         d.put("rerank.model", properties.getRetrieval().getRerank().getModel());
@@ -252,10 +250,6 @@ public class ConfigService {
             }
         }
         // 重排参数校验
-        String rp = updates.get("rerank.provider");
-        if (rp != null && !rp.isBlank() && !"ollama".equals(rp) && !"openai".equals(rp)) {
-            throw new IllegalArgumentException("rerank.provider 仅允许 ollama / openai");
-        }
         String rb = updates.get("rerank.enabled");
         if (rb != null && !rb.isBlank() && !"true".equalsIgnoreCase(rb) && !"false".equalsIgnoreCase(rb)) {
             throw new IllegalArgumentException("rerank.enabled 仅允许 true / false");

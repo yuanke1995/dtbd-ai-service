@@ -77,22 +77,15 @@
             <a-form-item>
               <template #label><a-tooltip :title="tips.rerankEnabled" placement="top">启用重排 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-switch v-model:checked="form.retrieval.rerank.enabled" />
-              <span style="margin-left:12px;color:#999;font-size:12px">需先拉取模型：ollama pull qllama/bge-reranker-v2-m3</span>
-            </a-form-item>
-            <a-form-item>
-              <template #label><a-tooltip :title="tips.rerankProvider" placement="top">重排方式 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-              <a-select v-model:value="form.retrieval.rerank.provider" style="width:260px">
-                <a-select-option value="ollama">ollama（/api/embed 近似重排）</a-select-option>
-                <a-select-option value="openai">openai（独立服务 /v1/rerank）</a-select-option>
-              </a-select>
+              <span style="margin-left:12px;color:#999;font-size:12px">需先启动本地服务：scripts/win 或 scripts/mac 的 start_rerank_server</span>
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.rerankBaseUrl" placement="top">服务地址 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-              <a-input v-model:value="form.retrieval.rerank.baseUrl" placeholder="http://localhost:11434" style="width:320px" />
+              <a-input v-model:value="form.retrieval.rerank.baseUrl" placeholder="http://localhost:7997" style="width:320px" />
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.rerankModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-              <a-input v-model:value="form.retrieval.rerank.model" placeholder="qllama/bge-reranker-v2-m3" style="width:320px" />
+              <a-input v-model:value="form.retrieval.rerank.model" placeholder="BAAI/bge-reranker-v2-m3" style="width:320px" />
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.rerankTimeout" placement="top">超时(ms) <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -101,8 +94,8 @@
           </a-form>
           <a-alert type="info" show-icon style="margin:0 24px 16px"
                    message="融合分 = 向量权重×向量相似度 + 关键词权重×命中率 + 标题命中奖励。保存后立即生效，可配合「检索调试」对比效果。" />
-          <a-alert type="warning" show-icon style="margin:0 24px 16px"
-                   message="重排：Ollama 官方无 rerank 端点，社区模型走 /api/embed 余弦相似度近似（非真交叉编码，质量打折）；追求质量可部署 Infinity 后用 provider=openai。" />
+          <a-alert type="info" show-icon style="margin:0 24px 16px"
+                   message="重排：OpenAI 兼容 /v1/rerank 服务（sentence-transformers CrossEncoder，bge-reranker-v2-m3）。未启动或不可用时自动回退融合分排序，不影响正常问答。" />
         </a-collapse-panel>
 
         <a-collapse-panel key="context" header="上下文与长度控制">
@@ -226,10 +219,9 @@ const tips = {
   vectorWeight: '向量语义相似度在最终排序分中的占比。调高更侧重"意思相近"的匹配（适合口语化、换说法的提问）；过高可能引入字面无关但语义相近的块。',
   keywordWeight: '关键词精确命中在排序分中的占比。调高更侧重"字面命中"（适合操作手册中的专有名词、按钮名）；过高会漏掉语义相关但字面不同的内容。',
   titleBonus: '知识块标题命中关键词时的额外加分。调高更倾向返回标题相关的块；适合章节结构清晰的文档，但可能挤占正文命中的块。',
-  rerankEnabled: '对混合检索候选再做一次精排。Ollama 无 rerank 端点，社区模型仅支持 /api/embed，启用前需先执行 ollama pull qllama/bge-reranker-v2-m3；服务不可用时自动回退融合分排序。',
-  rerankProvider: '重排实现：ollama=调 /api/embed 对 query+候选批量嵌入后余弦相似度排序（近似）；openai=调独立服务 OpenAI 兼容 /v1/rerank（真交叉编码，质量更好，需自行部署 Infinity 等）。',
-  rerankBaseUrl: '重排服务地址：ollama 模式填 Ollama 地址（默认 http://localhost:11434）；openai 模式填独立服务地址。',
-  rerankModel: '重排模型名：ollama 模式 qllama/bge-reranker-v2-m3；openai 模式如 BAAI/bge-reranker-v2-m3。',
+  rerankEnabled: '对混合检索候选再做一次精排（真交叉编码）。需先启动本地服务 scripts/win 或 scripts/mac 的 start_rerank_server（bge-reranker-v2-m3）；服务不可用时自动回退融合分排序。',
+  rerankBaseUrl: '重排服务地址（OpenAI 兼容 /v1/rerank），默认本地 http://localhost:7997。',
+  rerankModel: '重排模型名，与本地服务一致即可，默认 BAAI/bge-reranker-v2-m3。',
   rerankTimeout: '单次重排超时时间（毫秒），超过则回退融合分排序。建议 3000~8000。',
   modelWindows: '声明各模型的上下文窗口大小（token），格式"模型名=token"逗号分隔，按当前模型名的包含关系匹配。设置过大有超窗报错风险，过小会浪费模型能力。',
   defaultWindow: '当「模型窗口映射」未匹配到当前模型时使用的窗口大小兜底值。',
@@ -255,8 +247,8 @@ const loading = ref(false)
 const saving = ref(false)
 const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '' }, vision: { model: '', prompt: '' },
                     retrieval: { vectorWeight: 0.6, keywordWeight: 0.4, titleBonus: 0.1,
-                                 rerank: { provider: 'ollama', enabled: false, baseUrl: 'http://localhost:11434',
-                                           model: 'qllama/bge-reranker-v2-m3', timeoutMillis: 5000 } },
+                                 rerank: { enabled: false, baseUrl: 'http://localhost:7997',
+                                           model: 'BAAI/bge-reranker-v2-m3', timeoutMillis: 5000 } },
                     context: { modelWindows: '', defaultWindowTokens: 32768, safetyFactor: 0.7, costCapTokens: 8000,
                                maxOutputTokens: 2000, historyMaxTokens: 1200, historyPerMsgChars: 200,
                                snippetWindowChars: 150, maxContextHits: 8 },
@@ -280,10 +272,9 @@ onMounted(async () => {
       form.value.retrieval.keywordWeight = Number(d.retrieval?.keywordWeight?.value ?? 0.4)
       form.value.retrieval.titleBonus = Number(d.retrieval?.titleBonus?.value ?? 0.1)
       const rr = d.retrieval?.rerank || {}
-      form.value.retrieval.rerank.provider = rr.provider?.value || 'ollama'
       form.value.retrieval.rerank.enabled = rr.enabled?.value === 'true'
-      form.value.retrieval.rerank.baseUrl = rr.baseUrl?.value || 'http://localhost:11434'
-      form.value.retrieval.rerank.model = rr.model?.value || 'qllama/bge-reranker-v2-m3'
+      form.value.retrieval.rerank.baseUrl = rr.baseUrl?.value || 'http://localhost:7997'
+      form.value.retrieval.rerank.model = rr.model?.value || 'BAAI/bge-reranker-v2-m3'
       form.value.retrieval.rerank.timeoutMillis = Number(rr.timeoutMillis?.value ?? 5000)
       const ctx = d.context || {}
       form.value.context.modelWindows = ctx.modelWindows?.value || ''
@@ -323,8 +314,7 @@ const save = async () => {
       retrieval: { vectorWeight: String(form.value.retrieval.vectorWeight),
                    keywordWeight: String(form.value.retrieval.keywordWeight),
                    titleBonus: String(form.value.retrieval.titleBonus),
-                   rerank: { provider: form.value.retrieval.rerank.provider,
-                             enabled: String(form.value.retrieval.rerank.enabled),
+                   rerank: { enabled: String(form.value.retrieval.rerank.enabled),
                              baseUrl: form.value.retrieval.rerank.baseUrl?.trim(),
                              model: form.value.retrieval.rerank.model?.trim(),
                              timeoutMillis: String(form.value.retrieval.rerank.timeoutMillis) } },

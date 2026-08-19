@@ -13,3 +13,4 @@ src/main/resources/application-local.yml
 .env.local
 /.workbuddy/
 /.qoder/
+/.pyenv/
