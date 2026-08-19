@@ -201,13 +201,10 @@
         </div>
 
         <div class="input">
-          <!-- 深度思考开关（localStorage 记忆，默认关） -->
-          <div class="deep-think-toggle">
-            <span class="dt-label">深度思考</span>
-            <a-switch v-model:checked="deepThinkOn" size="small" :disabled="loading"
-                      @change="onDeepThinkChange" />
-            <a-tooltip title="开启后 AI 先展示思考过程，再基于思考结论多路检索后回答（更深入但更慢）" placement="top">
-              <question-circle-outlined style="color:#bbb;font-size:12px;margin-left:4px" />
+          <!-- 深度思考图标按钮：输入框左侧（点击切换，开启高亮；localStorage 记忆） -->
+          <div class="input-side">
+            <a-tooltip :title="deepThinkOn ? '深度思考：已开启（点击关闭）' : '深度思考：已关闭（点击开启，AI 先展示思维链再回答）'">
+              <bulb-outlined :class="['dt-icon', { 'dt-icon-on': deepThinkOn }]" @click="toggleDeepThink" />
             </a-tooltip>
           </div>
           <!-- 待发送图片预览（点击可放大查看） -->
@@ -251,7 +248,7 @@ import DOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/common'
 import 'highlight.js/styles/github.css'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined } from '@ant-design/icons-vue'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 
@@ -264,6 +261,12 @@ const thinkingBodyRefs = []
 // 开关变更持久化（script 中访问浏览器全局 localStorage，模板内联表达式会被编译为 _ctx 属性导致 undefined）
 const onDeepThinkChange = checked => {
   localStorage.setItem('ai_deep_think', checked ? '1' : '0')
+}
+// 图标按钮点击切换（思考中禁用）
+const toggleDeepThink = () => {
+  if (loading.value) return
+  deepThinkOn.value = !deepThinkOn.value
+  localStorage.setItem('ai_deep_think', deepThinkOn.value ? '1' : '0')
 }
 
 // 检索调试状态
@@ -1197,18 +1200,28 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .bubble { width: 100%; padding: 12px 16px; border-radius: 12px; line-height: 1.6; }
 .bubble.user { background: #1677ff; color: #fff; }
 .bubble.ai { background: #f5f5f5; color: #333; }
-.input { padding: 12px 48px 16px; border-top: 1px solid #f0f0f0; }
-.input-box { position: relative; }
-/* 深度思考开关 */
-.deep-think-toggle {
+.input { padding: 12px 48px 16px; border-top: 1px solid #f0f0f0; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+/* 深度思考图标按钮：输入框左侧外面 */
+.input-side {
+  flex: 0 0 auto;
+  width: 26px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
   margin-bottom: 8px;
-  font-size: 12px;
-  color: #666;
 }
-.deep-think-toggle .dt-label { font-weight: 500; }
+.dt-icon {
+  font-size: 16px;
+  color: #bbb;
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 6px;
+  transition: color 0.2s, background 0.2s;
+  user-select: none;
+}
+.dt-icon:hover { color: #1677ff; background: #e6f4ff; }
+.dt-icon.dt-icon-on { color: #1677ff; }
+.input-box { position: relative; flex: 1; }
 /* 深度思考折叠面板（AI 气泡内） */
 .think-panel {
   margin: 4px 0 8px;
@@ -1247,7 +1260,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 }
 .think-panel .think-body .md :deep(p) { margin: 4px 0; }
 /* 待发送图片预览 */
-.pending-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.pending-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; flex: 0 0 100%; }
 .pending-img { position: relative; }
 .pending-img img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid #e0e0e0; cursor: zoom-in; }
 .pending-del { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%;
