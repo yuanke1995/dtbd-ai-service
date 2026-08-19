@@ -30,11 +30,12 @@ public class UserImageService {
     private final VisionService visionService;
     private final ExecutorService imageExecutor;
 
-    public UserImageService(AiAppProperties properties, VisionService visionService) {
+    public UserImageService(AiAppProperties properties, VisionService visionService, ConfigService configService) {
         this.properties = properties;
         this.visionService = visionService;
-        // 用户图片并发处理（本地视觉模型资源有限，2 路足够）
-        this.imageExecutor = Executors.newFixedThreadPool(2, r -> {
+        // 用户图片并发处理（本地视觉模型资源有限；vision.userImageConcurrency 可调，默认 2）
+        int concurrency = configService.getInt("vision.userImageConcurrency", 2);
+        this.imageExecutor = Executors.newFixedThreadPool(Math.max(1, concurrency), r -> {
             Thread t = new Thread(r, "user-image");
             t.setDaemon(true);
             return t;

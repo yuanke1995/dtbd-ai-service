@@ -20,6 +20,12 @@ import java.util.Set;
 @Component
 public class KeywordExtractor {
 
+    private final ConfigService configService;
+
+    public KeywordExtractor(ConfigService configService) {
+        this.configService = configService;
+    }
+
     /** 常见停用词（疑问词/语气词/无检索价值）。注意：Set.of 不允许重复元素！ */
     private static final Set<String> STOP_WORDS = Set.of(
             "的", "了", "吗", "呢", "吧", "啊", "么", "怎么", "怎样", "如何", "什么", "哪些",
@@ -31,10 +37,9 @@ public class KeywordExtractor {
     private static final Set<Character> STOP_CHARS = Set.of(
             '的', '了', '吗', '呢', '吧', '啊', '么', '是', '在', '和', '与', '请', '我', '你', '它', '这', '那');
 
-    /** 原词最大数 */
-    private static final int MAX_TERMS = 6;
-    /** 原词 + bigram 总词元上限（控制 LIKE OR 数量与 SQL 开销） */
-    private static final int MAX_TOTAL = 12;
+    /** 原词最大数 / 原词+bigram 总词元上限（控制 LIKE OR 数量与 SQL 开销）；retrieval.keywordMax* 可调 */
+    private int maxTerms() { return configService.getInt("retrieval.keywordMaxTerms", 6); }
+    private int maxTotal() { return configService.getInt("retrieval.keywordMaxTotal", 12); }
 
     /**
      * 提取检索词元（主词元优先，子词元补充；空输入返回空列表）
@@ -70,10 +75,10 @@ public class KeywordExtractor {
         // 主词元按长度降序（长词更精准），子词元按长度降序，取前 MAX_TERMS 个主词元
         List<String> main = mainTerms.stream()
                 .sorted((a, b) -> b.length() - a.length())
-                .limit(MAX_TERMS).toList();
+                .limit(maxTerms()).toList();
         List<String> sub = subTerms.stream()
                 .sorted((a, b) -> b.length() - a.length())
-                .limit(MAX_TOTAL - main.size()).toList();
+                .limit(Math.max(0, maxTotal() - main.size())).toList();
         List<String> result = new ArrayList<>(main);
         result.addAll(sub);
         return result;

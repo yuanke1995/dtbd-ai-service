@@ -34,6 +34,9 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 文档管理服务
@@ -64,12 +67,22 @@ public class DocumentService {
     /** 解析线程引用：delete() 时 interrupt 实现立即中断（图片 join 等待立即响应） */
     private final Map<String, Thread> parseThreads = new ConcurrentHashMap<>();
 
-    /** 解析线程池（并发 2：避免多文档同时解析打爆 embedding/Ollama） */
-    private ExecutorService parseExecutor;
+    /** 解析线程池（并发 parse.concurrency 可调：避免多文档同时解析打爆 embedding/Ollama；保存即生效） */
+    private ThreadPoolExecutor parseExecutor;
+
+    /** 提交解析任务前同步并发数（parse.concurrency，DB 配置保存即生效） */
+    private void syncParseConcurrency() {
+        int c = configService.getInt("parse.concurrency", 2);
+        if (c > 0 && c != parseExecutor.getCorePoolSize()) {
+            parseExecutor.setCorePoolSize(c);
+            parseExecutor.setMaximumPoolSize(c);
+            log.info("[Parse] 解析并发调整为 {}", c);
+        }
+    }
 
     @PostConstruct
     void init() {
-        parseExecutor = Executors.newFixedThreadPool(2);
+        parseExecutor = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
         // 跨平台保护：Windows 绝对路径（如 D:/xxx、C:\xxx）在非 Windows 系统上会被 Paths.get() 当作
         // 相对路径，拼到 Tomcat 工作目录下导致上传/落盘失败。检测到即回退默认 ./data 并告警。
         String dir = properties.getImages().getDir();
@@ -133,6 +146,7 @@ public class DocumentService {
             throw e;
         }
         final DocumentParser fp = parser;
+        syncParseConcurrency();
         parseExecutor.submit(() -> processUpload(doc.getId(), fileName, source, fp));
         return doc;
     }
@@ -707,6 +721,7 @@ public class DocumentService {
         updateProgress(docId, 0, "重新解析中");
 
         final DocumentParser fp = parser;
+        syncParseConcurrency();
         parseExecutor.submit(() -> processUpload(docId, doc.getFileName(), source, fp));
     }
 

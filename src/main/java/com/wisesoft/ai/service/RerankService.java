@@ -37,7 +37,8 @@ public class RerankService {
     private volatile int clientTimeout = 0;      // 已构建 client 对应的 timeout
     /** 最近一次失败时间戳（失败冷却：短暂故障后自动恢复，避免永久禁用） */
     private volatile long lastFailTs = 0L;
-    private static final long FAIL_COOLDOWN_MS = 60_000L;  // 失败后冷却 60s 再重新探测
+    /** 失败冷却时长：rerank.failCooldownMs 可调（设置页/DB），默认 60s */
+    private long failCooldownMs() { return configService.getInt("rerank.failCooldownMs", 60_000); }
 
     public RerankService(ConfigService configService) {
         this.configService = configService;
@@ -108,7 +109,7 @@ public class RerankService {
             // 失败记录：冷却期内不重试（避免每个请求都撞一次），冷却结束后自动恢复探测
             rerankSupported = false;
             lastFailTs = System.currentTimeMillis();
-            log.warn("[Rerank] 服务调用失败，回退融合分排序（{}s 后自动重试）: {}", FAIL_COOLDOWN_MS / 1000, e.getMessage());
+            log.warn("[Rerank] 服务调用失败，回退融合分排序（{}s 后自动重试）: {}", failCooldownMs() / 1000, e.getMessage());
             return candidates;
         }
     }
@@ -164,7 +165,7 @@ public class RerankService {
         // 已探测过：成功直接返回；失败且冷却未过 → 仍不可用；冷却已过 → 重新探测（瞬时故障自动恢复）
         if (supportChecked.get()) {
             if (rerankSupported) return true;
-            if (System.currentTimeMillis() - lastFailTs < FAIL_COOLDOWN_MS) return false;
+            if (System.currentTimeMillis() - lastFailTs < failCooldownMs()) return false;
             supportChecked.set(false);  // 冷却结束，允许重新探测
         }
         synchronized (this) {

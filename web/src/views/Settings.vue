@@ -21,6 +21,18 @@
               <a-textarea v-model:value="form.chat.systemPrompt" :rows="4"
                           placeholder="AI 助手的角色与回答风格（引用/图片/追问规则由系统固定，不可修改）" />
             </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.historyRounds" placement="top">多轮记忆轮数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chat.historyRounds" :min="0" :max="20" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.remainTokenFloor" placement="top">上下文保留下限 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chat.remainTokenFloor" :min="0" :step="100" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.truncateFallbackChars" placement="top">截断兜底字符 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chat.truncateFallbackChars" :min="0" :step="50" style="width:200px" />
+            </a-form-item>
             <a-form-item label="Base URL">
               <a-input :value="ro.chat.baseUrl" disabled />
             </a-form-item>
@@ -44,6 +56,10 @@
             <a-form-item>
               <template #label><a-tooltip :title="tips.visionConcurrency" placement="top">图片描述并发 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.vision.concurrency" :min="1" :max="16" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.userImageConcurrency" placement="top">用户图片并发 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.vision.userImageConcurrency" :min="1" :max="16" style="width:200px" />
             </a-form-item>
             <a-form-item label="Base URL">
               <a-input :value="ro.vision.baseUrl" disabled />
@@ -70,6 +86,15 @@
               <template #label><a-tooltip :title="tips.maxImages" placement="top">最多提取图片 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.chunk.maxImages" :min="0" :step="20" style="width:200px" />
               <span style="margin-left:12px;color:#999;font-size:12px">0=不限制</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.parseConcurrency" placement="top">解析并发数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chunk.concurrency" :min="1" :max="8" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.ocrMinText" placement="top">PDF 扫描件阈值 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chunk.ocrMinText" :min="0" :step="5" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">页文本少于该长度触发 OCR</span>
             </a-form-item>
           </a-form>
           <a-alert type="info" show-icon style="margin:0 24px 16px"
@@ -101,6 +126,25 @@
               <a-input-number v-model:value="form.retrieval.titleBonus" :min="0" :max="1" :step="0.05" style="width:200px" />
             </a-form-item>
             <a-form-item>
+              <template #label><a-tooltip :title="tips.vecThreshold" placement="top">向量阈值 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.vecThreshold" :min="0" :max="1" :step="0.05" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">相似度归一化基准/下限</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.keywordLimit" placement="top">关键词召回上限 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.keywordLimit" :min="1" :step="5" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.retrievalTimeout" placement="top">检索超时(ms) <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.searchTimeoutMs" :min="500" :step="500" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">关键词/总检索超时</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.positionBonus" placement="top">位置奖励 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.positionBonus" :min="0" :max="0.5" :step="0.01" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">首块 / 前段奖励</span>
+            </a-form-item>
+            <a-form-item>
               <template #label><a-tooltip :title="tips.rerankEnabled" placement="top">启用重排 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-switch v-model:checked="form.retrieval.rerank.enabled" :loading="rerankChecking" @change="onRerankEnabledChange" />
               <span style="margin-left:12px;color:#999;font-size:12px">开启前自动校验服务可用性</span>
@@ -116,6 +160,17 @@
             <a-form-item>
               <template #label><a-tooltip :title="tips.rerankTimeout" placement="top">超时(ms) <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.retrieval.rerank.timeoutMillis" :min="1000" :step="1000" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.rerankMinHits" placement="top">候选区间 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.rerank.minHits" :min="1" style="width:90px" />
+              <span style="margin:0 6px;color:#999">~</span>
+              <a-input-number v-model:value="form.retrieval.rerank.maxHits" :min="2" style="width:90px" />
+              <span style="margin-left:8px;color:#999;font-size:12px">候选数在此区间才重排</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.rerankFailCooldown" placement="top">失败冷却(ms) <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.rerank.failCooldownMs" :min="1000" :step="5000" style="width:200px" />
             </a-form-item>
           </a-form>
           <a-alert type="info" show-icon style="margin:0 24px 16px"
@@ -273,7 +328,19 @@ const tips = {
   drMaxSub: '从检索计划中最多取多少个子问题参与多路并行检索（不含精化 query）。越大召回越广但更慢、成本更高。',
   drMultiRetrieval: '是否多路并行检索（精化 query + 子问题分别检索后按最高分合并）。关闭则只用精化 query 单路检索（更快但召回面窄）。',
   drTimeout: '思考阶段最大等待时间(ms)。超时用已收集的思考内容降级为普通检索回答，不阻塞。',
-  drMaxTokens: '思考输出的 token 上限（0=不设）。qwen3 思考模式下设 max_tokens 会导致空输出，默认 0；仅当思考过长需裁剪时设置。'
+  drMaxTokens: '思考输出的 token 上限（0=不设）。qwen3 思考模式下设 max_tokens 会导致空输出，默认 0；仅当思考过长需裁剪时设置。',
+  historyRounds: '问答时注入对话历史的轮数（多轮记忆）。调大更连贯但占上下文预算；0=不注入历史。',
+  remainTokenFloor: '上下文预算保留下限（token）：扣除系统提示与问题后至少保留的量，低于则不再填充知识块。',
+  truncateFallbackChars: '知识块超出预算时的截断兜底字符数（至少保留的字数）。',
+  parseConcurrency: '文档异步解析的并发数（同时解析几个文档）。调高多文档上传更快，但并发解析会同时占用 embedding/Ollama 资源；保存后对新任务生效。',
+  ocrMinText: 'PDF 页文本少于该长度判定为扫描件/图片型，触发 OCR 识别（0=总是 OCR）。调高更激进触发 OCR，调低更依赖 PDF 自带文本。',
+  userImageConcurrency: '用户在对话中上传图片的识别并发数（区别于文档解析的图片描述并发）。',
+  vecThreshold: '向量相似度归一化基准：低于该分的向量命中归一化为 0 分，也是向量检索的相似度下限。调高更严格（召回更少但更相关）。',
+  keywordLimit: '关键词检索最多返回的知识块数（SQL LIMIT）。调高召回更全但更慢、融合分计算更重。',
+  retrievalTimeout: '混合检索超时（ms）：关键词子检索与总检索的超时上限，超时降级返回已收集结果。',
+  positionBonus: '知识块位置奖励：位于文档首块/前段的内容额外加分。适合"文档开头是摘要"的结构；对顺序无关的文档可调低。',
+  rerankMinHits: '触发重排的候选数区间（下限~上限）：候选太少（无意义）或太多（超时风险）时跳过重排，直接用融合分排序。',
+  rerankFailCooldown: '重排服务失败后的冷却时间(ms)：冷却期内不再探测/调用（避免每个请求都撞一次），冷却结束后自动恢复。'
 }
 
 const loading = ref(false)
@@ -299,12 +366,16 @@ const onRerankEnabledChange = async checked => {
     rerankChecking.value = false
   }
 }
-const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '' }, vision: { model: '', prompt: '', concurrency: 4 },
-                    chunk: { maxChunks: 3000, maxImages: 100 },
+const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5 },
+                    vision: { model: '', prompt: '', concurrency: 4, userImageConcurrency: 2 },
+                    chunk: { maxChunks: 3000, maxImages: 100, concurrency: 2, ocrMinText: 20 },
                     upload: { maxFileSizeMB: 200 },
                     retrieval: { vectorWeight: 0.6, keywordWeight: 0.4, titleBonus: 0.1,
+                                 vecThreshold: 0.3, keywordLimit: 20, keywordTimeoutMs: 800, searchTimeoutMs: 8000,
+                                 positionBonus: 0.03, sectionBonus: 0.01, keywordMaxTerms: 6, keywordMaxTotal: 12,
                                  rerank: { enabled: false, baseUrl: 'http://localhost:7997',
-                                           model: 'BAAI/bge-reranker-v2-m3', timeoutMillis: 5000 } },
+                                           model: 'BAAI/bge-reranker-v2-m3', timeoutMillis: 5000,
+                                           minHits: 6, maxHits: 15, failCooldownMs: 60000 } },
                     context: { modelWindows: '', defaultWindowTokens: 32768, safetyFactor: 0.7, costCapTokens: 8000,
                                maxOutputTokens: 2000, historyMaxTokens: 1200, historyPerMsgChars: 200,
                                snippetWindowChars: 150, maxContextHits: 8 },
@@ -322,23 +393,40 @@ onMounted(async () => {
       form.value.chat.model = d.chat?.model?.value || ''
       form.value.chat.temperature = Number(d.chat?.temperature?.value ?? 0.3)
       form.value.chat.systemPrompt = d.chat?.systemPrompt?.value || ''
+      form.value.chat.remainTokenFloor = Number(d.chat?.remainTokenFloor?.value ?? 800)
+      form.value.chat.truncateFallbackChars = Number(d.chat?.truncateFallbackChars?.value ?? 200)
+      form.value.chat.historyRounds = Number(d.chat?.historyRounds?.value ?? 5)
       form.value.vision.model = d.vision?.model?.value || ''
       form.value.vision.prompt = d.vision?.prompt?.value || ''
       form.value.vision.concurrency = Number(d.vision?.concurrency?.value ?? 4)
+      form.value.vision.userImageConcurrency = Number(d.vision?.userImageConcurrency?.value ?? 2)
       const ck = d.chunk || {}
       form.value.chunk.maxChunks = Number(ck.maxChunks?.value ?? 3000)
       form.value.chunk.maxImages = Number(ck.maxImages?.value ?? 100)
+      form.value.chunk.concurrency = Number(ck.concurrency?.value ?? 2)
+      form.value.chunk.ocrMinText = Number(ck.ocrMinText?.value ?? 20)
       const up = d.upload || {}
       form.value.upload.maxFileSizeMB = Math.round(Number(up.maxFileSize?.value ?? 209715200) / 1024 / 1024)
       form.value.retrieval.vectorWeight = Number(d.retrieval?.vectorWeight?.value ?? 0.6)
       form.value.retrieval.keywordWeight = Number(d.retrieval?.keywordWeight?.value ?? 0.4)
       form.value.retrieval.titleBonus = Number(d.retrieval?.titleBonus?.value ?? 0.1)
+      form.value.retrieval.vecThreshold = Number(d.retrieval?.vecThreshold?.value ?? 0.3)
+      form.value.retrieval.keywordLimit = Number(d.retrieval?.keywordLimit?.value ?? 20)
+      form.value.retrieval.keywordTimeoutMs = Number(d.retrieval?.keywordTimeoutMs?.value ?? 800)
+      form.value.retrieval.searchTimeoutMs = Number(d.retrieval?.searchTimeoutMs?.value ?? 8000)
+      form.value.retrieval.positionBonus = Number(d.retrieval?.positionBonus?.value ?? 0.03)
+      form.value.retrieval.sectionBonus = Number(d.retrieval?.sectionBonus?.value ?? 0.01)
+      form.value.retrieval.keywordMaxTerms = Number(d.retrieval?.keywordMaxTerms?.value ?? 6)
+      form.value.retrieval.keywordMaxTotal = Number(d.retrieval?.keywordMaxTotal?.value ?? 12)
       // rerank 是独立分组（d.rerank），勿用 retrieval 组
       const rr = d.rerank || {}
       form.value.retrieval.rerank.enabled = rr.enabled?.value === 'true'
       form.value.retrieval.rerank.baseUrl = rr.baseUrl?.value || 'http://localhost:7997'
       form.value.retrieval.rerank.model = rr.model?.value || 'BAAI/bge-reranker-v2-m3'
       form.value.retrieval.rerank.timeoutMillis = Number(rr.timeoutMillis?.value ?? 5000)
+      form.value.retrieval.rerank.minHits = Number(rr.minHits?.value ?? 6)
+      form.value.retrieval.rerank.maxHits = Number(rr.maxHits?.value ?? 15)
+      form.value.retrieval.rerank.failCooldownMs = Number(rr.failCooldownMs?.value ?? 60000)
       const ctx = d.context || {}
       form.value.context.modelWindows = ctx.modelWindows?.value || ''
       form.value.context.defaultWindowTokens = Number(ctx.defaultWindowTokens?.value ?? 32768)
@@ -372,19 +460,35 @@ const save = async () => {
   try {
     const r = await saveConfig({
       chat: { model: form.value.chat.model?.trim(), temperature: String(form.value.chat.temperature),
-              systemPrompt: form.value.chat.systemPrompt?.trim() },
+              systemPrompt: form.value.chat.systemPrompt?.trim(),
+              remainTokenFloor: String(form.value.chat.remainTokenFloor),
+              truncateFallbackChars: String(form.value.chat.truncateFallbackChars),
+              historyRounds: String(form.value.chat.historyRounds) },
       vision: { model: form.value.vision.model?.trim(), prompt: form.value.vision.prompt?.trim(),
-                concurrency: String(form.value.vision.concurrency) },
-      chunk: { maxChunks: String(form.value.chunk.maxChunks), maxImages: String(form.value.chunk.maxImages) },
+                concurrency: String(form.value.vision.concurrency),
+                userImageConcurrency: String(form.value.vision.userImageConcurrency) },
+      chunk: { maxChunks: String(form.value.chunk.maxChunks), maxImages: String(form.value.chunk.maxImages),
+               concurrency: String(form.value.chunk.concurrency), ocrMinText: String(form.value.chunk.ocrMinText) },
       upload: { maxFileSize: String(form.value.upload.maxFileSizeMB * 1024 * 1024) },
       retrieval: { vectorWeight: String(form.value.retrieval.vectorWeight),
                    keywordWeight: String(form.value.retrieval.keywordWeight),
-                   titleBonus: String(form.value.retrieval.titleBonus) },
+                   titleBonus: String(form.value.retrieval.titleBonus),
+                   vecThreshold: String(form.value.retrieval.vecThreshold),
+                   keywordLimit: String(form.value.retrieval.keywordLimit),
+                   keywordTimeoutMs: String(form.value.retrieval.keywordTimeoutMs),
+                   searchTimeoutMs: String(form.value.retrieval.searchTimeoutMs),
+                   positionBonus: String(form.value.retrieval.positionBonus),
+                   sectionBonus: String(form.value.retrieval.sectionBonus),
+                   keywordMaxTerms: String(form.value.retrieval.keywordMaxTerms),
+                   keywordMaxTotal: String(form.value.retrieval.keywordMaxTotal) },
       // rerank 是独立分组（后端 key 前缀 rerank.*），不可嵌套在 retrieval 下
       rerank: { enabled: String(form.value.retrieval.rerank.enabled),
                 baseUrl: form.value.retrieval.rerank.baseUrl?.trim(),
                 model: form.value.retrieval.rerank.model?.trim(),
-                timeoutMillis: String(form.value.retrieval.rerank.timeoutMillis) },
+                timeoutMillis: String(form.value.retrieval.rerank.timeoutMillis),
+                minHits: String(form.value.retrieval.rerank.minHits),
+                maxHits: String(form.value.retrieval.rerank.maxHits),
+                failCooldownMs: String(form.value.retrieval.rerank.failCooldownMs) },
       context: { modelWindows: form.value.context.modelWindows?.trim(),
                  defaultWindowTokens: String(form.value.context.defaultWindowTokens),
                  safetyFactor: String(form.value.context.safetyFactor),

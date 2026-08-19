@@ -150,6 +150,27 @@ public class ConfigService {
         d.put("deepReasoning.multiRetrieval", String.valueOf(properties.getDeepReasoning().isMultiRetrieval()));
         d.put("deepReasoning.timeoutMillis", String.valueOf(properties.getDeepReasoning().getTimeoutMillis()));
         d.put("deepReasoning.maxThinkingTokens", String.valueOf(properties.getDeepReasoning().getMaxThinkingTokens()));
+        // 检索行为参数（原硬编码收口，设置页可调、保存即生效）
+        d.put("retrieval.vecThreshold", "0.3");            // 向量相似度归一化基准/下限
+        d.put("retrieval.keywordLimit", "20");             // 关键词召回上限
+        d.put("retrieval.keywordTimeoutMs", "800");        // 关键词检索超时
+        d.put("retrieval.searchTimeoutMs", "8000");        // 混合检索总超时
+        d.put("retrieval.positionBonus", "0.03");          // 首块位置奖励
+        d.put("retrieval.sectionBonus", "0.01");           // 前段位置奖励
+        d.put("retrieval.keywordMaxTerms", "6");           // 关键词提取主词元上限
+        d.put("retrieval.keywordMaxTotal", "12");          // 关键词提取总词元上限
+        // 重排行为参数
+        d.put("rerank.minHits", "6");                      // 触发重排的候选下限
+        d.put("rerank.maxHits", "15");                     // 触发重排的候选上限
+        d.put("rerank.failCooldownMs", "60000");           // 重排失败后冷却再探测
+        // 解析行为参数
+        d.put("parse.concurrency", "2");                   // 文档解析并发数
+        d.put("parse.ocrMinText", "20");                   // PDF 文本少于该长度判定扫描件触发 OCR
+        d.put("vision.userImageConcurrency", "2");         // 用户上传图片识别并发
+        // 问答行为参数
+        d.put("chat.remainTokenFloor", "800");             // 上下文填充保留下限
+        d.put("chat.truncateFallbackChars", "200");        // 超预算截断兜底字符数
+        d.put("chat.historyRounds", "5");                  // 多轮记忆注入轮数
         return d;
     }
 
@@ -172,11 +193,31 @@ public class ConfigService {
         }
     }
 
+    public double getDouble(String key, double def) {
+        String v = get(key);
+        if (v == null || v.isBlank()) return def;
+        try {
+            return Double.parseDouble(v.trim());
+        } catch (Exception e) {
+            return def;
+        }
+    }
+
     public int getInt(String key) {
         try {
             return Integer.parseInt(get(key).trim());
         } catch (Exception e) {
             return 0;
+        }
+    }
+
+    public int getInt(String key, int def) {
+        String v = get(key);
+        if (v == null || v.isBlank()) return def;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (Exception e) {
+            return def;
         }
     }
 

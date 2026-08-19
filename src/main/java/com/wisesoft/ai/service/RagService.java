@@ -35,9 +35,9 @@ import java.util.stream.Collectors;
 @Service
 public class RagService {
 
-    /** 重排触发下限（候选太少无需重排） */
-    private static final int RERANK_MIN = 6;
-    private static final int RERANK_MAX = 15;
+    /** 重排触发区间（候选太少/太多无需重排）；rerank.minHits/maxHits 可调 */
+    private int rerankMinHits() { return configService.getInt("rerank.minHits", 6); }
+    private int rerankMaxHits() { return configService.getInt("rerank.maxHits", 15); }
     /** 引用摘要截断长度 */
     private static final int SNIPPET_LEN = 80;
 
@@ -151,7 +151,7 @@ public class RagService {
             // 降级/未开启深度思考：走普通单路检索
             if (hits == null) {
                 hits = hybridRetrievalService.search(retrievalQuery);
-                if (hits.size() > RERANK_MIN && hits.size() <= RERANK_MAX) {
+                if (hits.size() > rerankMinHits() && hits.size() <= rerankMaxHits()) {
                     hits = rerankService.rank(hits, retrievalQuery);
                 }
             }
@@ -175,7 +175,7 @@ public class RagService {
                             + "若句末需要标点，放在标记之前的文字末尾，如\"布局组件[图片1]\"，不要写成\"布局组件[图片1]、\"。")
                     .append("\n参考资料中包含表格时（以 | 分隔的 Markdown 表格），若回答涉及表格内容，请用同样的 Markdown 表格格式呈现，不要改写成一长串用竖线连起来的文字。")
                     .append("\n回答末尾用 <related>问题1|问题2|问题3</related> 输出 3 个用户可能追问的相关问题（用 | 分隔），如无合适问题可不输出。");
-            String historyText = buildHistoryText(sessionService.getRecentHistory(sessionId, 5));
+            String historyText = buildHistoryText(sessionService.getRecentHistory(sessionId, configService.getInt("chat.historyRounds", 5)));
             if (!historyText.isEmpty()) {
                 system.append("\n\n对话历史：\n").append(historyText);
             }
@@ -189,7 +189,7 @@ public class RagService {
             // 3. 价值驱动填充：预算 = min(窗口×系数−输出, 成本上限)；减去 system/问题固定部分后，按相关度累积填充知识块
             int budget = resolveContextBudget();
             int fixedTokens = TokenCounter.estimate(system.toString()) + TokenCounter.estimate(userQuestion.toString());
-            int remainTokens = Math.max(800, budget - fixedTokens);
+            int remainTokens = Math.max(configService.getInt("chat.remainTokenFloor", 800), budget - fixedTokens);
 
             Map<Integer, String> imgIndex = new LinkedHashMap<>();
             // 全局图片编号 → 描述（图片相关性校验用：LLM 输出标记后逐图比对）
@@ -246,7 +246,7 @@ public class RagService {
                     break;
                 }
                 if (usedTokens + tokens > remainTokens) {
-                    text = truncateChars(text, Math.max(200, remainTokens - usedTokens));
+                    text = truncateChars(text, Math.max(configService.getInt("chat.truncateFallbackChars", 200), remainTokens - usedTokens));
                     tokens = TokenCounter.estimate(text);
                 }
 

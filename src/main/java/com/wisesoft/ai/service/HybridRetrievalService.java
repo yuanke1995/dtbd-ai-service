@@ -31,12 +31,10 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class HybridRetrievalService {
 
-    /** 关键词检索超时（ms） */
-    private static final long KEYWORD_TIMEOUT_MS = 800;
-    /** 关键词召回上限 */
-    private static final int KEYWORD_LIMIT = 20;
-    /** 向量检索相似度阈值（与归一化基准一致：0.3 → 0 分，1.0 → 1 分） */
-    private static final double VEC_THRESHOLD = 0.3;
+    /** 默认参数：检索行为参数收口到 c_ai_config（retrieval.*，设置页可调、保存即生效） */
+    private long keywordTimeoutMs() { return configService.getInt("retrieval.keywordTimeoutMs", 800); }
+    private int keywordLimit() { return configService.getInt("retrieval.keywordLimit", 20); }
+    private double vecThreshold() { return configService.getDouble("retrieval.vecThreshold", 0.3); }
 
     private final VectorStore vectorStore;
     private final AiKnowledgeMapper knowledgeMapper;
@@ -71,9 +69,10 @@ public class HybridRetrievalService {
         Set<String> kwHit = kwDocs.stream().map(AiKnowledge::getId).collect(Collectors.toSet());
 
         // 向量命中：score = 向量权重 × 归一化向量分
+        double vt = vecThreshold();
         for (Document doc : vectorDocs) {
             double vecScore = parseScore(doc.getScore());
-            double vecNorm = Math.max(0, (vecScore - VEC_THRESHOLD) / (1.0 - VEC_THRESHOLD));
+            double vecNorm = Math.max(0, (vecScore - vt) / (1.0 - vt));
             double score = vectorWeight * vecNorm;
             String kid = String.valueOf(doc.getId());
             merged.put(kid, buildHit(doc, kid, score));
@@ -132,7 +131,7 @@ public class HybridRetrievalService {
                     .map(q -> CompletableFuture.supplyAsync(() -> search(q), multiSearchPool))
                     .toList();
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                    .get(8000, TimeUnit.MILLISECONDS);
+                    .get(configService.getInt("retrieval.searchTimeoutMs", 8000), TimeUnit.MILLISECONDS);
             // 合并：同一 knowledgeId 保留 score 最高者（跨 query 分数同体系可直接 max）
             Map<String, Hit> merged = new LinkedHashMap<>();
             for (CompletableFuture<List<Hit>> f : futures) {
@@ -158,7 +157,7 @@ public class HybridRetrievalService {
             SearchRequest req = SearchRequest.builder()
                     .query(query)
                     .topK(Math.max(15, properties.getRetrieval().getTopK()))
-                    .similarityThreshold(Math.min(VEC_THRESHOLD, properties.getRetrieval().getSimilarityThreshold()))
+                    .similarityThreshold(Math.min(vecThreshold(), properties.getRetrieval().getSimilarityThreshold()))
                     .build();
             return vectorStore.similaritySearch(req);
         } catch (Exception e) {
@@ -187,11 +186,11 @@ public class HybridRetrievalService {
                         w.and(t -> t.like("content", term).or().like("title", term));
                     }
                 });
-                wrapper.last("LIMIT " + KEYWORD_LIMIT);
+                wrapper.last("LIMIT " + keywordLimit());
                 List<AiKnowledge> hits = knowledgeMapper.selectList(wrapper);
                 if (hits.isEmpty()) return hits;
                 return scoreKeywordHits(hits, terms);
-            }).get(KEYWORD_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            }).get(keywordTimeoutMs(), TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             log.warn("关键词检索失败/超时: {}", e.getMessage());
             return List.of();
@@ -253,8 +252,8 @@ public class HybridRetrievalService {
      */
     private double positionBonus(Integer chunkIndex) {
         if (chunkIndex == null) return 0;
-        if (chunkIndex == 0) return 0.03;
-        if (chunkIndex <= 2) return 0.01;
+        if (chunkIndex == 0) return configService.getDouble("retrieval.positionBonus", 0.03);
+        if (chunkIndex <= 2) return configService.getDouble("retrieval.sectionBonus", 0.01);
         return 0;
     }
 
