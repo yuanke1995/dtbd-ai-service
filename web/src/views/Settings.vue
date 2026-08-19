@@ -102,8 +102,8 @@
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.rerankEnabled" placement="top">启用重排 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-              <a-switch v-model:checked="form.retrieval.rerank.enabled" />
-              <span style="margin-left:12px;color:#999;font-size:12px">需先启动本地服务：scripts/win 或 scripts/mac 的 start_rerank_server</span>
+              <a-switch v-model:checked="form.retrieval.rerank.enabled" :loading="rerankChecking" @change="onRerankEnabledChange" />
+              <span style="margin-left:12px;color:#999;font-size:12px">开启前自动校验服务可用性</span>
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.rerankBaseUrl" placement="top">服务地址 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -230,7 +230,7 @@
 import { ref, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
-import { getConfig, saveConfig } from '../api'
+import { getConfig, saveConfig, checkRerank } from '../api'
 
 // 折叠面板：默认展开常用分组（chat / retrieval / context / deepReasoning），vision / embedding 收起
 const activeKeys = ref(['chat', 'retrieval', 'context', 'deepReasoning'])
@@ -275,6 +275,27 @@ const tips = {
 
 const loading = ref(false)
 const saving = ref(false)
+const rerankChecking = ref(false)
+
+// 启用重排开关：打开前先校验服务可用性，服务不正常阻止开启并回滚
+const onRerankEnabledChange = async checked => {
+  if (!checked) return            // 关闭无需校验
+  rerankChecking.value = true
+  try {
+    const r = await checkRerank()
+    if (r.success && r.data?.available) {
+      message.success('重排服务正常，已启用')
+    } else {
+      form.value.retrieval.rerank.enabled = false
+      message.error('重排服务不可用：请先启动本地服务（scripts/win 或 scripts/mac 的 start_rerank_server），或检查服务地址')
+    }
+  } catch (e) {
+    form.value.retrieval.rerank.enabled = false
+    message.error('重排服务校验失败：' + (e.message || '服务不可用'))
+  } finally {
+    rerankChecking.value = false
+  }
+}
 const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '' }, vision: { model: '', prompt: '', concurrency: 4 },
                     chunk: { maxChunks: 3000, maxImages: 100 },
                     upload: { maxFileSizeMB: 200 },

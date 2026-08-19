@@ -141,6 +141,18 @@ public class RerankService {
     }
 
     /**
+     * 强制探测服务可用性（绕过缓存，每次真实请求 /v1/models；供设置页"开启前校验"调用）
+     * 服务修复后调用本方法可立即恢复，不受此前失败记忆影响
+     */
+    public boolean checkAvailable() {
+        supportChecked.set(false);
+        rerankSupported = false;
+        boolean ok = checkSupport();
+        log.info("[Rerank] 强制探测结果: {}", ok);
+        return ok;
+    }
+
+    /**
      * 服务可用性探测（仅探测一次并缓存；配置变更后 client() 会自动重置）：
      * GET /v1/models 确认 OpenAI 兼容服务在线
      */

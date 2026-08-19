@@ -224,6 +224,9 @@ export const getConfig = () => request('/config')
 /** 前端运行时配置（文档上传上限/支持格式等，与后端一致） */
 export const getRuntimeConfig = () => request('/config/public')
 
+/** 探测重排服务是否可用（设置页开启前校验） */
+export const checkRerank = () => request('/config/rerank/check')
+
 /** 模型配置：保存可编辑项 {"chat":{...},"vision":{...}} */
 export const saveConfig = payload => request('/config', { method: 'PUT', body: JSON.stringify(payload) })
 

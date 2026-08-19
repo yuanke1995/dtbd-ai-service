@@ -3,6 +3,7 @@ package com.wisesoft.ai.controller;
 import com.wisesoft.ai.dto.ResultJson;
 import com.wisesoft.ai.parser.DocumentParser;
 import com.wisesoft.ai.service.ConfigService;
+import com.wisesoft.ai.service.RerankService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -28,6 +29,7 @@ public class ConfigController {
 
     private final ConfigService configService;
     private final List<DocumentParser> parsers;
+    private final RerankService rerankService;
 
     @Operation(summary = "获取全量配置", description = "获取所有模型配置项（分组展示 + editable 标记；apiKey 脱敏显示）")
     @GetMapping
@@ -64,6 +66,13 @@ public class ConfigController {
             return String.format("%.1fGB", bytes / (1024.0 * 1024 * 1024));
         }
         return String.format("%.0fMB", bytes / (1024.0 * 1024));
+    }
+
+    /** 重排服务可用性探测（设置页"启用重排"开关打开前校验；绕过缓存真实请求） */
+    @Operation(summary = "探测重排服务", description = "强制探测 rerank 服务（/v1/models），返回 available 供前端开启开关前校验")
+    @GetMapping("/rerank/check")
+    public ResultJson checkRerank() {
+        return ResultJson.ok(Map.of("available", rerankService.checkAvailable()));
     }
 
     @Operation(summary = "保存配置", description = "保存可编辑的模型配置项（chat.model、chat.temperature、chat.systemPrompt、vision.model、vision.prompt），保存即生效无需重启")
