@@ -3,6 +3,9 @@ package com.wisesoft.ai.mapper;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.wisesoft.ai.model.AiQaFeedback;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Select;
+
+import java.util.Map;
 
 /**
  * AI 问答反馈 Mapper
@@ -11,4 +14,8 @@ import org.apache.ibatis.annotations.Mapper;
  */
 @Mapper
 public interface AiQaFeedbackMapper extends BaseMapper<AiQaFeedback> {
+
+    /** 反馈表聚合：总数 / 点赞数（rating=1） */
+    @Select("SELECT COUNT(*) AS total, SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) AS likes FROM c_ai_feedback")
+    Map<String, Object> feedbackStats();
 }

@@ -2,7 +2,9 @@ package com.wisesoft.ai.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.wisesoft.ai.config.AiAppProperties;
+import com.wisesoft.ai.mapper.AiDocumentMapper;
 import com.wisesoft.ai.mapper.AiKnowledgeMapper;
+import com.wisesoft.ai.model.AiDocument;
 import com.wisesoft.ai.model.AiKnowledge;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -38,6 +40,7 @@ public class HybridRetrievalService {
 
     private final VectorStore vectorStore;
     private final AiKnowledgeMapper knowledgeMapper;
+    private final AiDocumentMapper documentMapper;
     private final AiAppProperties properties;
     private final KeywordExtractor keywordExtractor;
     private final ConfigService configService;
@@ -64,18 +67,27 @@ public class HybridRetrievalService {
         // 2. 关键词召回（并行，超时兜底）
         List<AiKnowledge> kwDocs = keywordSearch(query);
 
-        // 3. 合并去重 + 加权（A1：双命中叠加，不再取 max）
-        Map<String, Hit> merged = new LinkedHashMap<>();
-        Set<String> kwHit = kwDocs.stream().map(AiKnowledge::getId).collect(Collectors.toSet());
+        // 3. 批量加载向量命中的知识块元数据（一次 selectBatchIds 替代逐条 selectById）+ 弃用文档集合
+        Map<String, AiKnowledge> kidMap = loadKnowledgeBatch(vectorDocs);
+        Set<String> deprecatedDocIds = loadDeprecatedDocIds(kidMap);
 
-        // 向量命中：score = 向量权重 × 归一化向量分
+        // 4. 合并去重 + 加权（A1：双命中叠加，不再取 max）
+        Map<String, Hit> merged = new LinkedHashMap<>();
+
+        // 向量命中：score = 向量权重 × 归一化向量分；弃用文档（status=1）跳过（向量路无状态过滤，这里剔除）
         double vt = vecThreshold();
         for (Document doc : vectorDocs) {
+            String kid = String.valueOf(doc.getId());
+            AiKnowledge k = kidMap.get(kid);
+            String docId = k != null && k.getDocId() != null ? String.valueOf(k.getDocId()) : metadataDocId(doc);
+            if (docId != null && deprecatedDocIds.contains(docId)) {
+                log.debug("[RAG] 跳过弃用文档命中: docId={} kid={}", docId, kid);
+                continue;
+            }
             double vecScore = parseScore(doc.getScore());
             double vecNorm = Math.max(0, (vecScore - vt) / (1.0 - vt));
             double score = vectorWeight * vecNorm;
-            String kid = String.valueOf(doc.getId());
-            merged.put(kid, buildHit(doc, kid, score));
+            merged.put(kid, buildHit(doc, k, kid, score));
         }
         // 关键词命中：score = 关键词权重 × 词频加权分 + 标题奖励；与向量命中叠加（相加）
         for (AiKnowledge k : kwDocs) {
@@ -261,29 +273,74 @@ public class HybridRetrievalService {
         return score == null ? 0 : score;
     }
 
-    private Hit buildHit(Document doc, String kid, double score) {
+    private Hit buildHit(Document doc, AiKnowledge k, String kid, double score) {
         Map<String, Object> md = doc.getMetadata();
-        String docId = md.get("docId") == null ? "" : String.valueOf(md.get("docId"));
+        String docId = metadataDocId(doc);
         String title = md.get("title") == null ? "" : String.valueOf(md.get("title"));
         List<String> images = imagesFromMd(md);
         Integer chunkIndex = null;
-        // M6 RedisVectorStore 可能丢弃 metadata（docId/title/images 均可能为空），按 knowledgeId 查 MySQL 兜底
-        if (kid != null && (docId.isEmpty() || title.isEmpty() || images.isEmpty() || chunkIndex == null)) {
-            try {
-                AiKnowledge k = knowledgeMapper.selectById(kid);
-                if (k != null) {
-                    if (docId.isEmpty()) docId = String.valueOf(k.getDocId());
-                    if (title.isEmpty()) title = k.getTitle();
-                    if (chunkIndex == null) chunkIndex = k.getChunkIndex();
-                    if (images.isEmpty() && k.getImages() != null && !k.getImages().isBlank()) {
-                        images = com.alibaba.fastjson2.JSON.parseArray(k.getImages(), String.class);
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("查询知识块元数据失败: {}", e.getMessage());
+        // M6 RedisVectorStore 可能丢弃 metadata（docId/title/images 均可能为空），用批量加载的知识块兜底
+        if (k != null) {
+            if (docId == null || docId.isEmpty()) docId = String.valueOf(k.getDocId());
+            if (title.isEmpty()) title = k.getTitle();
+            if (chunkIndex == null) chunkIndex = k.getChunkIndex();
+            if (images.isEmpty() && k.getImages() != null && !k.getImages().isBlank()) {
+                images = com.alibaba.fastjson2.JSON.parseArray(k.getImages(), String.class);
             }
         }
+        if (docId == null) docId = "";
         return new Hit(kid, docId, title, doc.getText(), images, score, chunkIndex);
+    }
+
+    /**
+     * 批量加载向量命中的知识块（一次 selectBatchIds，替代逐条 selectById；失败返回空 Map 走原降级）
+     */
+    private Map<String, AiKnowledge> loadKnowledgeBatch(List<Document> vectorDocs) {
+        if (vectorDocs == null || vectorDocs.isEmpty()) return Map.of();
+        List<String> ids = vectorDocs.stream()
+                .map(d -> String.valueOf(d.getId()))
+                .filter(id -> id != null && !id.isBlank())
+                .distinct()
+                .toList();
+        if (ids.isEmpty()) return Map.of();
+        try {
+            return knowledgeMapper.selectBatchIds(ids).stream()
+                    .collect(Collectors.toMap(k -> String.valueOf(k.getId()), k -> k, (a, b) -> a));
+        } catch (Exception e) {
+            log.warn("批量加载知识块元数据失败: {}", e.getMessage());
+            return Map.of();
+        }
+    }
+
+    /**
+     * 弃用文档（status=1 且未删除）id 集合，用于向量路过滤；
+     * 关键词路已按 status=0 过滤，此处保证两条召回路径一致（弃用文档不再从向量路命中）
+     */
+    private Set<String> loadDeprecatedDocIds(Map<String, AiKnowledge> kidMap) {
+        Set<String> docIds = kidMap.values().stream()
+                .map(AiKnowledge::getDocId)
+                .filter(Objects::nonNull)
+                .map(String::valueOf)
+                .filter(id -> !id.isBlank())
+                .collect(Collectors.toSet());
+        if (docIds.isEmpty()) return Set.of();
+        try {
+            List<AiDocument> deprecated = documentMapper.selectList(
+                    new QueryWrapper<AiDocument>()
+                            .select("id")
+                            .in("id", docIds)
+                            .eq("status", 1)
+                            .eq("deleted", 0));
+            return deprecated.stream().map(d -> String.valueOf(d.getId())).collect(Collectors.toSet());
+        } catch (Exception e) {
+            log.warn("查询弃用文档失败: {}", e.getMessage());
+            return Set.of();
+        }
+    }
+
+    private String metadataDocId(Document doc) {
+        Object v = doc.getMetadata().get("docId");
+        return v == null ? null : String.valueOf(v);
     }
 
     private Hit buildHit(AiKnowledge k, double score) {

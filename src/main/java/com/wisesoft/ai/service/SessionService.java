@@ -177,12 +177,41 @@ public class SessionService {
     }
 
     /**
-     * 获取最近 N 轮对话（MySQL 优先，Redis 兜底）
+     * 获取最近 N 轮对话（MySQL 直读最近 N 轮，Redis 兜底）
      */
     public List<Map<String, Object>> getRecentHistory(String sessionId, int rounds) {
-        List<Map<String, Object>> all = getHistory(sessionId);
-        int start = Math.max(0, all.size() - rounds * 2);
-        return all.subList(start, all.size());
+        List<Map<String, Object>> recent = readRecentFromMysql(sessionId, rounds);
+        if (!recent.isEmpty()) {
+            return recent;
+        }
+        // MySQL 无数据，从 Redis 读取（Redis 已按 maxHistory 裁剪）
+        List<Map<String, Object>> fromRedis = readRange(sessionId, 0, -1);
+        if (!fromRedis.isEmpty()) {
+            // 异步 backfill 到 MySQL（新线程，不阻塞当前请求）
+            backfillToMysql(sessionId, fromRedis);
+        }
+        return fromRedis;
+    }
+
+    /**
+     * 直读最近 N 轮对话：ORDER BY sequence DESC LIMIT rounds*2 后反转，
+     * 避免全量读取该会话所有消息（每次问答该路径被调 2~3 次，会话越长差异越大）
+     */
+    private List<Map<String, Object>> readRecentFromMysql(String sessionId, int rounds) {
+        int limit = Math.max(1, rounds * 2);
+        try {
+            LambdaQueryWrapper<AiMessage> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(AiMessage::getSessionId, sessionId)
+                    .orderByDesc(AiMessage::getSequence)
+                    .last("LIMIT " + limit);
+            List<AiMessage> messages = messageMapper.selectList(wrapper);
+            if (messages.isEmpty()) return Collections.emptyList();
+            Collections.reverse(messages); // 恢复时间正序（最新在后）
+            return messages.stream().map(this::toMessageMap).collect(Collectors.toList());
+        } catch (Exception e) {
+            log.warn("MySQL 读取最近会话历史失败 (session={}): {}", sessionId, e.getMessage());
+            return Collections.emptyList();
+        }
     }
 
     /**
@@ -308,34 +337,39 @@ public class SessionService {
             List<AiMessage> messages = messageMapper.selectList(wrapper);
             if (messages.isEmpty()) return Collections.emptyList();
 
-            return messages.stream().map(m -> {
-                Map<String, Object> map = new HashMap<>();
-                map.put("role", m.getRole());
-                map.put("content", m.getContent());
-                map.put("messageId", m.getId()); // 与 SSE done 事件字段名一致，供前端反馈/导出等操作
-                if (m.getThinking() != null && !m.getThinking().isBlank()) {
-                    map.put("thinking", m.getThinking());
-                }
-                if (m.getImages() != null && !m.getImages().isBlank()) {
-                    try {
-                        map.put("images", JSON.parseArray(m.getImages(), String.class));
-                    } catch (Exception e) {
-                        // images 解析失败忽略
-                    }
-                }
-                if (m.getSources() != null && !m.getSources().isBlank()) {
-                    try {
-                        map.put("sources", JSON.parseArray(m.getSources(), Map.class));
-                    } catch (Exception e) {
-                        // sources 解析失败忽略
-                    }
-                }
-                return map;
-            }).collect(Collectors.toList());
+            return messages.stream().map(this::toMessageMap).collect(Collectors.toList());
         } catch (Exception e) {
             log.warn("MySQL 读取会话历史失败 (session={}): {}", sessionId, e.getMessage());
             return Collections.emptyList();
         }
+    }
+
+    /**
+     * 消息实体 → 前端展示 Map（含思考/图片/引用来源；字段名与 SSE done 事件一致）
+     */
+    private Map<String, Object> toMessageMap(AiMessage m) {
+        Map<String, Object> map = new HashMap<>();
+        map.put("role", m.getRole());
+        map.put("content", m.getContent());
+        map.put("messageId", m.getId()); // 与 SSE done 事件字段名一致，供前端反馈/导出等操作
+        if (m.getThinking() != null && !m.getThinking().isBlank()) {
+            map.put("thinking", m.getThinking());
+        }
+        if (m.getImages() != null && !m.getImages().isBlank()) {
+            try {
+                map.put("images", JSON.parseArray(m.getImages(), String.class));
+            } catch (Exception e) {
+                // images 解析失败忽略
+            }
+        }
+        if (m.getSources() != null && !m.getSources().isBlank()) {
+            try {
+                map.put("sources", JSON.parseArray(m.getSources(), Map.class));
+            } catch (Exception e) {
+                // sources 解析失败忽略
+            }
+        }
+        return map;
     }
 
     /**

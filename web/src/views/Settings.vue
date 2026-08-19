@@ -40,6 +40,11 @@
               <template #label><a-tooltip :title="tips.truncateFallbackChars" placement="top">截断兜底字符 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.chat.truncateFallbackChars" :min="0" :step="50" style="width:200px" />
             </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.pipelineThreads" placement="top">问答流水线线程 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chat.pipelineThreads" :min="2" :max="64" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">并发问答重活线程，保存即生效</span>
+            </a-form-item>
             <a-form-item label="Base URL">
               <a-input :value="ro.chat.baseUrl" disabled />
             </a-form-item>
@@ -95,6 +100,11 @@
               <span style="margin-left:12px;color:#999;font-size:12px">0=不限制</span>
             </a-form-item>
             <a-form-item>
+              <template #label><a-tooltip :title="tips.overlap" placement="top">分块重叠字符 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chunk.overlap" :min="0" :step="20" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">0=关闭，需重解析生效</span>
+            </a-form-item>
+            <a-form-item>
               <template #label><a-tooltip :title="tips.parseConcurrency" placement="top">解析并发数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.chunk.concurrency" :min="1" :max="8" style="width:200px" />
             </a-form-item>
@@ -105,7 +115,7 @@
             </a-form-item>
           </a-form>
           <a-alert type="info" show-icon style="margin:0 24px 16px"
-                   message="上传大小上限保存即生效（新上传按新限制校验）；分块/图片上限对超大文档保护：知识块数超上限截断入库，图片数超上限不再提取描述。保存后对新上传文档立即生效。" />
+                   message="上传大小上限保存即生效（新上传按新限制校验）；分块/图片上限对超大文档保护：知识块数超上限截断入库，图片数超上限不再提取描述。分块重叠与分块/图片上限均只对重新解析/新上传文档生效。" />
         </a-collapse-panel>
 
         <a-collapse-panel key="embedding" :id="'cfg-anchor-embedding'" header="向量模型（Embedding）">
@@ -332,6 +342,7 @@ const tips = {
   visionConcurrency: '文档解析时图片描述的最大并发数。调高解析更快，但占用更多显存/推理资源（本地 Ollama 需设 OLLAMA_NUM_PARALLEL 才能并行）；调低更稳。',
   maxChunks: '单文档解析的最大知识块数（0=不限制）。超大文档超出部分截断不入库，防止 embedding 调用数万次导致解析失控。',
   maxImages: '单文档最多提取并描述的图片数（0=不限制）。图片爆炸的文档（上百张图）解析会非常慢，设上限可避免。',
+  overlap: '分块重叠字符数：相邻知识块之间保留的重叠内容（把上一块尾部 N 字拼入下一块开头），保留被硬切/分块截断处的上下文（表格、长代码跨块语义）。0=关闭。只对重新解析/新上传的文档生效，存量文档需重解析。',
   uploadMaxSize: '文档上传大小上限（MB）。保存即生效（新上传按新限制校验）；物理上限 1GB 由容器兜底，不可超过。',
   vectorWeight: '向量语义相似度在最终排序分中的占比。调高更侧重"意思相近"的匹配（适合口语化、换说法的提问）；过高可能引入字面无关但语义相近的块。',
   keywordWeight: '关键词精确命中在排序分中的占比。调高更侧重"字面命中"（适合操作手册中的专有名词、按钮名）；过高会漏掉语义相关但字面不同的内容。',
@@ -361,6 +372,7 @@ const tips = {
   historyRounds: '问答时注入对话历史的轮数（多轮记忆）。调大更连贯但占上下文预算；0=不注入历史。',
   remainTokenFloor: '上下文预算保留下限（token）：扣除系统提示与问题后至少保留的量，低于则不再填充知识块。',
   truncateFallbackChars: '知识块超出预算时的截断兜底字符数（至少保留的字数）。',
+  pipelineThreads: '问答流水线的并发线程数：图片识别、查询改写、检索、深度思考等"重活"在独立线程池执行，不占 Tomcat 请求线程（多用户并发问答时避免请求线程被打满）。调高可支撑更多并发用户，但占用更多 CPU/内存；队列满时新请求会快速返回"系统繁忙"。保存即生效。',
   parseConcurrency: '文档异步解析的并发数（同时解析几个文档）。调高多文档上传更快，但并发解析会同时占用 embedding/Ollama 资源；保存后对新任务生效。',
   ocrMinText: 'PDF 页文本少于该长度判定为扫描件/图片型，触发 OCR 识别（0=总是 OCR）。调高更激进触发 OCR，调低更依赖 PDF 自带文本。',
   userImageConcurrency: '用户在对话中上传图片的识别并发数（区别于文档解析的图片描述并发）。',
@@ -395,9 +407,9 @@ const onRerankEnabledChange = async checked => {
     rerankChecking.value = false
   }
 }
-const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5 },
+const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8 },
                     vision: { model: '', prompt: '', concurrency: 4, userImageConcurrency: 2 },
-                    chunk: { maxChunks: 3000, maxImages: 100, concurrency: 2, ocrMinText: 20 },
+                    chunk: { maxChunks: 3000, maxImages: 100, overlap: 100, concurrency: 2, ocrMinText: 20 },
                     upload: { maxFileSizeMB: 200 },
                     retrieval: { vectorWeight: 0.6, keywordWeight: 0.4, titleBonus: 0.1,
                                  vecThreshold: 0.3, keywordLimit: 20, keywordTimeoutMs: 800, searchTimeoutMs: 8000,
@@ -425,6 +437,7 @@ onMounted(async () => {
       form.value.chat.remainTokenFloor = Number(d.chat?.remainTokenFloor?.value ?? 800)
       form.value.chat.truncateFallbackChars = Number(d.chat?.truncateFallbackChars?.value ?? 200)
       form.value.chat.historyRounds = Number(d.chat?.historyRounds?.value ?? 5)
+      form.value.chat.pipelineThreads = Number(d.chat?.pipelineThreads?.value ?? 8)
       form.value.vision.model = d.vision?.model?.value || ''
       form.value.vision.prompt = d.vision?.prompt?.value || ''
       form.value.vision.concurrency = Number(d.vision?.concurrency?.value ?? 4)
@@ -432,6 +445,7 @@ onMounted(async () => {
       const ck = d.chunk || {}
       form.value.chunk.maxChunks = Number(ck.maxChunks?.value ?? 3000)
       form.value.chunk.maxImages = Number(ck.maxImages?.value ?? 100)
+      form.value.chunk.overlap = Number(ck.overlap?.value ?? 100)
       form.value.chunk.concurrency = Number(ck.concurrency?.value ?? 2)
       form.value.chunk.ocrMinText = Number(ck.ocrMinText?.value ?? 20)
       const up = d.upload || {}
@@ -507,11 +521,13 @@ const save = async () => {
               systemPrompt: form.value.chat.systemPrompt?.trim(),
               remainTokenFloor: String(form.value.chat.remainTokenFloor),
               truncateFallbackChars: String(form.value.chat.truncateFallbackChars),
-              historyRounds: String(form.value.chat.historyRounds) },
+              historyRounds: String(form.value.chat.historyRounds),
+              pipelineThreads: String(form.value.chat.pipelineThreads) },
       vision: { model: form.value.vision.model?.trim(), prompt: form.value.vision.prompt?.trim(),
                 concurrency: String(form.value.vision.concurrency),
                 userImageConcurrency: String(form.value.vision.userImageConcurrency) },
       chunk: { maxChunks: String(form.value.chunk.maxChunks), maxImages: String(form.value.chunk.maxImages),
+               overlap: String(form.value.chunk.overlap),
                concurrency: String(form.value.chunk.concurrency), ocrMinText: String(form.value.chunk.ocrMinText) },
       upload: { maxFileSize: String(form.value.upload.maxFileSizeMB * 1024 * 1024) },
       retrieval: { vectorWeight: String(form.value.retrieval.vectorWeight),

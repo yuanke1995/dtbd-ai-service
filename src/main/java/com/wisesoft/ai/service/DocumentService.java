@@ -230,6 +230,11 @@ public class DocumentService {
             updateProgress(docId, 10, "解析文档内容(图片较多时较慢)");
             List<Chunk> chunks = parser.parse(bytes, fileName, docId,
                     (percent, desc) -> updateProgress(docId, percent, desc));
+            // 分块重叠：相邻块尾部 overlap 字符拼入下一块开头，保留被硬切/标题分块截断处的上下文（chunk.overlap 可调，0=关闭）
+            int overlap = configService.getInt("chunk.overlap", properties.getChunk().getOverlap());
+            if (overlap > 0) {
+                chunks = applyOverlap(chunks, overlap);
+            }
             // 截断保护：超大文档只保留前 maxChunks 块（防止 embedding 调用数万次/解析失控）
             int maxChunks = configService.getInt("chunk.maxChunks");
             if (maxChunks > 0 && chunks.size() > maxChunks) {
@@ -675,13 +680,17 @@ public class DocumentService {
 
     /**
      * 文档命中次数统计：从问答日志 hit_doc_ids 聚合，返回 {docId: count}
+     * hit_doc_ids 为逗号分隔串无法直接 GROUP BY，按近 90 天 + LIMIT 上限做有界扫描（避免全表拉取到内存）
      */
     public Map<String, Long> statsHitCounts() {
         Map<String, Long> counts = new HashMap<>();
         try {
             var logs = qaLogMapper.selectList(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<com.wisesoft.ai.model.AiQaLog>()
                     .isNotNull(com.wisesoft.ai.model.AiQaLog::getHitDocIds)
-                    .select(com.wisesoft.ai.model.AiQaLog::getHitDocIds));
+                    .ne(com.wisesoft.ai.model.AiQaLog::getHitDocIds, "")
+                    .ge(com.wisesoft.ai.model.AiQaLog::getCreatedAt, java.time.LocalDateTime.now().minusDays(90))
+                    .select(com.wisesoft.ai.model.AiQaLog::getHitDocIds)
+                    .last("LIMIT 20000"));
             for (var log : logs) {
                 if (log.getHitDocIds() == null || log.getHitDocIds().isBlank()) continue;
                 for (String id : log.getHitDocIds().split(",")) {
@@ -811,5 +820,31 @@ public class DocumentService {
     private String truncate(String s) {
         if (s == null) return "未知错误";
         return s.length() > 200 ? s.substring(0, 200) : s;
+    }
+
+    /**
+     * 分块重叠：除首块外，每块把上一块（原始内容）的尾部 overlap 字符作为前缀拼入，
+     * 保留被硬切/标题分块截断处的上下文（表格、长代码跨块语义）。
+     * 重叠尾巴中剥离 [图片...] 标记，避免图片编号/URL 跨块重复。
+     */
+    private List<Chunk> applyOverlap(List<Chunk> chunks, int overlapChars) {
+        if (overlapChars <= 0 || chunks.size() <= 1) return chunks;
+        List<Chunk> out = new ArrayList<>(chunks.size());
+        for (int i = 0; i < chunks.size(); i++) {
+            Chunk c = chunks.get(i);
+            if (i > 0) {
+                String prevContent = chunks.get(i - 1).content();
+                if (!prevContent.isEmpty()) {
+                    String tail = prevContent.length() <= overlapChars
+                            ? prevContent : prevContent.substring(prevContent.length() - overlapChars);
+                    tail = tail.replaceAll("\\[图片[^\\]]*\\]", " ").trim();
+                    if (!tail.isEmpty()) {
+                        c = new Chunk(c.title(), tail + c.content(), c.images());
+                    }
+                }
+            }
+            out.add(c);
+        }
+        return out;
     }
 }

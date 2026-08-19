@@ -15,9 +15,12 @@ import reactor.core.Disposable;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -63,9 +66,39 @@ public class RagService {
         return t;
     });
 
+    /** 问答流水线线程池：图片描述 join/改写/检索/深度思考等重活都在独立线程执行，避免占满 Tomcat 请求线程；
+     *   chat.pipelineThreads 可调（保存即生效），队列有界，满时快速失败返回"系统繁忙" */
+    private ThreadPoolExecutor pipelineExecutor;
+
+    @jakarta.annotation.PostConstruct
+    void initPipeline() {
+        syncPipelineSize();
+    }
+
+    /** 提交前同步流水线线程数（chat.pipelineThreads，DB 配置保存即生效） */
+    private void syncPipelineSize() {
+        int n = Math.max(2, configService.getInt("chat.pipelineThreads", 8));
+        if (pipelineExecutor == null) {
+            pipelineExecutor = new ThreadPoolExecutor(n, n, 0L, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(64), r -> {
+                Thread t = new Thread(r, "chat-pipeline");
+                t.setDaemon(true);
+                return t;
+            }, new ThreadPoolExecutor.AbortPolicy());
+            log.info("[Chat] 问答流水线线程池创建: {} 线程", n);
+        } else if (n != pipelineExecutor.getCorePoolSize()) {
+            pipelineExecutor.setCorePoolSize(n);
+            pipelineExecutor.setMaximumPoolSize(n);
+            log.info("[Chat] 问答流水线线程数调整为 {}", n);
+        }
+    }
+
     @jakarta.annotation.PreDestroy
     void shutdownRewriteExecutor() {
         rewriteExecutor.shutdownNow();
+        if (pipelineExecutor != null) {
+            pipelineExecutor.shutdownNow();
+        }
     }
 
     public RagService(ChatClient.Builder chatClientBuilder,
@@ -97,8 +130,23 @@ public class RagService {
     /**
      * 处理用户问题（可含上传图片），通过 SSE 流式返回。
      * deepThink=true 时先流式输出思考过程（thinking 事件），提取检索计划后多路检索再回答。
+     * 整条流水线在独立线程池执行（重活不占 Tomcat 请求线程），控制器返回后 SSE 由流水线线程驱动。
      */
     public void chat(String sessionId, String question, List<String> userImages, boolean deepThink, SseEmitter emitter) {
+        syncPipelineSize();
+        try {
+            pipelineExecutor.execute(() -> runChat(sessionId, question, userImages, deepThink, emitter));
+        } catch (RejectedExecutionException e) {
+            log.warn("[Chat] 问答流水线繁忙，拒绝请求: session={}", sessionId);
+            sendSseEvent(emitter, "error", "系统繁忙，请稍后重试", sessionId);
+            completeEmitter(emitter);
+        }
+    }
+
+    /**
+     * 问答流水线主体（独立线程执行）：图片处理 → 改写 → 检索/深度思考 → 上下文构建 → LLM 流式输出
+     */
+    private void runChat(String sessionId, String question, List<String> userImages, boolean deepThink, SseEmitter emitter) {
         long startTime = System.currentTimeMillis();
         // 深度思考全文（供 done 事件/持久化；lambda 中引用需 effectively final，用数组容器）
         final String[] thinkingHolder = {null};
@@ -134,15 +182,22 @@ public class RagService {
                 DeepThinkResult dr = runDeepThinking(sessionId, question, imgDescText, emitter);
                 thinkingHolder[0] = dr.thinking();
                 if (dr.ok()) {
+                    String rankQuery;
                     // 多路检索：精化 query + 子问题并行召回合并；开关关闭时单路精化 query
                     if (configService.getBoolean("deepReasoning.multiRetrieval")) {
                         List<String> queries = new ArrayList<>();
                         queries.add(dr.refinedQuery());
                         queries.addAll(dr.subQueries());
                         hits = hybridRetrievalService.searchMulti(queries);
+                        rankQuery = dr.refinedQuery();
                     } else {
                         retrievalQuery = dr.refinedQuery();
                         hits = hybridRetrievalService.search(retrievalQuery);
+                        rankQuery = retrievalQuery;
+                    }
+                    // 与普通路径一致：命中数在重排区间内时重排（多路合并后同样重排，保持两路行为一致）
+                    if (hits.size() > rerankMinHits() && hits.size() <= rerankMaxHits()) {
+                        hits = rerankService.rank(hits, rankQuery);
                     }
                     log.info("[DEEP-THINK] 检索计划: refined={}, subQueries={}, hits={}",
                             dr.refinedQuery(), dr.subQueries(), hits.size());
@@ -202,6 +257,11 @@ public class RagService {
             List<String> retrievalTerms = keywordExtractor.extract(retrievalQuery);
             int maxContextHits = configService.getInt("context.maxContextHits");
             int snippetWindow = configService.getInt("context.snippetWindowChars");
+            // 批量预取引用文件名（避免循环内逐 hit 查库；冷缓存时一次 selectBatchIds）
+            Set<String> refDocIds = hits.stream().map(HybridRetrievalService.Hit::docId)
+                    .filter(d -> d != null && !d.isBlank())
+                    .collect(Collectors.toSet());
+            Map<String, String> fileNameMap = documentMetaCache.getFileNames(refDocIds);
             for (HybridRetrievalService.Hit hit : hits) {
                 if (docNo > maxContextHits) break;
                 String text = hit.content();
@@ -255,7 +315,7 @@ public class RagService {
                 src.put("ref", docNo);
                 src.put("knowledgeId", hit.knowledgeId());
                 src.put("docId", hit.docId());
-                src.put("fileName", documentMetaCache.getFileName(hit.docId()));
+                src.put("fileName", fileNameMap.get(hit.docId()));
                 src.put("title", hit.title());
                 src.put("snippet", snippet(text)); // 用截取后的片段做溯源摘要（更贴近命中内容）
                 src.put("images", hit.images()); // 关联文档截图（原始URL，前端经 /proxy 访问）

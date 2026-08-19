@@ -81,54 +81,47 @@ public class QaLogService {
     }
 
     /**
-     * 统计看板：热门问题 / 无命中 / 反馈
+     * 统计看板：热门问题 / 无命中 / 反馈（全部走 SQL 聚合，避免全表拉取到内存）
      */
     public Map<String, Object> analyticsSummary() {
         Map<String, Object> result = new LinkedHashMap<>();
         try {
-            List<AiQaLog> logs = qaLogMapper.selectList(
-                    new LambdaQueryWrapper<AiQaLog>().orderByDesc(AiQaLog::getCreatedAt).last("LIMIT 2000"));
+            int limit = 2000; // 与原先 LIMIT 2000 语义一致
+            Map<String, Object> stats = qaLogMapper.summaryStats(limit);
+            long total = num(stats.get("total"));
+            long noHit = num(stats.get("no_hit"));
+            long cited = num(stats.get("cited"));
 
-            // 热门问题 TOP10（按问题文本聚合）
-            Map<String, Long> qCount = logs.stream()
-                    .filter(l -> l.getQuestion() != null && !l.getQuestion().isBlank())
-                    .collect(Collectors.groupingBy(AiQaLog::getQuestion, Collectors.counting()));
-            result.put("topQuestions", qCount.entrySet().stream()
-                    .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
-                    .limit(10)
-                    .map(e -> Map.of("question", e.getKey(), "count", e.getValue()))
+            result.put("topQuestions", qaLogMapper.topQuestions(limit).stream()
+                    .map(m -> Map.of("question", String.valueOf(m.get("question")),
+                            "count", num(m.get("cnt"))))
+                    .toList());
+            result.put("noHitRate", total == 0 ? 0 : Math.round(noHit * 1000.0 / total) / 10.0);
+            result.put("total", total);
+            result.put("citationRate", total == 0 ? 0 : Math.round(cited * 1000.0 / total) / 10.0);
+            result.put("noHitQuestions", qaLogMapper.noHitQuestions(limit).stream()
+                    .map(m -> Map.of("question", String.valueOf(m.get("question")),
+                            "count", num(m.get("cnt"))))
                     .toList());
 
-            // 无命中问题 TOP10（hitDocIds 为空）
-            List<String> noHit = logs.stream()
-                    .filter(l -> l.getHitDocIds() == null || l.getHitDocIds().isBlank())
-                    .map(AiQaLog::getQuestion)
-                    .filter(q -> q != null && !q.isBlank())
-                    .toList();
-            result.put("noHitRate", logs.isEmpty() ? 0 : Math.round(noHit.size() * 1000.0 / logs.size()) / 10.0);
-            result.put("total", logs.size());
-            long cited = logs.stream().filter(l -> l.getHasCitation() != null && l.getHasCitation() == 1).count();
-            result.put("citationRate", logs.isEmpty() ? 0 : Math.round(cited * 1000.0 / logs.size()) / 10.0);
-            Map<String, Long> noHitCount = noHit.stream().collect(Collectors.groupingBy(q -> q, Collectors.counting()));
-            result.put("noHitQuestions", noHitCount.entrySet().stream()
-                    .sorted(Map.Entry.<String, Long>comparingByValue().reversed())
-                    .limit(10)
-                    .map(e -> Map.of("question", e.getKey(), "count", e.getValue()))
-                    .toList());
-
-            // 反馈统计
-            List<AiQaFeedback> feedbacks = feedbackMapper.selectList(null);
-            long likes = feedbacks.stream().filter(f -> f.getRating() != null && f.getRating() == 1).count();
-            long dislikes = feedbacks.size() - likes;
+            // 反馈统计（COUNT 聚合，不拉全表）
+            Map<String, Object> fb = feedbackMapper.feedbackStats();
+            long likes = num(fb.get("likes"));
+            long fbTotal = num(fb.get("total"));
             result.put("feedback", Map.of(
-                    "total", feedbacks.size(),
+                    "total", fbTotal,
                     "likes", likes,
-                    "dislikes", dislikes,
-                    "likeRate", feedbacks.isEmpty() ? 0 : Math.round(likes * 1000.0 / feedbacks.size()) / 10.0));
+                    "dislikes", fbTotal - likes,
+                    "likeRate", fbTotal == 0 ? 0 : Math.round(likes * 1000.0 / fbTotal) / 10.0));
         } catch (Exception e) {
             log.warn("统计聚合失败: {}", e.getMessage());
         }
         return result;
+    }
+
+    /** SQL 聚合返回的数值统一转 long（COUNT 为 Long，SUM(CASE...) 为 BigDecimal） */
+    private long num(Object o) {
+        return o instanceof Number n ? n.longValue() : 0L;
     }
 
     /**
@@ -137,32 +130,15 @@ public class QaLogService {
     public List<Map<String, Object>> listUnmatched() {
         List<Map<String, Object>> result = new ArrayList<>();
         try {
-            List<AiQaLog> logs = qaLogMapper.selectList(
-                    new LambdaQueryWrapper<AiQaLog>()
-                            .ge(AiQaLog::getCreatedAt, LocalDateTime.now().minusDays(30))
-                            .orderByDesc(AiQaLog::getCreatedAt)
-                            .last("LIMIT 5000"));
-            // 无命中：hitDocIds 为空
-            Map<String, List<AiQaLog>> grouped = logs.stream()
-                    .filter(l -> (l.getHitDocIds() == null || l.getHitDocIds().isBlank())
-                            && l.getQuestion() != null && !l.getQuestion().isBlank())
-                    .collect(Collectors.groupingBy(AiQaLog::getQuestion));
-            for (var entry : grouped.entrySet()) {
-                List<AiQaLog> qLogs = entry.getValue();
-                String latestTime = qLogs.stream()
-                        .map(AiQaLog::getCreatedAt)
-                        .filter(Objects::nonNull)
-                        .max(LocalDateTime::compareTo)
-                        .map(Object::toString)
-                        .orElse("");
+            List<Map<String, Object>> rows = qaLogMapper.noHitTop(LocalDateTime.now().minusDays(30));
+            for (Map<String, Object> m : rows) {
                 Map<String, Object> item = new LinkedHashMap<>();
-                item.put("question", entry.getKey());
-                item.put("count", qLogs.size());
-                item.put("latestTime", latestTime);
+                item.put("question", String.valueOf(m.get("question")));
+                item.put("count", num(m.get("cnt")));
+                Object latest = m.get("latest");
+                item.put("latestTime", latest == null ? "" : String.valueOf(latest));
                 result.add(item);
             }
-            result.sort((a, b) -> Integer.compare((int) b.get("count"), (int) a.get("count")));
-            if (result.size() > 50) result = new ArrayList<>(result.subList(0, 50));
         } catch (Exception e) {
             log.warn("查询无命中问题失败: {}", e.getMessage());
         }

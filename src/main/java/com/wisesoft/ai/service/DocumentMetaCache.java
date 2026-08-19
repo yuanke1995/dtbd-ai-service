@@ -6,6 +6,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -44,6 +48,38 @@ public class DocumentMetaCache {
             log.warn("[DocumentMetaCache] 查询文档名失败: docId={} error={}", docId, e.getMessage());
         }
         return null;
+    }
+
+    /**
+     * 批量获取文件名：先查缓存，未命中的一次 selectBatchIds 补齐
+     * （检索上下文循环内避免逐 hit 查库，冷缓存时每轮问答最多一次批量查询）
+     */
+    public Map<String, String> getFileNames(Collection<String> docIds) {
+        Map<String, String> result = new HashMap<>();
+        if (docIds == null || docIds.isEmpty()) return result;
+        List<String> missing = new ArrayList<>();
+        for (String docId : docIds) {
+            if (docId == null || docId.isBlank()) continue;
+            String name = fileNameCache.get(docId);
+            if (name != null) {
+                result.put(docId, name);
+            } else {
+                missing.add(docId);
+            }
+        }
+        if (missing.isEmpty()) return result;
+        try {
+            List<AiDocument> docs = documentMapper.selectBatchIds(missing);
+            for (AiDocument doc : docs) {
+                if (doc != null && doc.getFileName() != null && !doc.getFileName().isBlank()) {
+                    fileNameCache.put(doc.getId(), doc.getFileName());
+                    result.put(doc.getId(), doc.getFileName());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[DocumentMetaCache] 批量查询文档名失败: error={}", e.getMessage());
+        }
+        return result;
     }
 
     /**

@@ -32,11 +32,13 @@ public class ConfigService {
             Map.entry("chat.model", "智能问答模型名"),
             Map.entry("chat.temperature", "回答温度(0~2)"),
             Map.entry("chat.systemPrompt", "AI助手系统提示词（角色与回答风格）"),
+            Map.entry("chat.pipelineThreads", "问答流水线线程数(保存即生效)"),
             Map.entry("vision.model", "视觉识别模型名"),
             Map.entry("vision.prompt", "视觉识别提示词"),
             Map.entry("vision.concurrency", "图片描述并发数（保存即生效）"),
             Map.entry("chunk.maxChunks", "单文档最大知识块数(0=不限制)"),
             Map.entry("chunk.maxImages", "单文档最多提取图片数(0=不限制)"),
+            Map.entry("chunk.overlap", "分块重叠字符数(0=关闭)"),
             Map.entry("upload.maxFileSize", "文档上传大小上限(字节,保存即生效)"),
             Map.entry("retrieval.vectorWeight", "混合检索：向量权重(0~1)"),
             Map.entry("retrieval.keywordWeight", "混合检索：关键词权重(0~1)"),
@@ -124,6 +126,7 @@ public class ConfigService {
         d.put("embedding.model", env("spring.ai.openai.embedding.options.model", ""));
         d.put("chunk.maxChunks", String.valueOf(properties.getChunk().getMaxChunks()));
         d.put("chunk.maxImages", String.valueOf(properties.getChunk().getMaxImages()));
+        d.put("chunk.overlap", String.valueOf(properties.getChunk().getOverlap()));
         d.put("upload.maxFileSize", String.valueOf(200L * 1024 * 1024));  // 业务上传上限（字节），默认 200MB
         d.put("retrieval.vectorWeight", String.valueOf(properties.getRetrieval().getVectorWeight()));
         d.put("retrieval.keywordWeight", String.valueOf(properties.getRetrieval().getKeywordWeight()));
@@ -171,6 +174,7 @@ public class ConfigService {
         d.put("chat.remainTokenFloor", "800");             // 上下文填充保留下限
         d.put("chat.truncateFallbackChars", "200");        // 超预算截断兜底字符数
         d.put("chat.historyRounds", "5");                  // 多轮记忆注入轮数
+        d.put("chat.pipelineThreads", "8");                // 问答流水线线程数（重活不占 Tomcat 请求线程）
         return d;
     }
 

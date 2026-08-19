@@ -101,8 +101,12 @@ public class RerankService {
             if (scores == null || scores.size() != docs.size()) return candidates;
 
             List<HybridRetrievalService.Hit> ranked = new ArrayList<>(candidates);
-            ranked.sort((a, b) -> Double.compare(
-                    scores.get(candidates.indexOf(b)), scores.get(candidates.indexOf(a))));
+            // 预计算 index→score 映射，避免排序比较器里反复 indexOf（O(n² log n) 且 record equals 会逐字段比较大文本）
+            Map<HybridRetrievalService.Hit, Double> scoreMap = new HashMap<>();
+            for (int i = 0; i < candidates.size(); i++) {
+                scoreMap.put(candidates.get(i), scores.get(i));
+            }
+            ranked.sort((a, b) -> Double.compare(scoreMap.get(b), scoreMap.get(a)));
             log.info("[Rerank] 候选 {} 条重排完成", candidates.size());
             return ranked;
         } catch (Exception e) {
