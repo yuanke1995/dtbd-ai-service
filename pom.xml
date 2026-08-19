@@ -126,6 +126,7 @@
     </dependencyManagement>
 
     <build>
+        <finalName>ai-doc-assistant</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
