@@ -59,6 +59,10 @@ public class DocumentService {
     private final ConfigService configService;
     /** 解析进度节流守卫：docId -> 已上报 progress（值未变化不写库） */
     private final Map<String, Integer> progressGuard = new ConcurrentHashMap<>();
+    /** 删除标志：delete() 立即置位，解析线程检查点秒查（不等 DB） */
+    private final Map<String, Boolean> deletedFlags = new ConcurrentHashMap<>();
+    /** 解析线程引用：delete() 时 interrupt 实现立即中断（图片 join 等待立即响应） */
+    private final Map<String, Thread> parseThreads = new ConcurrentHashMap<>();
 
     /** 解析线程池（并发 2：避免多文档同时解析打爆 embedding/Ollama） */
     private ExecutorService parseExecutor;
@@ -159,9 +163,10 @@ public class DocumentService {
     }
 
     /**
-     * 删除感知：文档记录是否仍存在（delete() 为物理删除，删除后 selectById 返回 null）
+     * 删除感知：内存删除标志优先（delete() 立即置位）；兜底查 DB（物理删除后 selectById 为 null）
      */
     private boolean isDocAlive(String docId) {
+        if (deletedFlags.containsKey(docId)) return false;
         return documentMapper.selectById(docId) != null;
     }
 
@@ -202,6 +207,9 @@ public class DocumentService {
         if (doc == null) return;
         List<Document> aiDocs = new ArrayList<>();
         try {
+            // 新解析任务：清残留删除标志 + 记录线程（供 delete() 中断）
+            deletedFlags.remove(docId);
+            parseThreads.put(docId, Thread.currentThread());
             updateProgress(docId, 5, "开始解析");
             byte[] bytes = Files.readAllBytes(source);
             // parse 为黑盒（含图片视觉描述，可能较慢），期间进度显示静态值；DocxParser 会逐张图片上报精确进度
@@ -248,6 +256,11 @@ public class DocumentService {
                 if ((i + 1) % 10 == 0 || i == total - 1) {
                     updateProgress(docId, 30 + Math.min(20, (i + 1) * 20 / total), "入库 " + (i + 1) + "/" + total);
                 }
+                // 删除感知：入库循环内每 10 块检查，删除立即停止（不等循环结束）
+                if ((i + 1) % 10 == 0 && !isDocAlive(docId)) {
+                    cleanupPartial(docId, aiDocs);
+                    return;
+                }
             }
             // 删除感知：入库后、向量化前再查一次
             if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
@@ -258,6 +271,11 @@ public class DocumentService {
                 int totalBatch = (aiDocs.size() + batchSize - 1) / batchSize;
                 int batchNo = 0;
                 for (int i = 0; i < aiDocs.size(); i += batchSize) {
+                    // 删除感知：向量化每批前检查，删除立即停止
+                    if (!isDocAlive(docId)) {
+                        cleanupPartial(docId, aiDocs);
+                        return;
+                    }
                     int end = Math.min(i + batchSize, aiDocs.size());
                     vectorStore.add(aiDocs.subList(i, end));
                     batchNo++;
@@ -287,6 +305,12 @@ public class DocumentService {
             }
             log.info("[{}] 解析成功: {} chunks", docId, chunks.size());
         } catch (Exception e) {
+            // 删除场景：线程被 delete() 中断（interrupt）或检查点发现删除 → 只清理产物，不置失败状态
+            if (deletedFlags.containsKey(docId)) {
+                log.info("[{}] 解析已被删除中断: {}", docId, e.getMessage());
+                cleanupPartial(docId, aiDocs);
+                return;
+            }
             log.error("[{}] 解析失败: {}", docId, e.getMessage());
             // 补偿清理：删已写向量 + MySQL 元数据 + 图片目录（保留记录置失败状态）
             try {
@@ -302,6 +326,10 @@ public class DocumentService {
             documentMapper.updateById(doc);
             // 失败：进度保留最后值，desc 置"解析失败"
             updateProgress(docId, progressGuard.getOrDefault(docId, 0), "解析失败");
+        } finally {
+            // 清理解析线程引用与删除标志（delete() 的 DB 物理删除仍可兜底 isDocAlive）
+            parseThreads.remove(docId);
+            deletedFlags.remove(docId);
         }
     }
 
@@ -309,6 +337,13 @@ public class DocumentService {
      * 删除文档（向量/MySQL/图片分别清理）
      */
     public void delete(String docId) {
+        // 立即标记删除 + 中断解析线程（图片 join 等待立即响应，不再等阶段检查点）
+        deletedFlags.put(docId, true);
+        Thread parseThread = parseThreads.get(docId);
+        if (parseThread != null && parseThread.isAlive()) {
+            parseThread.interrupt();
+            log.info("[{}] 删除时中断解析线程", docId);
+        }
         List<AiKnowledge> chunks = knowledgeMapper.selectList(
                 new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
         if (!chunks.isEmpty()) {
