@@ -217,8 +217,11 @@
 
       </a-collapse>
 
-      <div style="margin-top:20px">
-        <a-button type="primary" :loading="saving" @click="save">
+      <!-- 悬浮保存按钮：固定在右下角，无需滚动到底部 -->
+      <div style="position:fixed; right:24px; bottom:24px; z-index:100; margin:0">
+        <a-button type="primary" :loading="saving" @click="save"
+                  style="box-shadow:0 4px 12px rgba(0,0,0,0.18)">
+          <template #icon><save-outlined /></template>
           保存配置
         </a-button>
       </div>
@@ -229,7 +232,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
-import { QuestionCircleOutlined } from '@ant-design/icons-vue'
+import { QuestionCircleOutlined, SaveOutlined } from '@ant-design/icons-vue'
 import { getConfig, saveConfig, checkRerank } from '../api'
 
 // 折叠面板：默认展开常用分组（chat / retrieval / context / deepReasoning），vision / embedding 收起
@@ -330,7 +333,8 @@ onMounted(async () => {
       form.value.retrieval.vectorWeight = Number(d.retrieval?.vectorWeight?.value ?? 0.6)
       form.value.retrieval.keywordWeight = Number(d.retrieval?.keywordWeight?.value ?? 0.4)
       form.value.retrieval.titleBonus = Number(d.retrieval?.titleBonus?.value ?? 0.1)
-      const rr = d.retrieval?.rerank || {}
+      // rerank 是独立分组（d.rerank），勿用 retrieval 组
+      const rr = d.rerank || {}
       form.value.retrieval.rerank.enabled = rr.enabled?.value === 'true'
       form.value.retrieval.rerank.baseUrl = rr.baseUrl?.value || 'http://localhost:7997'
       form.value.retrieval.rerank.model = rr.model?.value || 'BAAI/bge-reranker-v2-m3'
@@ -375,11 +379,12 @@ const save = async () => {
       upload: { maxFileSize: String(form.value.upload.maxFileSizeMB * 1024 * 1024) },
       retrieval: { vectorWeight: String(form.value.retrieval.vectorWeight),
                    keywordWeight: String(form.value.retrieval.keywordWeight),
-                   titleBonus: String(form.value.retrieval.titleBonus),
-                   rerank: { enabled: String(form.value.retrieval.rerank.enabled),
-                             baseUrl: form.value.retrieval.rerank.baseUrl?.trim(),
-                             model: form.value.retrieval.rerank.model?.trim(),
-                             timeoutMillis: String(form.value.retrieval.rerank.timeoutMillis) } },
+                   titleBonus: String(form.value.retrieval.titleBonus) },
+      // rerank 是独立分组（后端 key 前缀 rerank.*），不可嵌套在 retrieval 下
+      rerank: { enabled: String(form.value.retrieval.rerank.enabled),
+                baseUrl: form.value.retrieval.rerank.baseUrl?.trim(),
+                model: form.value.retrieval.rerank.model?.trim(),
+                timeoutMillis: String(form.value.retrieval.rerank.timeoutMillis) },
       context: { modelWindows: form.value.context.modelWindows?.trim(),
                  defaultWindowTokens: String(form.value.context.defaultWindowTokens),
                  safetyFactor: String(form.value.context.safetyFactor),

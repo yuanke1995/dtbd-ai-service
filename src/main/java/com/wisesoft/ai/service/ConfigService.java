@@ -326,7 +326,7 @@ public class ConfigService {
     /** 全量配置（供配置界面展示；apiKey 脱敏） */
     public Map<String, Object> snapshot() {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] groups = {"chat", "vision", "embedding", "chunk", "upload", "retrieval", "context", "deepReasoning"};
+        String[] groups = {"chat", "vision", "embedding", "chunk", "upload", "retrieval", "rerank", "context", "deepReasoning"};
         for (String g : groups) {
             Map<String, Object> items = new LinkedHashMap<>();
             for (Map.Entry<String, String> d : defaults().entrySet()) {

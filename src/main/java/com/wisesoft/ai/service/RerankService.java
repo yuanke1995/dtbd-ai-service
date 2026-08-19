@@ -168,7 +168,7 @@ public class RerankService {
                 }
             } catch (Exception e) {
                 rerankSupported = false;
-                log.warn("[Rerank] 服务探测失败（回退融合分排序）: {}", e.getMessage());
+                log.warn("[Rerank] 服务探测失败（回退融合分排序）baseUrl={}: {}", baseUrl(), e.getMessage());
             }
             supportChecked.set(true);
             return rerankSupported;
