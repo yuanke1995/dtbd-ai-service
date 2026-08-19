@@ -23,5 +23,5 @@ echo "[2/2] 安装 sentence-transformers + modelscope..."
 
 echo ""
 echo "依赖安装完成。接下来:"
-echo "  1) 下载模型:  $PY scripts/download_model.py"
-echo "  2) 启动服务:  scripts/start_rerank_server.sh"
+echo "  1) 下载模型:  $PY $ROOT/scripts/download_model.py"
+echo "  2) 启动服务:  $ROOT/scripts/mac/start_rerank_server.sh"

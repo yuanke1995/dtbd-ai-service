@@ -22,8 +22,8 @@ if errorlevel 1 goto :fail
 
 echo.
 echo 依赖安装完成。接下来:
-echo   1) 下载模型:  "%PY%" scripts\download_model.py
-echo   2) 启动服务:  scripts\start_rerank_server.bat
+echo   1) 下载模型:  "%PY%" "%ROOT%\scripts\download_model.py"
+echo   2) 启动服务:  "%ROOT%\scripts\win\start_rerank_server.bat"
 pause
 exit /b 0
 

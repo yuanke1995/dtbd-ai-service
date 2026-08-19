@@ -12,7 +12,7 @@ PY="${PYTHON_BIN:-$(command -v python3 || echo python3)}"
 MODEL="$ROOT/.pyenv/model/bge-reranker-v2-m3"
 
 if [ ! -f "$MODEL/config.json" ]; then
-  echo "模型不存在，请先执行: $PY scripts/download_model.py"
+  echo "模型不存在，请先执行: $PY $ROOT/scripts/download_model.py"
   exit 1
 fi
 

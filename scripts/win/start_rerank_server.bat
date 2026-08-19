@@ -14,7 +14,7 @@ set PYTHONPATH=%ROOT%\.pyenv\target
 set MODEL=%ROOT%\.pyenv\model\bge-reranker-v2-m3
 
 if not exist "%MODEL%\config.json" (
-    echo 模型不存在，请先执行: "%PY%" scripts\download_model.py
+    echo 模型不存在，请先执行: "%PY%" "%ROOT%\scripts\download_model.py"
     pause
     exit /b 1
 )

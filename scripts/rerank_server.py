@@ -22,8 +22,15 @@
 """
 import argparse
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# 依赖装在 <项目根>/.pyenv/target（隔离目录），自动注入 sys.path，无需手动设置 PYTHONPATH
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TARGET_DIR = os.path.join(_PROJECT_ROOT, ".pyenv", "target")
+if os.path.isdir(_TARGET_DIR) and _TARGET_DIR not in sys.path:
+    sys.path.insert(0, _TARGET_DIR)
 
 MODEL_ID = "BAAI/bge-reranker-v2-m3"
 model = None  # CrossEncoder 实例
