@@ -20,7 +20,7 @@ import java.util.stream.Collectors;
 /**
  * 混合检索：向量召回 + MySQL 关键词召回 并行执行 → 按 knowledgeId 合并去重 → 加权排序
  * <p>
- * - 向量：topK 放大 + 阈值放宽（0.3），分数归一化到 0~1（(score-0.3)/(1-0.3)）
+ * - 向量：topK 可配（retrieval.vectorTopK，默认 15）+ 阈值放宽（0.3），分数归一化到 0~1（(score-0.3)/(1-0.3)）
  * - 关键词：词元 LIKE 召回 + 词频加权（tf×idf，标题词频×2，归一化 0~1）
  * - 融合：双命中**叠加**（向量分 + 关键词分 + 标题奖励），单路命中取各自权重分
  * - 位置：文档首块（chunkIndex=0）小幅加分，中部块相对降权
@@ -168,7 +168,8 @@ public class HybridRetrievalService {
         try {
             SearchRequest req = SearchRequest.builder()
                     .query(query)
-                    .topK(Math.max(15, properties.getRetrieval().getTopK()))
+                    // topK 直接取配置（默认 15，下限 1）：评估扫参需要小于 15 的值，max(15,...) 钳制会让扫参等价
+                    .topK(Math.max(1, configService.getInt("retrieval.vectorTopK", 15)))
                     .similarityThreshold(Math.min(vecThreshold(), properties.getRetrieval().getSimilarityThreshold()))
                     .build();
             return vectorStore.similaritySearch(req);
@@ -185,6 +186,8 @@ public class HybridRetrievalService {
     public List<AiKnowledge> keywordSearch(String query) {
         List<String> terms = keywordExtractor.extract(query);
         if (terms.isEmpty()) return List.of();
+        // LIMIT 必须在调用线程求值：supplyAsync 内跑在 commonPool 线程，ThreadLocal 参数覆盖（评估扫参）传不进去
+        int limit = keywordLimit();
         try {
             return CompletableFuture.supplyAsync(() -> {
                 // WHERE doc_id IN (生效文档) AND ((content LIKE ? OR title LIKE ?) OR ...)
@@ -198,7 +201,7 @@ public class HybridRetrievalService {
                         w.and(t -> t.like("content", term).or().like("title", term));
                     }
                 });
-                wrapper.last("LIMIT " + keywordLimit());
+                wrapper.last("LIMIT " + limit);
                 List<AiKnowledge> hits = knowledgeMapper.selectList(wrapper);
                 if (hits.isEmpty()) return hits;
                 return scoreKeywordHits(hits, terms);

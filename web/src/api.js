@@ -253,3 +253,14 @@ export const rollbackDocument = (id, version) =>
 /** 检索调试：分步查看关键词/向量/合并/重排/最终上下文/被排除 */
 export const debugRetrieval = question =>
   request('/debug/retrieval', { method: 'POST', body: JSON.stringify({ question }) })
+
+/** 检索评估：从历史问答回放生成评估集 */
+export const evalGenerate = maxCases =>
+  request('/eval/generate', { method: 'POST', body: JSON.stringify({ maxCases }) })
+
+/** 检索评估：读取当前评估集 */
+export const getEvalSet = () => request('/eval/set')
+
+/** 检索评估：批量参数组对比运行 */
+export const runEvaluation = payload =>
+  request('/eval/run', { method: 'POST', body: JSON.stringify(payload) })

@@ -131,6 +131,7 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 - **文档解析**：docx（段落/标题大纲级别/**表格→Markdown 表格、单列表格→代码块**/内嵌图/单元格换行保留）/ xlsx（sheet 转文本）/ pdf（PDFBox 文本抽取）；**扫描件自动 OCR**（文本 <20 字符判定，逐页渲染 200DPI → 本地视觉模型识别，OCR 专用提示词）；分块 800 字 + 100 字重叠（重叠已生效）；**解析删除感知**（内存删除标志 + 线程中断，删除立即停止并清理本次产物）
 - **数据闭环**：问答日志（含改写后问题/命中文档/耗时）+ 回答 👍👎 反馈 + 看板聚合；**无命中问题汇总 → 一键创建知识块（自动生成向量）**，形成"发现缺口→补充→验证"闭环
 - **检索调试**：`POST /api/ai/debug/retrieval` 分步展示检索词元（分词结果）/关键词/向量/合并/重排/最终结果与命中率，前端问答页"检索调试"按钮可视化排查召回问题
+- **检索评估**：`POST /api/ai/eval/generate` 从历史问答引用（`c_ai_message.sources`）回放生成评估集（问题→期望知识块，失效期望块自动剔除并计数）→ `POST /api/ai/eval/run` 批量参数组对比 **recall@k / MRR / 命中率** + 弃用文档召回断言；参数覆盖走线程局部 override，**不写 DB 不污染生产配置**（multi 模式为确定性拆分近似，衡量多路合并机制而非 LLM 深度思考质量）
 - **会话**：MySQL + Redis 双层存储，历史恢复（含图片/引用来源/messageId）、删除/清空、**搜索/置顶/收藏**、侧边栏拖拽伸缩（宽度记忆）
 - **前端体验**：markdown-it + DOMPurify + highlight.js 安全渲染（代码块复制按钮、**长行自动折行 + 限高滚动**）、重新生成/编辑重问（编辑图标悬浮气泡下方）、图片灯箱、问答 👍👎 反馈、断连自动重试内联提示、上传进度条
 
@@ -153,6 +154,7 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 | `POST /api/ai/feedback`、`GET /api/ai/analytics/summary` | 回答反馈 / 看板聚合 |
 | `GET/PUT /api/ai/config` | 模型配置读取（apiKey 脱敏）/ 保存即生效（含检索权重、上下文参数） |
 | `POST /api/ai/debug/retrieval` | 检索链路分步调试（含检索词元） |
+| `POST /api/ai/eval/generate`、`GET /api/ai/eval/set`、`POST /api/ai/eval/run` | 检索量化评估：从历史问答引用回放生成评估集 / 读取评估集 / 批量参数组对比（recall@k/MRR/命中率 + 弃用文档召回断言） |
 
 ## 与报表平台集成
 
@@ -177,6 +179,18 @@ cd web && npm run build
 curl -X POST http://localhost:8090/api/ai/debug/retrieval \
   -H "Content-Type: application/json" \
   -d '{"question":"如何删除报表"}'                      # 返回分词/关键词/向量/合并/重排分步结果
+
+# 4. 检索量化评估（回放历史问答引用生成评估集 → 批量参数组对比，验证参数改动是好是坏）
+curl -X POST http://localhost:8090/api/ai/eval/generate \
+  -H "Content-Type: application/json" -d '{"maxCases":100}'   # 生成 data/eval/retrieval-eval.json（问题→期望知识块）
+curl -X POST http://localhost:8090/api/ai/eval/run \
+  -H "Content-Type: application/json" -d '{
+    "kList":[5,10,20],
+    "groups":[
+      {"name":"当前配置","mode":"normal"},
+      {"name":"向量0.7/关键词0.3","mode":"normal","vectorWeight":0.7,"keywordWeight":0.3},
+      {"name":"多路合并","mode":"multi"}
+    ]}'                                                       # recall@k/MRR/命中率 + 弃用文档断言
 ```
 
 **端到端手动验证**（建议每次改动后走一遍）：

@@ -10,6 +10,7 @@
           <a-menu-item key="chat">智能问答</a-menu-item>
           <a-menu-item key="documents">文档管理</a-menu-item>
           <a-menu-item key="dashboard">数据看板</a-menu-item>
+          <a-menu-item key="evaluation">检索评估</a-menu-item>
           <a-menu-item key="settings">系统设置</a-menu-item>
         </a-menu>
       </a-layout-header>

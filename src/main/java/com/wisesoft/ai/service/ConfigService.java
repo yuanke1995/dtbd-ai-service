@@ -155,6 +155,7 @@ public class ConfigService {
         d.put("deepReasoning.maxThinkingTokens", String.valueOf(properties.getDeepReasoning().getMaxThinkingTokens()));
         // 检索行为参数（原硬编码收口，设置页可调、保存即生效）
         d.put("retrieval.vecThreshold", "0.3");            // 向量相似度归一化基准/下限
+        d.put("retrieval.vectorTopK", "15");               // 向量召回 topK（调优/评估扫参用，下限 1）
         d.put("retrieval.keywordLimit", "20");             // 关键词召回上限
         d.put("retrieval.keywordTimeoutMs", "800");        // 关键词检索超时
         d.put("retrieval.searchTimeoutMs", "8000");        // 混合检索总超时
@@ -162,6 +163,7 @@ public class ConfigService {
         d.put("retrieval.sectionBonus", "0.01");           // 前段位置奖励
         d.put("retrieval.keywordMaxTerms", "6");           // 关键词提取主词元上限
         d.put("retrieval.keywordMaxTotal", "12");          // 关键词提取总词元上限
+        d.put("retrieval.vectorTopK", "15");               // 向量检索召回上限（评估批量对比可覆盖）
         // 重排行为参数
         d.put("rerank.minHits", "6");                      // 触发重排的候选下限
         d.put("rerank.maxHits", "15");                     // 触发重排的候选上限
@@ -183,8 +185,29 @@ public class ConfigService {
         return v == null || v.isBlank() ? def : v;
     }
 
-    /** 读取配置（带默认兜底） */
+    /** 评估批量对比用的线程局部参数覆盖（仅当前线程生效，finally 必须 clear；不写 DB 不污染配置） */
+    private static final ThreadLocal<Map<String, String>> OVERRIDE = new ThreadLocal<>();
+
+    /** 设置线程局部参数覆盖（评估用），返回 this 便于 finally 中 clearOverride */
+    public void putOverrides(Map<String, String> overrides) {
+        if (overrides == null || overrides.isEmpty()) return;
+        Map<String, String> cur = OVERRIDE.get();
+        if (cur == null) {
+            OVERRIDE.set(new HashMap<>(overrides));
+        } else {
+            cur.putAll(overrides);
+        }
+    }
+
+    /** 清除线程局部参数覆盖（评估结束后必须调用） */
+    public void clearOverride() {
+        OVERRIDE.remove();
+    }
+
+    /** 读取配置（线程局部覆盖 → 缓存 → 默认值） */
     public String get(String key) {
+        Map<String, String> ov = OVERRIDE.get();
+        if (ov != null && ov.containsKey(key)) return ov.get(key);
         String v = cache.get(key);
         return v != null ? v : defaults().getOrDefault(key, "");
     }
