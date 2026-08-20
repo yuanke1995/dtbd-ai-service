@@ -24,10 +24,11 @@ public interface AiQaLogMapper extends BaseMapper<AiQaLog> {
             ") t WHERE question IS NOT NULL AND question <> '' GROUP BY question ORDER BY cnt DESC LIMIT 10")
     List<Map<String, Object>> topQuestions(@Param("limit") int limit);
 
-    /** 最近 limit 条日志中无命中问题 TOP10 */
+    /** 最近 limit 条日志中无命中问题 TOP10（过滤下推到子查询，外层只引用派生表列） */
     @Select("SELECT question, COUNT(*) AS cnt FROM (" +
-            "  SELECT question FROM c_ai_qa_log ORDER BY created_at DESC LIMIT #{limit}" +
-            ") t WHERE (hit_doc_ids IS NULL OR hit_doc_ids = '') AND question IS NOT NULL AND question <> '' " +
+            "  SELECT question FROM c_ai_qa_log WHERE (hit_doc_ids IS NULL OR hit_doc_ids = '') " +
+            "  ORDER BY created_at DESC LIMIT #{limit}" +
+            ") t WHERE question IS NOT NULL AND question <> '' " +
             "GROUP BY question ORDER BY cnt DESC LIMIT 10")
     List<Map<String, Object>> noHitQuestions(@Param("limit") int limit);
 

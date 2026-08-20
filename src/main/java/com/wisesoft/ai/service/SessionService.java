@@ -130,10 +130,11 @@ public class SessionService {
     }
 
     /**
-     * 转义 LIKE 特殊字符（% _ \），防止搜索词干扰匹配
+     * 转义 LIKE 特殊字符（% _ \）+ SQL 单引号（''），防止搜索词干扰匹配或注入 inSql 拼接
      */
     private String escapeLike(String keyword) {
         return keyword.replace("\\", "\\\\")
+                .replace("'", "''")
                 .replace("%", "\\%")
                 .replace("_", "\\_");
     }

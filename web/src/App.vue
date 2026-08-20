@@ -37,11 +37,12 @@ const router = useRouter()
 const activeKey = computed(() => {
   if (route.path === '/documents') return 'documents'
   if (route.path === '/dashboard') return 'dashboard'
+  if (route.path === '/evaluation') return 'evaluation'
   if (route.path === '/settings') return 'settings'
   return 'chat'
 })
 const onMenu = ({ key }) => {
-  const map = { chat: '/chat', documents: '/documents', dashboard: '/dashboard', settings: '/settings' }
+  const map = { chat: '/chat', documents: '/documents', dashboard: '/dashboard', evaluation: '/evaluation', settings: '/settings' }
   router.push(map[key] || '/chat')
 }
 </script>

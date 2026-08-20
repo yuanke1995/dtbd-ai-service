@@ -16,6 +16,6 @@ import java.util.Map;
 public interface AiQaFeedbackMapper extends BaseMapper<AiQaFeedback> {
 
     /** 反馈表聚合：总数 / 点赞数（rating=1） */
-    @Select("SELECT COUNT(*) AS total, SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) AS likes FROM c_ai_feedback")
+    @Select("SELECT COUNT(*) AS total, SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) AS likes FROM c_ai_qa_feedback")
     Map<String, Object> feedbackStats();
 }
