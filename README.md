@@ -156,6 +156,16 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 | `POST /api/ai/debug/retrieval` | 检索链路分步调试（含检索词元） |
 | `POST /api/ai/eval/generate`、`GET /api/ai/eval/set`、`POST /api/ai/eval/run` | 检索量化评估：从历史问答引用回放生成评估集 / 读取评估集 / 批量参数组对比（recall@k/MRR/命中率 + 弃用文档召回断言） |
 
+## 多副本部署要求
+
+支持多实例水平扩展，需满足以下约束（均已代码化治理）：
+
+1. **数据目录必须共享**：`AI_IMAGES_DIR` 指向所有实例都能访问的同一存储（源文件/提取图/评估集都在此）。docker-compose 用命名卷 `app-data:/app/data` 仅**同主机**多副本共享；跨主机（集群）需挂 NFS/对象存储等共享卷，否则副本 A 上传的文档在副本 B 无法重解析、图片 URL 在 B 侧 404
+2. **静态配置一致**：各副本的 yml/环境变量（数据库、Redis、`AI_TRUSTED_TOKEN`、模型密钥等）必须一致；动态配置（`c_ai_config`）无需手工同步——任意实例保存后经 **Redis pub/sub**（channel `ai:config:changed`）广播，其他实例立即重载缓存；订阅断线期间的变更由 **5 分钟兜底轮询**补齐
+3. **并发防护**：重解析用 **DB 状态机 CAS**（`SET status=2 WHERE status≠2`，原子）——两实例同时重解析同一文档只有一个成功，另一个返回"正在解析中"；解析队列有界（50）+ 图片描述线程池有界，超限拒绝/降级不失控
+4. **删除中断语义**：删除在任意实例生效——本实例解析的文档立即中断；其他实例上的解析由 DB 兜底在检查点（入库每 10 块/向量化每批）秒级停止清理，不产生孤儿数据
+5. **总并发核算**：解析并发为"副本数 × parse.concurrency"（默认 2/实例），embedding/Ollama 为共享瓶颈，多副本时需下调单实例并发或扩容推理资源
+
 ## 与报表平台集成
 
 生产环境由平台网关做 JWT 鉴权并透传请求（前端调 `/api/ai/*`，见 `web/.env.production`）。
