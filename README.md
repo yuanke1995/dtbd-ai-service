@@ -1,6 +1,6 @@
 # AI 文档助手
 
-报表平台独立 AI 服务，基于 Spring AI 实现 RAG 知识库问答。支持 Word/PDF/Excel 文档解析（含扫描 PDF OCR）、混合检索 + 查询改写、价值驱动上下文控制、回答中位置级展示文档原图、引用溯源、会话管理（搜索/置顶/收藏）、文档版本管理、数据看板与知识缺口闭环，是面向"操作手册问答"场景的完整智能助手。
+报表平台独立 AI 服务，基于 Spring AI 实现 RAG 知识库问答。支持 Word/PDF/Excel 文档解析（含扫描 PDF OCR）、混合检索 + 查询改写、价值驱动上下文控制、回答中位置级展示文档原图（识别用压缩图、展示用原图的双图策略）、解析进度实时展示（含图片识别逐张进度）、引用溯源、会话管理（搜索/置顶/收藏）、文档版本管理、数据看板与知识缺口闭环，是面向"操作手册问答"场景的完整智能助手。
 
 ## 技术栈
 
@@ -8,7 +8,7 @@
 |------|------|
 | 后端 | Java 17 + Spring Boot 3.5.15 + Spring AI 1.1.8 |
 | ORM | MyBatis-Plus 3.5.12 |
-| 数据库 | OceanBase（MySQL 协议，库 `ai_doc_assistant`） |
+| 数据库 | OceanBase（MySQL 协议，库 `ai_doc_assistant`，可按环境调整） |
 | 向量库 | Redis Stack（RediSearch，docker 映射端口 **6380**，Jedis 客户端） |
 | LLM | 阿里云 MaaS 网关（OpenAI 兼容：chat=`qwen3.7-flash-2026-07-15`，embedding=`qwen3.7-text-embedding`，base-url 不含 `/v1`）；图片理解/OCR 走本地 Ollama `qwen3-vl:2b` |
 | 文档解析 | Apache POI 5.2.3（docx/xlsx）+ PDFBox 3.0.2（含扫描件 OCR 降级） |
@@ -29,7 +29,7 @@ ai-doc-assistant/
 │   ├── util/                        # TokenCounter（分语言 token 估算，上下文预算用）
 │   ├── model/ + mapper/ + dto/      # 实体（含 AiDocumentVersion）/ MyBatis-Plus Mapper / 传输对象
 ├── src/main/resources/
-│   ├── application.yml              # 配置（密钥零默认值，缺失 fail-fast）
+│   ├── application.yml              # 配置（关键密钥无默认值：DB_PASSWORD/AI_TRUSTED_TOKEN 缺失 fail-fast）
 │   ├── application-local.yml        # 本地开发私有配置（含数据目录，.gitignore 忽略）
 │   └── schema.sql                   # 建表脚本（启动自动执行，幂等可重复运行）
 ├── data/                            # 运行时生成：files/{docId}/ 源文件 + images/{docId}/ 提取图 + images/chat/ 用户图
@@ -55,7 +55,7 @@ ollama pull qwen3-vl:2b
 ```
 > 建议设置环境变量 `OLLAMA_NUM_PARALLEL=4`（否则多图描述串行排队）；4GB 显存机器并发度建议 `vision.concurrency=2`。
 
-**数据库**：现有 OceanBase 库 `ai_doc_assistant`（库需预先存在）。表结构（`c_ai_document`/`c_ai_knowledge`/`c_ai_session`/`c_ai_message`/`c_ai_qa_log`/`c_ai_qa_feedback`/`c_ai_config`/`c_ai_document_version`）由应用启动自动执行 `schema.sql` 创建（全部 `CREATE TABLE IF NOT EXISTS`，重复启动安全）；也可手动执行：
+**数据库**：现有 OceanBase 库 `ai_doc_assistant`（库需预先存在，库名按实际环境配置）。表结构（`c_ai_document`/`c_ai_knowledge`/`c_ai_session`/`c_ai_message`/`c_ai_qa_log`/`c_ai_qa_feedback`/`c_ai_config`/`c_ai_document_version`）由应用启动自动执行 `schema.sql` 创建（全部 `CREATE TABLE IF NOT EXISTS`，重复启动安全）；也可手动执行：
 ```bash
 mysql -h172.168.10.65 -P2881 -uroot -p ai_doc_assistant < src/main/resources/schema.sql
 ```
@@ -65,12 +65,12 @@ mysql -h172.168.10.65 -P2881 -uroot -p ai_doc_assistant < src/main/resources/sch
 ```bash
 # ===== 必填（无默认值，缺失将启动失败 fail-fast）=====
 export DB_PASSWORD=xxx                    # 数据库密码
-export AI_TRUSTED_TOKEN=xxx               # 内部鉴权 token（与平台网关一致）
-export AI_DEEPSEEK_KEY=sk-xxxx            # chat 模型密钥（MaaS 网关）
+export AI_TRUSTED_TOKEN=xxx               # 内部鉴权 token（与平台网关一致，SecurityConfig 校验）
 
 # ===== 可选 =====
+export AI_DEEPSEEK_KEY=sk-xxxx            # chat 模型密钥（MaaS 网关；有默认空值，缺失不启动失败，但聊天不可用）
 export REDIS_HOST=127.0.0.1
-export REDIS_PORT=6379
+export REDIS_PORT=6379               # Redis 端口（本机环境覆盖为 6380：docker 映射）
 export AI_VISION_MODEL=qwen3-vl:2b        # 图片描述/OCR 模型（本地 Ollama）
 export AI_VISION_BASE_URL=http://localhost:11434  # 视觉地址（不含 /v1，代码自动拼）
 export AI_VISION_THINK=false              # 关闭 qwen3 思考模式（提速且输出稳定）
@@ -81,7 +81,7 @@ export AI_IMAGE_FILTER_ENABLED=true       # 回答图片相关性校验开关（
 export LOG_LEVEL_APP=info                 # 应用日志级别
 ```
 
-**本地开发**：无需 export，把真实值直接写入 `src/main/resources/application-local.yml`（私有文件，已加入 .gitignore；**数据目录 `ai-app.images.dir` 也在此配置**，Windows 机器改成 `D:/workspace/ai-doc-assistant/data` 即可，天然区分平台），然后以 `local` profile 启动（application.yml 已默认激活 local）：
+**本地开发**：无需 export，把真实值直接写入 `src/main/resources/application-local.yml`（私有文件，已加入 .gitignore；**数据目录 `ai-app.images.dir` 也在此配置**，Windows 机器改成 `D:/workspace/dtbd-ai-service/data` 即可，天然区分平台），然后以 `local` profile 启动（application.yml 已默认激活 local）：
 - IDEA：Run Configuration → Active profiles 填 `local`
 - 命令行：`SPRING_PROFILES_ACTIVE=local mvn spring-boot:run`
 
@@ -93,7 +93,7 @@ mvn spring-boot:run
 
 # 方式二：打包后运行
 mvn clean package -DskipTests
-java -jar target/ai-doc-assistant-1.0.1-SNAPSHOT.jar
+java -jar target/ai-doc-assistant.jar
 
 # 方式三：Docker Compose（含 redis-stack）
 docker compose up -d
@@ -115,20 +115,20 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 
 ### 5. 使用流程
 
-1. **文档管理**：上传 `.docx` / `.pdf` / `.xlsx`（≤50MB，可多文件，可指定分类）→ 异步解析（解析中状态轮询）→ 生效/弃用/重解析/批量操作/命中次数统计；点击"知识块"可预览该文档的分块与图片（支持**编辑/删除单个知识块**，编辑后自动重新向量化）；支持**分类筛选**；**版本管理**（每次解析/重解析自动存快照，可查看历史版本并一键回滚）
+1. **文档管理**：上传 `.docx` / `.pdf` / `.xlsx`（默认 ≤200MB，可多文件；上限在设置页调整，物理上限 1GB）→ 异步解析（解析中状态轮询，进度条实时展示：图片识别阶段逐张显示"识别图片 k/total"）→ 生效/弃用/重解析/批量操作/命中次数统计；**解析中删除文档立即中断**（线程中断 + 产物自动清理，无孤儿数据）；点击"知识块"可预览该文档的分块与图片（支持**编辑/删除单个知识块**，编辑后自动重新向量化）；**版本管理**（每次解析/重解析自动存快照，可查看历史版本并一键回滚）
 2. **智能问答**：提问（支持上传图片+问题）→ 混合检索 + 查询改写 → 流式回答，位置级插入文档原图、[N] 引用角标（点击弹窗看来源全文与图片）、末尾相关追问；回答下方操作区（检索调试/重新生成/复制 Markdown/导出 .md/👍👎 反馈，hover 显示）；断连自动重试（内联提示）
 3. **会话管理**：侧边栏搜索（标题/内容模糊匹配）、**置顶/收藏**（置顶排最前，收藏 tab 筛选）、拖拽伸缩、删除/清空
 4. **数据看板**：统计卡片（问答量/满意率/引用率/无命中率）+ 热门问题/无命中 TOP10 + **知识库缺口管理**（无命中问题一键入库，含向量召回）
-5. **系统设置**：模型名/温度/System Prompt（角色段）/视觉模型/检索权重/上下文参数，**保存即生效**（DB 存储，分栏折叠展示，参数带 `?` 说明）
+5. **系统设置**：模型名/温度/System Prompt（角色段）/视觉模型/检索权重与行为参数/重排区间/解析并发/上下文参数，**保存即生效**（DB 存储，折叠分组展示，顶部**锚点导航**快速定位 + 滚动高亮，参数带 `?` 说明）；问答输入框左侧深度思考开关（图标按钮，localStorage 记忆）
 
 ## 核心功能
 
-- **混合检索**：Redis 向量 Top-K（阈值 0.5）+ MySQL 关键词 LIKE（800ms 超时）并行召回；**向量分归一化 + 双命中叠加**（语义+关键词命中 = 向量分+关键词分+标题奖励）；关键词按 **tf×idf 词频加权**（标题词频×2）；**中文分词增强**（纯中文 2-gram / 中英混合 4-gram 子词元）；**分块位置惩罚**（文档首块加权）；Ollama 支持 rerank 时自动启用，否则回退规则排序
+- **混合检索**：Redis 向量 Top-K + MySQL 关键词 LIKE 并行召回（**超时/阈值/召回数/位置奖励等行为参数设置页可调**，保存即生效）；**向量分归一化 + 双命中叠加**（语义+关键词命中 = 向量分+关键词分+标题奖励）；关键词按 **tf×idf 词频加权**（标题词频×2）；**中文分词增强**（纯中文 2-gram / 中英混合 4-gram 子词元）；**分块位置奖励**（文档首块加权）；Ollama 支持 rerank 时自动启用（候选数在可配置区间内触发），否则回退规则排序
 - **查询改写**：LLM 将用户问题改写为检索关键词（默认开启）；支持多轮对话上下文改写（追问"那删除呢？"自动补全），改写结果入库可评估
 - **上下文与长度控制**：`预算 = min(模型窗口×安全系数 − 输出限制, 成本软上限)`，窗口按当前模型动态匹配；**价值驱动填充**（知识块按相关度分数累积填充，替代固定 8 块）；**块内命中片段截取**（±150 字窗口，边界对齐行/图片标记，长命令不被切断）；**历史裁剪**（单条 200 字 + 总量上限 + 剥离 `[图片N]`）；输出 maxTokens 限制；token 按中英文分语言估算（TokenCounter）
-- **图片链路**：docx 提取图片（去重 + 768px 压缩）→ 视觉模型生成描述并随分块落库 → 检索命中后全局编号 `[图片N：描述]` 供 LLM 选图 → **相关性校验兜底**（`[图片N]` 与描述/上下文不匹配自动剔除并重建编号，防错配）→ SSE `image` 事件 → 前端按标记渲染原图（灯箱：缩放/拖动/多图切换/ESC）
+- **图片链路**：docx 提取图片（去重 + **双图策略**：识别用压缩图 1280px 进视觉模型，**展示用原图**落盘）→ 视觉模型生成描述并随分块落库（Ollama `num_ctx=16384` 防 1280px 视觉 token 截断）→ 检索命中后全局编号 `[图片N：描述]` 供 LLM 选图 → **相关性校验兜底**（`[图片N]` 与描述/上下文不匹配自动剔除并重建编号，防错配）→ SSE `image` 事件 → 前端按标记渲染原图（灯箱：缩放/拖动/多图切换/ESC）；图片描述完成逐张上报进度（10→30 区间"识别图片 k/total"）
 - **引用溯源**：回答句末 `[N]` 角标 → 弹窗展示来源知识块全文（图文交错，还原原文结构）+ 关联截图；`done` 事件携带 sources/related/messageId
-- **文档解析**：docx（段落/标题大纲级别/**表格→Markdown 表格、单列表格→代码块**/内嵌图/单元格换行保留）/ xlsx（sheet 转文本）/ pdf（PDFBox 文本抽取）；**扫描件自动 OCR**（文本 <20 字符判定，逐页渲染 150DPI → 本地视觉模型识别，OCR 专用提示词）；分块 800 字 + 100 字重叠（重叠已生效）
+- **文档解析**：docx（段落/标题大纲级别/**表格→Markdown 表格、单列表格→代码块**/内嵌图/单元格换行保留）/ xlsx（sheet 转文本）/ pdf（PDFBox 文本抽取）；**扫描件自动 OCR**（文本 <20 字符判定，逐页渲染 200DPI → 本地视觉模型识别，OCR 专用提示词）；分块 800 字 + 100 字重叠（重叠已生效）；**解析删除感知**（内存删除标志 + 线程中断，删除立即停止并清理本次产物）
 - **数据闭环**：问答日志（含改写后问题/命中文档/耗时）+ 回答 👍👎 反馈 + 看板聚合；**无命中问题汇总 → 一键创建知识块（自动生成向量）**，形成"发现缺口→补充→验证"闭环
 - **检索调试**：`POST /api/ai/debug/retrieval` 分步展示检索词元（分词结果）/关键词/向量/合并/重排/最终结果与命中率，前端问答页"检索调试"按钮可视化排查召回问题
 - **会话**：MySQL + Redis 双层存储，历史恢复（含图片/引用来源/messageId）、删除/清空、**搜索/置顶/收藏**、侧边栏拖拽伸缩（宽度记忆）
@@ -142,9 +142,9 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 | `GET /api/ai/sessions?keyword=`、`POST /api/ai/session/new`、`GET /api/ai/session/{id}` | 会话列表（支持关键词搜索）/ 新建 / 历史恢复 |
 | `PUT /api/ai/session/{id}/pin`、`PUT /api/ai/session/{id}/favorite` | 置顶 / 收藏（`{pinned:true}` 或 `{favorite:true}`） |
 | `DELETE /api/ai/session/{id}`、`DELETE /api/ai/sessions` | 删除单会话（软删除会话+消息）/ 清空全部会话 |
-| `POST /api/ai/document/upload`、`/upload/batch` | 上传文档（docx/pdf/xlsx，异步解析，支持 category 分类） |
+| `POST /api/ai/document/upload`、`/upload/batch` | 上传文档（docx/pdf/xlsx，异步解析；category 参数保留兼容，前端已不再传） |
 | `GET /api/ai/document/list`、`DELETE /{id}`、`PUT /{id}/status`、`POST /{id}/reparse` | 文档列表 / 删除 / 启停用 / 重解析 |
-| `GET /api/ai/document/categories`、`PUT /{id}/category` | 分类列表 / 修改文档分类 |
+| `GET /api/ai/document/categories`、`PUT /{id}/category` | 分类列表 / 修改文档分类（接口保留，前端分类 UI 已移除） |
 | `GET /api/ai/document/{id}/versions`、`POST /{id}/rollback` | 版本历史 / 回滚到指定版本（按原 ID 重建知识块+向量） |
 | `POST /api/ai/document/batch/delete`、`/batch/status`、`GET /document/stats` | 批量操作 + 命中次数统计 |
 | `GET /api/ai/knowledge/{id}`、`GET /api/ai/knowledge/list?docId=` | 知识块详情（引用溯源） / 按文档预览 |
@@ -164,24 +164,32 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 
 ## 测试与验证
 
+> 当前无单元测试用例（`src/test` 为空，pom 已引入 `spring-boot-starter-test`，可随时补充）。推荐按以下方式验证：
+
 ```bash
-# 后端单元测试（ImageUrlSigner / ResultJson / ImageFilterService 图片校验 等）
-mvn test
-# 注意：运行测试前需停止占用 target/ 的 IDE 服务实例
+# 1. 后端健康检查
+curl http://localhost:8090/ai/actuator/health          # 期望 {"status":"UP"}
 
-# 检索评估集（需真实 Redis/DB，默认 @Disabled，按需开启）
-# 填充 src/test/resources/retrieval-eval.json 的知识块 ID 后执行 RetrievalEvaluationTest
-# 输出 recall@5 / MRR 基线，防止检索改动回归
-
-# 前端构建验证
+# 2. 前端构建验证
 cd web && npm run build
+
+# 3. 检索链路调试（无需重新解析，直接验证召回质量）
+curl -X POST http://localhost:8090/api/ai/debug/retrieval \
+  -H "Content-Type: application/json" \
+  -d '{"question":"如何删除报表"}'                      # 返回分词/关键词/向量/合并/重排分步结果
 ```
+
+**端到端手动验证**（建议每次改动后走一遍）：
+1. 文档管理上传含图片 docx → 状态轮询看进度（图片阶段"识别图片 k/total"递增）→ 生效
+2. 解析中删除文档 → 后端日志出现"解析已被删除中断"，无孤儿知识块
+3. 问答提问 → 深度思考开关（可选）→ 流式回答带引用 `[N]` 角标 → 点击看来源全文与图片 → 👍/👎 反馈
+4. 设置页修改任意行为参数（如向量阈值）→ 保存 → 检索调试对比前后召回差异
 
 ## 产品化特性
 
-- **安全**：密钥零默认值（缺失 fail-fast）、token 恒定时间比较、图片访问 HMAC 签名 URL（`AI_IMAGES_AUTH_ENABLED=true`）、统一异常+参数校验（`@Valid`）、错误信息不泄露内部细节
-- **可靠性**：上传失败自动补偿清理（删向量+MySQL+图片）、脏解析记录清理、解析异步化（不阻塞上传）、SSE 异步订阅支持停止生成、查询改写专用线程池（超时隔离 + daemon + PreDestroy 回收）
-- **可配置**：模型名/温度/System Prompt 角色段/视觉提示词/检索权重/**上下文参数** **数据库存储、保存即生效**（`c_ai_config`，存量升级自动补默认项）；prompt 调整无需重启
+- **安全**：关键密钥零默认值（`DB_PASSWORD`/`AI_TRUSTED_TOKEN` 缺失 fail-fast，模型密钥允许空默认仅功能不可用）、token 恒定时间比较、图片访问 HMAC 签名 URL（`AI_IMAGES_AUTH_ENABLED=true`）、统一异常+参数校验（`@Valid`）、错误信息不泄露内部细节
+- **可靠性**：上传失败自动补偿清理（删向量+MySQL+图片）、脏解析记录清理、解析异步化（不阻塞上传）、**解析中删除文档立即中断**（内存标志 + 线程 interrupt + 阶段检查点，清理本次产物）、SSE 异步订阅支持停止生成、查询改写专用线程池（超时隔离 + daemon + PreDestroy 回收）
+- **可配置**：模型名/温度/System Prompt 角色段/视觉提示词/检索权重与行为参数/重排区间/解析并发/上下文参数 **数据库存储、保存即生效**（`c_ai_config`，存量升级自动补默认项）；prompt 调整无需重启；检索/重排/解析/问答 4 组共 18 项行为参数收口配置化（原硬编码移除）
 - **可观测性**：`/actuator/health` 健康检查、日志级别环境变量化、MyBatis 日志走 slf4j、检索调试 API
 - **部署**：multi-stage Dockerfile、docker-compose（含 redis-stack）、nginx 参考配置（`deploy/nginx.conf`，SPA fallback + SSE 关缓冲 + 图片缓存）
 
@@ -211,8 +219,8 @@ ai-app:
   session: { max-history: 10, expire-minutes: 30 }
   images:
     dir: ${AI_IMAGES_DIR:./data}           # 数据根目录（开发在 application-local.yml 配绝对路径；生产 /app/data）
-    max-width: 768                         # 图片最长边（视觉 token 约为 1280 的 1/3）
-    quality: 0.8
+    max-width: 1280                         # 识别用压缩图最长边（qwen3-vl 最佳清晰度档，视觉 token 约 1600-2500；展示用原图不受限）
+    quality: 0.9                            # JPEG 压缩质量（识别用；带透明通道自动转 PNG）
     url-prefix: /ai/images
     auth-enabled: ${AI_IMAGES_AUTH_ENABLED:false}
     auth-expire-seconds: 3600
@@ -230,17 +238,17 @@ ai-app:
     retry-count: 1                         # 单图失败重试
     keep-alive-minutes: 30                 # 模型常驻内存（云端服务需设 0）
     think: ${AI_VISION_THINK:false}        # 关闭 qwen3 思考（实测 max_tokens 会导致空输出，勿加）
+    num-ctx: 16384                         # Ollama 上下文窗口（1280px 图视觉 token 1600-2500，默认 4096 会截断；0=不设置）
   query-rewrite:                           # 查询改写（默认开启）
     enabled: ${AI_QUERY_REWRITE_ENABLED:true}
     timeout-millis: 5000
-    history-rounds: 2                      # 多轮改写参与轮数
-    prompt / prompt-multi-turn             # 改写 prompt（多轮含 %s 历史占位）
+    # history-rounds / prompt / prompt-multi-turn 为代码默认值（AiAppProperties.QueryRewrite），yml 不覆盖
   system-prompt: "你是\"小报\"..."          # 回答角色段默认值（DB c_ai_config 可覆盖，保存即生效）
   trusted-token: ${AI_TRUSTED_TOKEN}
 
 spring:
-  servlet.multipart: { max-file-size: 50MB, max-request-size: 100MB }
-  data.redis: { client-type: jedis, host: ${REDIS_HOST:127.0.0.1}, port: ${REDIS_PORT:6379} }
+  servlet.multipart: { max-file-size: 1024MB, max-request-size: 1100MB }  # 物理上限 1GB；业务上限由 c_ai_config upload.maxFileSize 控制（默认 200MB，设置页可调）
+  data.redis: { client-type: jedis, host: ${REDIS_HOST:127.0.0.1}, port: ${REDIS_PORT:6379} }  # 本机环境经 REDIS_PORT=6380 覆盖
   ai.openai:
     api-key: ${AI_DEEPSEEK_KEY}
     base-url: <MaaS 网关 /compatible-mode> # 不含 /v1（Spring AI 自动补）
@@ -258,6 +266,6 @@ spring:
 - **Spring AI 版本**：1.1.8 起 starter 更名（`spring-ai-starter-model-openai` / `spring-ai-starter-vector-store-redis`），由 `spring-ai-bom` 统一管理；RedisVectorStore 配置属性 `index` → `index-name`，`initialize-schema` 默认 false 需显式开启。**升级 1.1 后旧向量数据建议重新上传/重解析文档**（序列化结构可能变化）
 - **图片访问路径**：后端返回 `/ai/images/...`（含 context-path），前端经 `/proxy` 代理时需去掉 `/ai` 前缀（vite 代理 target 已含 context-path），否则双重 `/ai` 404
 - **图片描述失败降级**：视觉模型调用失败时图片仍会提取保存，描述降级为 `[图片]` 占位，不影响上传与问答；此时回答图片相关性校验对无描述图自动放行
-- **存量库升级**：`c_ai_config.config_value` 需为 TEXT（容纳长 prompt）；新增列（`c_ai_session.is_pinned/is_favorite`、`c_ai_document.category/version`）与新表（`c_ai_document_version`）——新表启动自动建，**存量表加列需手动执行 ALTER**（见 schema.sql 注释）
+- **存量库升级**：`c_ai_config.config_value` 需为 TEXT（容纳长 prompt）；新增列（`c_ai_session.is_pinned/is_favorite`、`c_ai_document.category/version`）与新表（`c_ai_document_version`）——新表启动自动建，**存量表加列需手动执行 ALTER**（见 schema.sql 注释）；`c_ai_document.category` 字段保留（前端分类 UI 已移除，存量值已清空）
 - **视觉模型思考模式**：qwen3 系列 `max_tokens` 限制会导致内容为空（思考耗尽 token），VisionService 不发送 max_tokens、改用 `think: false`
 - **多图描述性能**：图片描述耗时与并发强相关，Ollama 需设 `OLLAMA_NUM_PARALLEL` 才能真正并行；文档重传会重新生成全部图片描述（77 图约 5-10 分钟）
