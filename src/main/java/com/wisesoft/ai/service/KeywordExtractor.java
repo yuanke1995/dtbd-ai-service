@@ -1,5 +1,8 @@
 package com.wisesoft.ai.service;
 
+import com.huaban.analysis.jieba.JiebaSegmenter;
+import com.huaban.analysis.jieba.SegToken;
+import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -11,9 +14,8 @@ import java.util.Set;
  * 中文查询词元提取（用于关键词召回）
  * <p>
  * 两级提取：
- * 1. 按标点/空白切分为整词，过滤停用词，长词优先
- * 2. 对纯中文长词（≥3 字）补充 2-gram 分解子词元（如"创建表单" → 创建/建表/表单），
- *    提高"换说法/子串匹配"场景的召回（无需引入重型分词依赖）
+ * 1. jieba 搜索模式分词（SEARCH：细粒度切出有效词），过滤停用词，长词优先
+ * 2. 对长词补充 2-gram/4-gram 分解子词元（提高"换说法/子串匹配"场景的召回）
  *
  * @author yuanke
  */
@@ -21,9 +23,22 @@ import java.util.Set;
 public class KeywordExtractor {
 
     private final ConfigService configService;
+    /** jieba 分词器（线程安全，可共享单例） */
+    private final JiebaSegmenter segmenter;
 
     public KeywordExtractor(ConfigService configService) {
         this.configService = configService;
+        this.segmenter = new JiebaSegmenter();
+    }
+
+    /** 预热：WordDictionary 懒加载单例，首次调用加载词典较慢，启动时先跑一次避免并发首访竞态 */
+    @PostConstruct
+    void warmup() {
+        try {
+            segmenter.process("预热测试分词加载", JiebaSegmenter.SegMode.SEARCH);
+        } catch (Exception e) {
+            // 词典加载失败不影响启动，首次实际调用时会重试
+        }
     }
 
     /** 常见停用词（疑问词/语气词/无检索价值）。注意：Set.of 不允许重复元素！ */
@@ -37,27 +52,25 @@ public class KeywordExtractor {
     private static final Set<Character> STOP_CHARS = Set.of(
             '的', '了', '吗', '呢', '吧', '啊', '么', '是', '在', '和', '与', '请', '我', '你', '它', '这', '那');
 
-    /** 原词最大数 / 原词+bigram 总词元上限（控制 LIKE OR 数量与 SQL 开销）；retrieval.keywordMax* 可调 */
+    /** 原词最大数 / 原词+子词元总上限（控制 LIKE OR 数量与 SQL 开销）；retrieval.keywordMax* 可调 */
     private int maxTerms() { return configService.getInt("retrieval.keywordMaxTerms", 6); }
     private int maxTotal() { return configService.getInt("retrieval.keywordMaxTotal", 12); }
 
     /**
-     * 提取检索词元（主词元优先，子词元补充；空输入返回空列表）
+     * 提取检索词元（jieba 主词元优先，子词元补充；空输入返回空列表）
      */
     public List<String> extract(String query) {
         if (query == null || query.isBlank()) return List.of();
-        // 按标点/空白切分（保留中英文数字连续串）
-        String[] parts = query.split("[\\s\\p{Punct}，。、；：！？（）【】“”‘’·…—]+");
         LinkedHashSet<String> mainTerms = new LinkedHashSet<>();
         LinkedHashSet<String> subTerms = new LinkedHashSet<>();
-        for (String part : parts) {
-            String t = part.trim();
+        for (SegToken token : segmenter.process(query, JiebaSegmenter.SegMode.SEARCH)) {
+            String t = token.word.trim();
             if (t.length() < 2) continue;               // 单字无检索价值
             if (STOP_WORDS.contains(t)) continue;
             mainTerms.add(t);
             // 补充子词元（提高"换说法/子串"场景召回，LIKE 全词匹配不到子内容）
             if (isPureChinese(t) && t.length() >= 3) {
-                // 纯中文词：2-gram 子词元（"表单""创建"等有效词）
+                // 纯中文长词：2-gram 子词元（"表单""创建"等有效词）
                 for (int i = 0; i < t.length() - 1; i++) {
                     String g = t.substring(i, i + 2);
                     if (STOP_CHARS.contains(g.charAt(0)) || STOP_CHARS.contains(g.charAt(1))) continue;
@@ -72,7 +85,7 @@ public class KeywordExtractor {
                 }
             }
         }
-        // 主词元按长度降序（长词更精准），子词元按长度降序，取前 MAX_TERMS 个主词元
+        // 主词元按长度降序（长词更精准），子词元按长度降序，取前 maxTerms 个主词元
         List<String> main = mainTerms.stream()
                 .sorted((a, b) -> b.length() - a.length())
                 .limit(maxTerms()).toList();

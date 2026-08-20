@@ -691,7 +691,8 @@ public class RagService {
 
     private String snippet(String content) {
         if (content == null) return "";
-        String s = content.replaceAll("\\[图片[^\\]]*\\]", " ").trim();
+        // 剥离图片标记与【上下文】章节路径前缀（结构切分注入，不展示给用户）
+        String s = content.replaceAll("\\[图片[^\\]]*\\]|【上下文】[^\\n]*\\n?", " ").trim();
         return s.length() > SNIPPET_LEN ? s.substring(0, SNIPPET_LEN) + "…" : s;
     }
 

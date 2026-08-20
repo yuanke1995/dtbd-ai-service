@@ -43,6 +43,8 @@ public class ConfigService {
             Map.entry("chunk.maxChunks", "单文档最大知识块数(0=不限制)"),
             Map.entry("chunk.maxImages", "单文档最多提取图片数(0=不限制)"),
             Map.entry("chunk.overlap", "分块重叠字符数(0=关闭)"),
+            Map.entry("chunk.structural", "结构感知切分(标题/段落边界+章节路径注入,需重解析)"),
+            Map.entry("chunk.structuralRatio", "结构切分边界阈值比例(0~1,达到maxSize×比例优先段落断块)"),
             Map.entry("upload.maxFileSize", "文档上传大小上限(字节,保存即生效)"),
             Map.entry("retrieval.vectorWeight", "混合检索：向量权重(0~1)"),
             Map.entry("retrieval.keywordWeight", "混合检索：关键词权重(0~1)"),
@@ -206,6 +208,8 @@ public class ConfigService {
         d.put("chunk.maxChunks", String.valueOf(properties.getChunk().getMaxChunks()));
         d.put("chunk.maxImages", String.valueOf(properties.getChunk().getMaxImages()));
         d.put("chunk.overlap", String.valueOf(properties.getChunk().getOverlap()));
+        d.put("chunk.structural", String.valueOf(properties.getChunk().isStructural()));
+        d.put("chunk.structuralRatio", String.valueOf(properties.getChunk().getStructuralRatio()));
         d.put("upload.maxFileSize", String.valueOf(200L * 1024 * 1024));  // 业务上传上限（字节），默认 200MB
         d.put("retrieval.vectorWeight", String.valueOf(properties.getRetrieval().getVectorWeight()));
         d.put("retrieval.keywordWeight", String.valueOf(properties.getRetrieval().getKeywordWeight()));
@@ -368,7 +372,7 @@ public class ConfigService {
             if (t < 0 || t > 2) throw new IllegalArgumentException("temperature 需在 0~2 之间");
         }
         // 检索权重校验：必须是 0~1 的数字（防非法值导致检索排序异常）
-        for (String wKey : new String[]{"retrieval.vectorWeight", "retrieval.keywordWeight", "retrieval.titleBonus", "context.safetyFactor"}) {
+        for (String wKey : new String[]{"retrieval.vectorWeight", "retrieval.keywordWeight", "retrieval.titleBonus", "context.safetyFactor", "chunk.structuralRatio"}) {
             String w = updates.get(wKey);
             if (w != null && !w.isBlank()) {
                 try {
@@ -406,7 +410,7 @@ public class ConfigService {
                 }
             }
         }
-        for (String bKey : new String[]{"deepReasoning.enabled", "deepReasoning.enableThinking", "deepReasoning.multiRetrieval"}) {
+        for (String bKey : new String[]{"deepReasoning.enabled", "deepReasoning.enableThinking", "deepReasoning.multiRetrieval", "chunk.structural"}) {
             String v = updates.get(bKey);
             if (v != null && !v.isBlank() && !"true".equalsIgnoreCase(v) && !"false".equalsIgnoreCase(v)) {
                 throw new IllegalArgumentException(bKey + " 仅允许 true / false");

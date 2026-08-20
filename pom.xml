@@ -98,6 +98,12 @@
             <artifactId>fastjson2</artifactId>
             <version>2.0.31</version>
         </dependency>
+        <!-- 中文分词（jieba，替换自研 2-gram/4-gram 启发式） -->
+        <dependency>
+            <groupId>com.huaban</groupId>
+            <artifactId>jieba-analysis</artifactId>
+            <version>1.0.2</version>
+        </dependency>
         <!-- SpringDoc OpenAPI (Swagger UI)，Boot 3.5 对应 2.8.x -->
         <dependency>
             <groupId>org.springdoc</groupId>

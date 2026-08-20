@@ -105,8 +105,15 @@ public class DocxParser implements DocumentParser {
     public List<Chunk> parse(byte[] bytes, String fileName, String docId, ParseProgress progress) throws IOException {
         List<Chunk> chunks = new ArrayList<>();
         int maxSize = properties.getChunk().getMaxSize();
+        // 结构感知切分（chunk.structural 可配，默认开）：标题栈 → 章节路径；边界优先阈值 = maxSize × ratio
+        boolean structural = configService.getBoolean("chunk.structural");
+        double ratio = Math.min(1.0, Math.max(0.5, configService.getDouble("chunk.structuralRatio", 0.8)));
+        int boundaryThreshold = (int) (maxSize * ratio);
         String title = "概述";
         StringBuilder content = new StringBuilder();
+        // 标题栈（结构感知：章节路径注入用；Deque 末尾为当前章节）
+        ArrayDeque<String> titleStack = new ArrayDeque<>();
+        String titlePath = "";
         // 当前分块待处理图片（描述异步并发生成，flush 时统一 join）
         List<SavedImage> currentImages = new ArrayList<>();
         // checksum -> 已保存图片（文档内去重，复用 URL 与描述）
@@ -132,9 +139,16 @@ public class DocxParser implements DocumentParser {
 
                     int level = headingLevel(p);
                     if (level > 0 && level <= 3) {
-                        // 遇标题 flush 当前块
-                        flushChunk(title, content, currentImages, chunks);
-                        title = text;
+                        // 遇标题 flush 当前块（结构模式：按层级维护标题栈生成章节路径）
+                        flushChunk(title, content, currentImages, chunks, titlePath);
+                        if (structural) {
+                            while (!titleStack.isEmpty() && titleStack.size() >= level) titleStack.pollLast();
+                            titleStack.addLast(text);
+                            title = text;
+                            titlePath = titleStack.size() >= 2 ? String.join(" > ", titleStack) : "";
+                        } else {
+                            title = text;
+                        }
                         continue;
                     }
 
@@ -160,17 +174,31 @@ public class DocxParser implements DocumentParser {
                     XWPFTable table = (XWPFTable) element;
                     StringBuilder tableText = buildMarkdownTable(table);
                     if (tableText.length() > 0) {
-                        if (content.length() > 0) content.append("\n");
-                        content.append(tableText);
+                        if (structural) {
+                            // 结构模式：表格独立成块（不与其他段落混杂，保持结构语义）；超长表格按行拆（重复表头/重开围栏，保持语法有效）
+                            flushChunk(title, content, currentImages, chunks, titlePath);
+                            addTableChunks(title, tableText.toString(), titlePath, chunks, maxSize);
+                        } else {
+                            if (content.length() > 0) content.append("\n");
+                            content.append(tableText);
+                        }
                     }
                 }
 
-                // 通用超长 flush（图片描述按平均 40 字估算计入长度，保持原有分块粒度）
-                if (content.length() + currentImages.size() * 40 > maxSize) {
-                    flushChunk(title, content, currentImages, chunks);
+                // 超长 flush（图片描述按平均 40 字估算计入长度）
+                int estimated = content.length() + currentImages.size() * 40;
+                if (structural) {
+                    // 结构模式：≥maxSize 硬切（按段落/句边界拆多块，单块 ≤maxSize）；[阈值,maxSize) 在段落边界断块
+                    if (estimated >= maxSize) {
+                        flushStructural(title, content, currentImages, chunks, titlePath, maxSize);
+                    } else if (estimated >= boundaryThreshold) {
+                        flushChunk(title, content, currentImages, chunks, titlePath);
+                    }
+                } else if (estimated > maxSize) {
+                    flushChunk(title, content, currentImages, chunks, titlePath);
                 }
             }
-            flushChunk(title, content, currentImages, chunks);
+            flushChunk(title, content, currentImages, chunks, titlePath);
         }
         return chunks;
     }
@@ -402,30 +430,203 @@ public class DocxParser implements DocumentParser {
      * flush 当前分块：join 并发描述结果，并将 content 中 [图片] 占位按序替换为 [图片：描述]
      * （占位在解析时写入原文位置，因此图文天然交错）
      */
-    private void flushChunk(String title, StringBuilder content, List<SavedImage> currentImages, List<Chunk> chunks) {
+    private void flushChunk(String title, StringBuilder content, List<SavedImage> currentImages, List<Chunk> chunks, String titlePath) {
         if (content.length() == 0 && currentImages.isEmpty()) return;
-        String finalContent = content.toString();
-        if (!currentImages.isEmpty()) {
-            StringBuilder out = new StringBuilder();
-            Matcher m = Pattern.compile("\\[图片]").matcher(finalContent);
-            int imgIdx = 0;
-            while (m.find() && imgIdx < currentImages.size()) {
-                SavedImage img = currentImages.get(imgIdx++);
-                String desc = img.descFuture().join();
-                m.appendReplacement(out, desc.isBlank()
-                        ? "[图片]"
-                        : "[图片：" + Matcher.quoteReplacement(desc) + "]");
-            }
-            m.appendTail(out);
-            if (imgIdx != currentImages.size()) {
-                log.warn("图片占位与图片数不一致: 占位{} 图片{}", imgIdx, currentImages.size());
-            }
-            finalContent = out.toString();
-        }
-        chunks.add(new Chunk(title, finalContent,
-                currentImages.stream().map(SavedImage::url).toList()));
+        chunks.add(buildChunk(title, resolveImagePlaceholders(content.toString(), currentImages),
+                imageUrls(currentImages), titlePath));
         content.setLength(0);
         currentImages.clear();
+    }
+
+    /**
+     * 结构模式超长块硬切：内容 ≤maxSize 单块；超长按段落/句边界拆成多块（单块 ≤maxSize，预留路径前缀空间），
+     * 图片 URL 按各段 [图片] 占位出现顺序切片对应
+     */
+    private void flushStructural(String title, StringBuilder content, List<SavedImage> currentImages,
+                                 List<Chunk> chunks, String titlePath, int maxSize) {
+        if (content.length() == 0 && currentImages.isEmpty()) return;
+        String resolved = resolveImagePlaceholders(content.toString(), currentImages);
+        String prefix = buildPathPrefix(titlePath);
+        if (resolved.length() <= maxSize) {
+            chunks.add(new Chunk(title, prefix + resolved, imageUrls(currentImages)));
+        } else {
+            int splitMax = Math.max(200, maxSize - prefix.length());
+            List<String> urls = imageUrls(currentImages);
+            int imgIdx = 0;
+            for (String seg : splitByBoundaries(resolved, splitMax)) {
+                List<String> segUrls = new ArrayList<>();
+                for (int i = 0; i < countOccurrences(seg, "[图片") && imgIdx < urls.size(); i++) {
+                    segUrls.add(urls.get(imgIdx++));
+                }
+                chunks.add(new Chunk(title, prefix + seg, segUrls));
+            }
+        }
+        content.setLength(0);
+        currentImages.clear();
+    }
+
+    /** 结构模式表格入块：≤maxSize 单块；超长按行拆（代码块表格重开/闭合围栏，Markdown 表格重复表头） */
+    private void addTableChunks(String title, String tableText, String titlePath, List<Chunk> chunks, int maxSize) {
+        String prefix = buildPathPrefix(titlePath);
+        if (tableText.length() <= maxSize) {
+            chunks.add(new Chunk(title, prefix + tableText, List.of()));
+            return;
+        }
+        for (String seg : splitTableRows(tableText, maxSize)) {
+            chunks.add(new Chunk(title, prefix + seg, List.of()));
+        }
+    }
+
+    /**
+     * 超长文本按边界硬切：段落（\n）为单元贪心打包；超长段落按句（。！？；）拆；
+     * 单句仍超长按字符硬切（兜底）
+     */
+    private List<String> splitByBoundaries(String text, int max) {
+        List<String> result = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        for (String para : text.split("\n", -1)) {
+            if (para.isEmpty()) continue;
+            List<String> pieces = para.length() <= max ? List.of(para) : splitLongPara(para, max);
+            for (String piece : pieces) {
+                if (cur.length() > 0 && cur.length() + piece.length() > max) {
+                    result.add(cur.toString());
+                    cur.setLength(0);
+                }
+                if (cur.length() > 0) cur.append("\n");
+                cur.append(piece);
+            }
+        }
+        if (cur.length() > 0) result.add(cur.toString());
+        return result;
+    }
+
+    /** 超长段落按句拆（保留标点），单句仍超长按字符硬切 */
+    private List<String> splitLongPara(String para, int max) {
+        List<String> pieces = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        for (String s : splitSentences(para)) {
+            if (s.length() > max) {
+                if (cur.length() > 0) {
+                    pieces.add(cur.toString());
+                    cur.setLength(0);
+                }
+                for (int i = 0; i < s.length(); i += max) {
+                    pieces.add(s.substring(i, Math.min(s.length(), i + max)));
+                }
+                continue;
+            }
+            if (cur.length() > 0 && cur.length() + s.length() > max) {
+                pieces.add(cur.toString());
+                cur.setLength(0);
+            }
+            cur.append(s);
+        }
+        if (cur.length() > 0) pieces.add(cur.toString());
+        return pieces;
+    }
+
+    /** 按句末标点拆句（保留标点）；[图片...] 标记内的标点不拆；无标点返回整段 */
+    private List<String> splitSentences(String para) {
+        List<String> out = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        boolean inMarker = false;
+        for (int i = 0; i < para.length(); i++) {
+            char c = para.charAt(i);
+            cur.append(c);
+            if (c == '[' && !inMarker) inMarker = true;
+            else if (c == ']' && inMarker) inMarker = false;
+            if (!inMarker && (c == '。' || c == '！' || c == '？' || c == '；' || c == '!' || c == '?' || c == ';')) {
+                out.add(cur.toString());
+                cur.setLength(0);
+            }
+        }
+        if (cur.length() > 0) out.add(cur.toString());
+        return out.isEmpty() ? List.of(para) : out;
+    }
+
+    /** 超长表格按行拆：代码块表格（``` 包裹）重开/闭合围栏；Markdown 表格每段重复表头+分隔行 */
+    private List<String> splitTableRows(String tableText, int max) {
+        String[] lines = tableText.split("\n", -1);
+        if (tableText.startsWith("```")) {
+            List<String> rows = new ArrayList<>();
+            for (int i = 1; i < lines.length - 1; i++) rows.add(lines[i]);
+            List<String> result = new ArrayList<>();
+            StringBuilder cur = new StringBuilder("```\n");
+            for (String r : rows) {
+                if (cur.length() > 4 && cur.length() + r.length() + 4 > max) {
+                    cur.append("```");
+                    result.add(cur.toString());
+                    cur = new StringBuilder("```\n");
+                }
+                if (cur.length() > 4) cur.append("\n");
+                cur.append(r);
+            }
+            if (cur.length() > 4) {
+                cur.append("```");
+                result.add(cur.toString());
+            }
+            return result;
+        }
+        // Markdown 表格：表头行 + 分隔行作为每段的重复前缀（保持每段都是合法表格）
+        if (lines.length < 2) return List.of(tableText);
+        String header = lines[0] + "\n" + lines[1] + "\n";
+        List<String> result = new ArrayList<>();
+        StringBuilder cur = new StringBuilder(header);
+        for (int i = 2; i < lines.length; i++) {
+            String r = lines[i];
+            if (r.isBlank()) continue;
+            if (cur.length() > header.length() && cur.length() + r.length() + 1 > max) {
+                result.add(cur.toString());
+                cur = new StringBuilder(header);
+            }
+            cur.append(r).append("\n");
+        }
+        if (cur.length() > header.length()) result.add(cur.toString());
+        return result;
+    }
+
+    /** [图片] 占位按序替换为 [图片：描述]（join 并发描述结果） */
+    private String resolveImagePlaceholders(String rawContent, List<SavedImage> currentImages) {
+        if (currentImages.isEmpty()) return rawContent;
+        StringBuilder out = new StringBuilder();
+        Matcher m = Pattern.compile("\\[图片]").matcher(rawContent);
+        int imgIdx = 0;
+        while (m.find() && imgIdx < currentImages.size()) {
+            SavedImage img = currentImages.get(imgIdx++);
+            String desc = img.descFuture().join();
+            m.appendReplacement(out, desc.isBlank()
+                    ? "[图片]"
+                    : "[图片：" + Matcher.quoteReplacement(desc) + "]");
+        }
+        m.appendTail(out);
+        if (imgIdx != currentImages.size()) {
+            log.warn("图片占位与图片数不一致: 占位{} 图片{}", imgIdx, currentImages.size());
+        }
+        return out.toString();
+    }
+
+    /** 章节路径前缀（≥2 级才注入——参与向量语义匹配；title 保持短标题避免 titleBonus 误发） */
+    private String buildPathPrefix(String titlePath) {
+        return titlePath == null || titlePath.isBlank() ? "" : "【上下文】" + titlePath + "\n\n";
+    }
+
+    /** 组装分块：章节路径前缀 + 内容 + 图片 URL 列表 */
+    private Chunk buildChunk(String title, String text, List<String> images, String titlePath) {
+        return new Chunk(title, buildPathPrefix(titlePath) + text, images);
+    }
+
+    private List<String> imageUrls(List<SavedImage> currentImages) {
+        return currentImages.stream().map(SavedImage::url).toList();
+    }
+
+    private int countOccurrences(String text, String sub) {
+        if (text == null || sub.isEmpty()) return 0;
+        int count = 0, idx = 0;
+        while ((idx = text.indexOf(sub, idx)) >= 0) {
+            count++;
+            idx += sub.length();
+        }
+        return count;
     }
 
     /**

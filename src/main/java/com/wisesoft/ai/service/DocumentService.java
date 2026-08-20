@@ -853,7 +853,7 @@ public class DocumentService {
     /**
      * 分块重叠：除首块外，每块把上一块（原始内容）的尾部 overlap 字符作为前缀拼入，
      * 保留被硬切/标题分块截断处的上下文（表格、长代码跨块语义）。
-     * 重叠尾巴中剥离 [图片...] 标记，避免图片编号/URL 跨块重复。
+     * 重叠尾巴中剥离 [图片...] 标记与【上下文】路径前缀，避免图片编号/URL/章节路径跨块重复。
      */
     private List<Chunk> applyOverlap(List<Chunk> chunks, int overlapChars) {
         if (overlapChars <= 0 || chunks.size() <= 1) return chunks;
@@ -865,7 +865,7 @@ public class DocumentService {
                 if (!prevContent.isEmpty()) {
                     String tail = prevContent.length() <= overlapChars
                             ? prevContent : prevContent.substring(prevContent.length() - overlapChars);
-                    tail = tail.replaceAll("\\[图片[^\\]]*\\]", " ").trim();
+                    tail = tail.replaceAll("\\[图片[^\\]]*\\]|【上下文】[^\\n]*\\n?", " ").trim();
                     if (!tail.isEmpty()) {
                         c = new Chunk(c.title(), tail + c.content(), c.images());
                     }

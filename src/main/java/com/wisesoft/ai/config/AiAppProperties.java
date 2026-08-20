@@ -43,6 +43,10 @@ public class AiAppProperties {
         private int maxChunks = 3000;
         /** 单文档最多提取图片数（0=不限制；防止图片爆炸导致视觉描述数小时） */
         private int maxImages = 100;
+        /** 结构感知切分：标题/段落边界优先断块 + 章节标题路径注入（docx 生效，需重解析） */
+        private boolean structural = true;
+        /** 结构切分边界阈值比例（达到 maxSize×该比例时优先在段落边界断块） */
+        private double structuralRatio = 0.8;
     }
 
     @Data

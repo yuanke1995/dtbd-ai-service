@@ -113,6 +113,16 @@
               <a-input-number v-model:value="form.chunk.ocrMinText" :min="0" :step="5" style="width:200px" />
               <span style="margin-left:12px;color:#999;font-size:12px">页文本少于该长度触发 OCR</span>
             </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.chunkStructural" placement="top">结构感知切分 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.chunk.structural" />
+              <span style="margin-left:12px;color:#999;font-size:12px">标题/段落边界优先 + 章节路径注入，需重解析生效</span>
+            </a-form-item>
+            <a-form-item v-if="form.chunk.structural">
+              <template #label><a-tooltip :title="tips.chunkStructuralRatio" placement="top">边界阈值比例 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chunk.structuralRatio" :min="0.5" :max="1" :step="0.05" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">达到 maxSize×比例 时优先在段落边界断块</span>
+            </a-form-item>
           </a-form>
           <a-alert type="info" show-icon style="margin:0 24px 16px"
                    message="上传大小上限保存即生效（新上传按新限制校验）；分块/图片上限对超大文档保护：知识块数超上限截断入库，图片数超上限不再提取描述。分块重叠与分块/图片上限均只对重新解析/新上传文档生效。" />
@@ -375,6 +385,8 @@ const tips = {
   pipelineThreads: '问答流水线的并发线程数：图片识别、查询改写、检索、深度思考等"重活"在独立线程池执行，不占 Tomcat 请求线程（多用户并发问答时避免请求线程被打满）。调高可支撑更多并发用户，但占用更多 CPU/内存；队列满时新请求会快速返回"系统繁忙"。保存即生效。',
   parseConcurrency: '文档异步解析的并发数（同时解析几个文档）。调高多文档上传更快，但并发解析会同时占用 embedding/Ollama 资源；保存后对新任务生效。',
   ocrMinText: 'PDF 页文本少于该长度判定为扫描件/图片型，触发 OCR 识别（0=总是 OCR）。调高更激进触发 OCR，调低更依赖 PDF 自带文本。',
+  chunkStructural: '按文档结构切分：标题层级开新块、达到边界阈值在段落边界断块（避免从句子中间硬切）、章节标题路径注入块上下文。docx 生效；存量文档需重解析后才会按新规则重建知识块。',
+  chunkStructuralRatio: '结构切分边界阈值（maxSize×比例）：块达到该长度时优先在段落边界断块。调低块更小更贴近边界但块数更多；调高更接近原 800 字硬切。',
   userImageConcurrency: '用户在对话中上传图片的识别并发数（区别于文档解析的图片描述并发）。',
   vecThreshold: '向量相似度归一化基准：低于该分的向量命中归一化为 0 分，也是向量检索的相似度下限。调高更严格（召回更少但更相关）。',
   keywordLimit: '关键词检索最多返回的知识块数（SQL LIMIT）。调高召回更全但更慢、融合分计算更重。',
@@ -409,7 +421,7 @@ const onRerankEnabledChange = async checked => {
 }
 const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8 },
                     vision: { model: '', prompt: '', concurrency: 4, userImageConcurrency: 2 },
-                    chunk: { maxChunks: 3000, maxImages: 100, overlap: 100, concurrency: 2, ocrMinText: 20 },
+                    chunk: { maxChunks: 3000, maxImages: 100, overlap: 100, concurrency: 2, ocrMinText: 20, structural: true, structuralRatio: 0.8 },
                     upload: { maxFileSizeMB: 200 },
                     retrieval: { vectorWeight: 0.6, keywordWeight: 0.4, titleBonus: 0.1,
                                  vecThreshold: 0.3, keywordLimit: 20, keywordTimeoutMs: 800, searchTimeoutMs: 8000,
@@ -448,6 +460,8 @@ onMounted(async () => {
       form.value.chunk.overlap = Number(ck.overlap?.value ?? 100)
       form.value.chunk.concurrency = Number(ck.concurrency?.value ?? 2)
       form.value.chunk.ocrMinText = Number(ck.ocrMinText?.value ?? 20)
+      form.value.chunk.structural = ck.structural?.value !== 'false'
+      form.value.chunk.structuralRatio = Number(ck.structuralRatio?.value ?? 0.8)
       const up = d.upload || {}
       form.value.upload.maxFileSizeMB = Math.round(Number(up.maxFileSize?.value ?? 209715200) / 1024 / 1024)
       form.value.retrieval.vectorWeight = Number(d.retrieval?.vectorWeight?.value ?? 0.6)
@@ -528,7 +542,9 @@ const save = async () => {
                 userImageConcurrency: String(form.value.vision.userImageConcurrency) },
       chunk: { maxChunks: String(form.value.chunk.maxChunks), maxImages: String(form.value.chunk.maxImages),
                overlap: String(form.value.chunk.overlap),
-               concurrency: String(form.value.chunk.concurrency), ocrMinText: String(form.value.chunk.ocrMinText) },
+               concurrency: String(form.value.chunk.concurrency), ocrMinText: String(form.value.chunk.ocrMinText),
+               structural: String(form.value.chunk.structural),
+               structuralRatio: String(form.value.chunk.structuralRatio) },
       upload: { maxFileSize: String(form.value.upload.maxFileSizeMB * 1024 * 1024) },
       retrieval: { vectorWeight: String(form.value.retrieval.vectorWeight),
                    keywordWeight: String(form.value.retrieval.keywordWeight),

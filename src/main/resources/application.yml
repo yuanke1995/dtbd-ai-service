@@ -80,6 +80,11 @@ ai-app:
   chunk:
     max-size: 800
     overlap: 100
+    # 单文档解析的最大知识块数（0=不限制；防止超大文档 embedding 数万次）
+    max-chunks: 3000
+    # 结构感知切分：标题/段落边界优先 + 章节标题路径注入（docx 生效，存量文档需重解析）
+    structural: true
+    structural-ratio: 0.8
   # 检索
   retrieval:
     top-k: 5
