@@ -6,8 +6,12 @@ import com.wisesoft.ai.mapper.AiConfigMapper;
 import com.wisesoft.ai.model.AiConfig;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.core.env.Environment;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPubSub;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -69,26 +73,101 @@ public class ConfigService {
     private final AiConfigMapper configMapper;
     private final AiAppProperties properties;
     private final Environment environment;
+    private final StringRedisTemplate redisTemplate;
+    private final RedisProperties redisProperties;
+
+    /** 配置变更广播 channel（多实例同步：任意实例保存配置 → 其他实例订阅后重载缓存） */
+    public static final String CONFIG_CHANNEL = "ai:config:changed";
 
     private volatile Map<String, String> cache = new HashMap<>();
 
-    public ConfigService(AiConfigMapper configMapper, AiAppProperties properties, Environment environment) {
+    public ConfigService(AiConfigMapper configMapper, AiAppProperties properties, Environment environment,
+                         StringRedisTemplate redisTemplate, RedisProperties redisProperties) {
         this.configMapper = configMapper;
         this.properties = properties;
         this.environment = environment;
+        this.redisTemplate = redisTemplate;
+        this.redisProperties = redisProperties;
     }
 
     @jakarta.annotation.PostConstruct
     public void init() {
         // 缺失的默认项自动补入（存量升级场景：新增 key 自动注入，不覆盖已有配置）
         ensureDefaults();
-        List<AiConfig> all = configMapper.selectList(new LambdaQueryWrapper<AiConfig>());
-        Map<String, String> map = new HashMap<>();
-        for (AiConfig c : all) {
-            map.put(c.getConfigKey(), c.getConfigValue());
+        reload();
+        startRedisConfigSync();
+        log.info("模型配置加载完成，共 {} 项", cache.size());
+    }
+
+    /** 全量重读 c_ai_config 进缓存（本地更新 / Redis 订阅通知均调用） */
+    public void reload() {
+        try {
+            List<AiConfig> all = configMapper.selectList(new LambdaQueryWrapper<AiConfig>());
+            Map<String, String> map = new HashMap<>();
+            for (AiConfig c : all) {
+                map.put(c.getConfigKey(), c.getConfigValue());
+            }
+            cache = map;
+        } catch (Exception e) {
+            log.warn("[Config] 配置重载失败: {}", e.getMessage());
         }
-        cache = map;
-        log.info("模型配置加载完成，共 {} 项", map.size());
+    }
+
+    /**
+     * 多实例配置同步：daemon 线程订阅 Redis channel，任意实例保存配置后广播，
+     * 本实例收到即全量重载缓存（保存即生效跨实例成立）。Redis 不可用时仅告警不影响启动。
+     * 另起周期兜底 reload：订阅断线期间错过的变更由轮询补齐（每 5 分钟全量重读一次）。
+     */
+    private void startRedisConfigSync() {
+        Thread t = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try (Jedis jedis = new Jedis(redisProperties.getHost(), redisProperties.getPort(), 5000)) {
+                    if (redisProperties.getPassword() != null && !redisProperties.getPassword().isBlank()) {
+                        jedis.auth(redisProperties.getPassword());
+                    }
+                    jedis.subscribe(new JedisPubSub() {
+                        @Override
+                        public void onMessage(String channel, String message) {
+                            reload();
+                            log.info("[Config] 收到配置变更广播，已刷新缓存");
+                        }
+                    }, CONFIG_CHANNEL);
+                } catch (Exception e) {
+                    log.warn("[Config] Redis 配置同步订阅中断，5s 后重连: {}", e.getMessage());
+                    try {
+                        Thread.sleep(5000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        }, "config-redis-sync");
+        t.setDaemon(true);
+        t.start();
+
+        // 兜底轮询：订阅不可用时仍能收敛配置（防止长期不一致）
+        Thread poll = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Thread.sleep(5 * 60 * 1000L);
+                    reload();
+                    log.debug("[Config] 周期兜底刷新配置缓存");
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }, "config-sync-poll");
+        poll.setDaemon(true);
+        poll.start();
+    }
+
+    /** 本地保存后广播（其他实例订阅刷新；Redis 异常不影响保存结果） */
+    private void publishConfigChanged() {
+        try {
+            redisTemplate.convertAndSend(CONFIG_CHANNEL, "changed");
+        } catch (Exception e) {
+            log.debug("[Config] 配置变更广播失败: {}", e.getMessage());
+        }
     }
 
     /** 遍历 defaults()，DB 中缺失的 key 自动灌入默认值（单条失败不影响其余） */
@@ -388,6 +467,8 @@ public class ConfigService {
         newCache.putAll(updates);
         cache = newCache;
         log.info("模型配置已更新: {}", updates.keySet());
+        // 广播其他实例刷新（多副本部署配置同步）
+        publishConfigChanged();
         return updates;
     }
 

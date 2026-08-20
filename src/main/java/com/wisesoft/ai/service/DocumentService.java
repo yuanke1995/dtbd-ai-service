@@ -35,6 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -82,7 +83,7 @@ public class DocumentService {
 
     @PostConstruct
     void init() {
-        parseExecutor = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+        parseExecutor = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(50));
         // 跨平台保护：Windows 绝对路径（如 D:/xxx、C:\xxx）在非 Windows 系统上会被 Paths.get() 当作
         // 相对路径，拼到 Tomcat 工作目录下导致上传/落盘失败。检测到即回退默认 ./data 并告警。
         String dir = properties.getImages().getDir();
@@ -91,6 +92,8 @@ public class DocumentService {
                     + "请在启动时通过环境变量 AI_IMAGES_DIR 指定正确的绝对路径", dir);
             properties.getImages().setDir("data");
         }
+        // 多副本提示：数据目录（源文件/图片/评估集）必须指向共享存储，各副本才能访问同一批产物
+        log.info("数据目录: {}（多副本部署请确认所有实例指向同一共享存储）", properties.getImages().getDir());
     }
 
     @PreDestroy
@@ -147,7 +150,13 @@ public class DocumentService {
         }
         final DocumentParser fp = parser;
         syncParseConcurrency();
-        parseExecutor.submit(() -> processUpload(doc.getId(), fileName, source, fp));
+        try {
+            parseExecutor.submit(() -> processUpload(doc.getId(), fileName, source, fp));
+        } catch (RejectedExecutionException e) {
+            // 队列满（≥50 待解析任务）：拒绝新任务，清理本次记录避免脏数据
+            documentMapper.deleteById(doc.getId());
+            throw new BizException("解析队列繁忙（已有 50 个待解析任务），请稍后再试");
+        }
         return doc;
     }
 
@@ -357,6 +366,9 @@ public class DocumentService {
      */
     public void delete(String docId) {
         // 立即标记删除 + 中断解析线程（图片 join 等待立即响应，不再等阶段检查点）
+        // 多实例语义：deletedFlags/parseThreads 为进程内存态——本实例解析的任务可立即中断；
+        // 其他实例上运行的解析任务由 isDocAlive 的 DB 兜底感知（删除后 selectById 为 null），
+        // 在阶段检查点（入库每 10 块/向量化每批）秒级停止并清理产物，保证跨实例不产生孤儿数据。
         deletedFlags.put(docId, true);
         Thread parseThread = parseThreads.get(docId);
         if (parseThread != null && parseThread.isAlive()) {
@@ -715,6 +727,15 @@ public class DocumentService {
                 .findFirst().orElse(null);
         if (parser == null) throw new BizException("不支持的文件格式");
 
+        // 并发防护（多实例也原子）：CAS 抢占"解析中"状态，失败说明已有解析在进行
+        int locked = documentMapper.update(null, new LambdaUpdateWrapper<AiDocument>()
+                .eq(AiDocument::getId, docId)
+                .and(w -> w.ne(AiDocument::getStatus, 2).or().isNull(AiDocument::getStatus))
+                .set(AiDocument::getStatus, 2));
+        if (locked == 0) {
+            throw new BizException("该文档正在解析中，请等待完成后再操作");
+        }
+
         // 重解析前先保存当前状态快照（作为版本历史），再清理旧向量与元数据
         try {
             saveSnapshot(docId, doc.getVersion() == null ? 0 : doc.getVersion());
@@ -731,7 +752,14 @@ public class DocumentService {
 
         final DocumentParser fp = parser;
         syncParseConcurrency();
-        parseExecutor.submit(() -> processUpload(docId, doc.getFileName(), source, fp));
+        try {
+            parseExecutor.submit(() -> processUpload(docId, doc.getFileName(), source, fp));
+        } catch (RejectedExecutionException e) {
+            // 队列满：恢复文档原状态（避免停留在"解析中"）
+            documentMapper.update(null, new LambdaUpdateWrapper<AiDocument>()
+                    .eq(AiDocument::getId, docId).set(AiDocument::getStatus, doc.getStatus() == null ? 0 : doc.getStatus()));
+            throw new BizException("解析队列繁忙（已有 50 个待解析任务），请稍后再试");
+        }
     }
 
     /**

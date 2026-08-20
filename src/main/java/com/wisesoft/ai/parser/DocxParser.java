@@ -54,7 +54,11 @@ public class DocxParser implements DocumentParser {
         this.visionService = visionService;
         this.configService = configService;
         this.visionSemaphore = new Semaphore(Math.max(1, properties.getVision().getConcurrency()));
-        this.visionExecutor = Executors.newCachedThreadPool(r -> {
+        // 有界线程池（替代 cached：图片多时 cached 会为每张图建阻塞线程，线程数随图片数膨胀）
+        // 队列 = 并发×2，满则拒绝并降级为无描述（图片仍展示），避免资源失控
+        int c = Math.max(1, properties.getVision().getConcurrency());
+        this.visionExecutor = new ThreadPoolExecutor(c, c, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(c * 2), r -> {
             Thread t = new Thread(r, "vision-desc");
             t.setDaemon(true);
             return t;
@@ -263,14 +267,22 @@ public class DocxParser implements DocumentParser {
                 // 并发限流（动态信号量，保存即生效）
                 Semaphore sem = visionSemaphore();
                 sem.acquire();
-                CompletableFuture<String> descFuture = CompletableFuture.supplyAsync(
-                        () -> {
-                            try {
-                                return visionService.describe(ci.bytes(), ci.ext());
-                            } finally {
-                                sem.release();
-                            }
-                        }, visionExecutor);
+                CompletableFuture<String> descFuture;
+                try {
+                    descFuture = CompletableFuture.supplyAsync(
+                            () -> {
+                                try {
+                                    return visionService.describe(ci.bytes(), ci.ext());
+                                } finally {
+                                    sem.release();
+                                }
+                            }, visionExecutor);
+                } catch (RejectedExecutionException e) {
+                    // 图片描述队列已满：释放许可并降级为无描述（图片仍落盘展示，不阻断解析）
+                    sem.release();
+                    log.warn("[{}] 图片描述任务队列已满，该图降级为无描述", docId);
+                    descFuture = CompletableFuture.completedFuture(null);
+                }
                 // 图片识别进度：每张描述完成（成功/失败均计数）上报一次
                 if (imageProgress != null) {
                     final ImageProgress p = imageProgress;
