@@ -91,6 +91,8 @@ public class RerankService {
      */
     public List<HybridRetrievalService.Hit> rank(List<HybridRetrievalService.Hit> candidates, String query) {
         if (!enabled() || candidates == null || candidates.size() < 2) return candidates;
+        // 防御：query 为空/null 时服务端 400（"query and documents required"）——直接跳过重排回退融合分排序
+        if (query == null || query.isBlank()) return candidates;
         if (!checkSupport()) return candidates;
 
         try {
@@ -118,16 +120,36 @@ public class RerankService {
         }
     }
 
+    /**
+     * 调试用：返回当前重排不可用的具体原因（null = 可执行）
+     * 供检索调试展示"为什么没重排"，避免误以为重排已生效
+     */
+    public String debugUnavailableReason() {
+        if (!enabled()) {
+            return "未启用：设置页「检索设置 → 启用重排」未打开（AI_RERANK_ENABLED）";
+        }
+        if (!checkSupport()) {
+            if (System.currentTimeMillis() - lastFailTs < failCooldownMs()) {
+                return "重排服务调用失败，冷却中（" + failCooldownMs() / 1000 + "s 后自动重试）";
+            }
+            return "重排服务探测失败（/v1/models 无响应），请确认本地 reranker 已启动（scripts/win/start_rerank_server.bat）";
+        }
+        return null;
+    }
+
     /** OpenAI 兼容 /v1/rerank：真交叉编码重排，直接返回 relevance_score */
     private List<Double> rankByOpenAiRerank(String query, List<String> docs) throws Exception {
+        if (docs == null || docs.isEmpty()) return null;
         Map<String, Object> body = new HashMap<>();
         body.put("model", model());
-        body.put("query", query);
+        // 防御：query 为空时服务端 400（"query and documents required"），空串可发但服务端仍判空——调用方保证非空
+        body.put("query", query == null ? "" : query);
         body.put("documents", docs);
         body.put("top_n", docs.size());
 
         String resp = client().post()
                 .uri("/v1/rerank")
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
                 .body(body)
                 .retrieve()
                 .body(String.class);

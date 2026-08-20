@@ -103,8 +103,15 @@ public class RetrievalDebugController {
         // 4. 重排（与 RagService 相同条件：6~15 条才重排）
         List<HybridRetrievalService.Hit> reranked = merged;
         if (merged.size() > RERANK_MIN && merged.size() <= RERANK_MAX) {
-            reranked = rerankService.rank(merged, query);
-            result.put("rerankApplied", true);
+            String reason = rerankService.debugUnavailableReason();
+            if (reason != null) {
+                // 未启用/服务不可用/冷却中——真实反映"没重排"及原因
+                result.put("rerankApplied", false);
+                result.put("rerankSkipReason", reason);
+            } else {
+                reranked = rerankService.rank(merged, query);
+                result.put("rerankApplied", true);
+            }
         } else {
             result.put("rerankApplied", false);
             result.put("rerankSkipReason", merged.size() <= RERANK_MIN ? "命中过少（≤" + RERANK_MIN + "）无需重排"

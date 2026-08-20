@@ -62,8 +62,31 @@ def rerank(query, documents, top_n=None):
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # keep-alive；兼容 chunked 请求体
+
     def log_message(self, *a):
         pass
+
+    def _read_body(self):
+        """兼容 Content-Length 与 Transfer-Encoding: chunked 两种请求体"""
+        n = int(self.headers.get("Content-Length", 0))
+        if n > 0:
+            return self.rfile.read(n)
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            data = b""
+            while True:
+                line = self.rfile.readline().strip()
+                try:
+                    size = int(line, 16)
+                except ValueError:
+                    break
+                if size == 0:
+                    self.rfile.readline()
+                    break
+                data += self.rfile.read(size)
+                self.rfile.readline()
+            return data
+        return b""
 
     def _json(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -83,12 +106,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            n = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(n) or b"{}")
-        except Exception:
+            raw = self._read_body()
+            body = json.loads(raw or b"{}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             self._json(400, {"error": "invalid json"})
             return
         if self.path.startswith("/v1/rerank"):
+            print(f"[rerank] POST /v1/rerank body={body}", flush=True)
             query = body.get("query", "")
             docs = body.get("documents", [])
             top_n = body.get("top_n", 0)
