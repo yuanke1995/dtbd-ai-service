@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.*;
@@ -291,7 +292,8 @@ public class DocxParser implements DocumentParser {
             try {
                 // 双图策略：压缩图只进内存供视觉模型识别（不落盘）；原图落盘用于回答/知识库展示（保持清晰）
                 CompressedImage ci = compress(data.getData(), ext);
-                String url = persistImage(data.getData(), ext, docId, imageCount[0]);
+                // 内容寻址文件名（sha256 原图字节）：同图跨重解析 URL 稳定 → 块 images 列表稳定 → 块级 diff 可复用；变更图生成新文件
+                String url = persistImage(data.getData(), ext, docId, sha256Hex(data.getData()));
                 // 并发限流（动态信号量，保存即生效）
                 Semaphore sem = visionSemaphore();
                 sem.acquire();
@@ -630,14 +632,29 @@ public class DocxParser implements DocumentParser {
     }
 
     /**
-     * 保存图片到 data/images/{docId}/{seq}.{ext}，返回访问 URL
+     * 保存图片到 data/images/{docId}/{sha256}.{ext}（内容寻址），返回访问 URL
+     * 同内容图片天然同路径：跨重解析 URL 稳定，复用块引用有效；变更图片自动落新文件
      */
-    private String persistImage(byte[] bytes, String ext, String docId, int seq) throws IOException {
+    private String persistImage(byte[] bytes, String ext, String docId, String hash) throws IOException {
         Path dir = Paths.get(properties.getImages().getDir(), "images", docId);
         Files.createDirectories(dir);
-        String filename = seq + "." + ext;
+        String filename = hash + "." + ext;
         Files.write(dir.resolve(filename), bytes);
         return properties.getImages().getUrlPrefix() + "/" + docId + "/" + filename;
+    }
+
+    /** 图片字节 SHA-256（hex） */
+    private static String sha256Hex(byte[] bytes) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest(bytes);
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : d) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            // MessageDigest 正常不会失败；极端兜底保证文件名唯一
+            return "img" + Long.toHexString(System.nanoTime());
+        }
     }
 
     /**

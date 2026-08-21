@@ -27,11 +27,13 @@ public class VisionService {
 
     private final AiAppProperties properties;
     private final ConfigService configService;
+    private final ImageDescCache imageDescCache;
     private final RestClient restClient;
 
-    public VisionService(AiAppProperties properties, ConfigService configService) {
+    public VisionService(AiAppProperties properties, ConfigService configService, ImageDescCache imageDescCache) {
         this.properties = properties;
         this.configService = configService;
+        this.imageDescCache = imageDescCache;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(10000);
         factory.setReadTimeout(properties.getVision().getTimeoutMillis());
@@ -50,18 +52,33 @@ public class VisionService {
 
     /**
      * 生成图片文字描述（自定义提示词，如 OCR）；任何失败返回 ""（降级，不中断主流程）
-     * 失败自动重试 retryCount 次（Ollama 偶发 500/超时）
+     * 先查内容寻址缓存（同图+同模型+同提示词直接复用上次结果，避免重解析重复调 VLM）；
+     * 未命中调 VLM，成功写缓存。失败自动重试 retryCount 次（Ollama 偶发 500/超时）
      */
     public String describe(byte[] imageBytes, String ext, String prompt) {
         if (!properties.getVision().isEnabled() || imageBytes == null || imageBytes.length == 0) {
             return "";
         }
+        String model = configService.get("vision.model");
+        String cacheKey = imageDescCache.key(imageBytes, prompt, model);
+        if (cacheKey != null) {
+            String cached = imageDescCache.get(cacheKey);
+            if (cached != null) {
+                log.debug("[Vision] 图片描述缓存命中");
+                return cached;
+            }
+        }
+
         int retry = Math.max(0, properties.getVision().getRetryCount());
         Exception lastErr = null;
+        String result = "";
         for (int attempt = 0; attempt <= retry; attempt++) {
             try {
                 String desc = callOnce(imageBytes, ext, prompt);
-                if (desc != null && !desc.isBlank()) return desc;
+                if (desc != null && !desc.isBlank()) {
+                    result = desc;
+                    break;
+                }
                 // 空响应：模型偶发空输出，重试一次
                 if (attempt < retry) log.warn("图片描述为空，第 {} 次重试", attempt + 1);
             } catch (Exception e) {
@@ -69,8 +86,12 @@ public class VisionService {
                 if (attempt < retry) log.warn("图片描述失败(第 {} 次)，重试: {}", attempt + 1, e.getMessage());
             }
         }
-        log.warn("图片描述最终失败: {}", lastErr == null ? "空响应" : lastErr.getMessage());
-        return "";
+        if (result.isBlank()) {
+            log.warn("图片描述最终失败: {}", lastErr == null ? "空响应" : lastErr.getMessage());
+        } else if (cacheKey != null) {
+            imageDescCache.put(cacheKey, result);
+        }
+        return result;
     }
 
     private String callOnce(byte[] imageBytes, String ext, String prompt) {

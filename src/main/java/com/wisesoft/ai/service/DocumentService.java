@@ -28,10 +28,12 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -230,6 +232,8 @@ public class DocumentService {
         AiDocument doc = documentMapper.selectById(docId);
         if (doc == null) return;
         List<Document> aiDocs = new ArrayList<>();
+        // 重解析场景（diff 前已有旧知识块）：解析失败时保留旧块回退生效，不整表清空（先建后删容错）
+        boolean hadExistingContent = false;
         try {
             // 新解析任务：清残留删除标志 + 记录线程（供 delete() 中断）
             deletedFlags.remove(docId);
@@ -263,6 +267,7 @@ public class DocumentService {
             // 存量旧块无 hash（老版本数据）时视为全部变更 → 首次重解析等价全量重建，语义正确
             List<AiKnowledge> oldList = knowledgeMapper.selectList(
                     new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+            hadExistingContent = !oldList.isEmpty();
             Map<String, AiKnowledge> oldByHash = new HashMap<>();
             for (AiKnowledge ok : oldList) {
                 if (ok.getContentHash() != null && !ok.getContentHash().isBlank()) {
@@ -274,7 +279,7 @@ public class DocumentService {
             int total = chunks.size();
             for (int i = 0; i < total; i++) {
                 Chunk chunk = chunks.get(i);
-                String hash = contentHash(chunk.title(), chunk.content());
+                String hash = contentHash(chunk.title(), chunk.content(), chunk.images());
                 AiKnowledge match = oldByHash.remove(hash);
                 if (match != null) {
                     // 内容未变：保留 knowledgeId + 向量；仅更新 chunkIndex（位置奖励用）
@@ -364,6 +369,9 @@ public class DocumentService {
             // 删除感知：向量化后、回写状态前最后确认
             if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
 
+            // 孤儿图片清扫：删除未被任何剩余知识块引用的图片文件（被删图/变更图的旧文件；未变图保留供复用块引用）
+            sweepOrphanImages(docId);
+
             updateProgress(docId, 100, "解析完成(保留 " + reused + " 新增 " + added + " 清理 " + staleOld.size() + ")");
 
             doc.setChunkCount(chunks.size());
@@ -388,20 +396,33 @@ public class DocumentService {
                 return;
             }
             log.error("[{}] 解析失败: {}", docId, e.getMessage());
-            // 补偿清理：删已写向量 + MySQL 元数据 + 图片目录（保留记录置失败状态）
+            // 补偿清理：只清理本次新增的 aiDocs（删向量 + 物理删行），保留 diff 复用/已存在的旧块
             try {
                 List<String> vectorIds = aiDocs.stream().map(Document::getId).toList();
                 if (!vectorIds.isEmpty()) vectorStore.delete(vectorIds);
             } catch (Exception ex) {
                 log.warn("[{}] 补偿删除向量失败: {}", docId, ex.getMessage());
             }
-            knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
-            cleanupImages(docId);
-            doc.setStatus(3);
-            doc.setFailReason(truncate(e.getMessage()));
+            for (Document d : aiDocs) {
+                try {
+                    knowledgeMapper.physicalDeleteById(d.getId());
+                } catch (Exception ex) {
+                    log.warn("[{}] 补偿删除知识块失败: {}", docId, ex.getMessage());
+                }
+            }
+            if (hadExistingContent) {
+                // 重解析失败：未变旧块仍在（变更块已被 diff 清理），回退到生效状态继续可用
+                doc.setStatus(0);
+                doc.setFailReason("重解析失败，已保留上一版内容: " + truncate(e.getMessage()));
+            } else {
+                // 全新解析失败：无旧内容可回退，清理图片目录并置失败
+                cleanupImages(docId);
+                doc.setStatus(3);
+                doc.setFailReason(truncate(e.getMessage()));
+            }
             documentMapper.updateById(doc);
-            // 失败：进度保留最后值，desc 置"解析失败"
-            updateProgress(docId, progressGuard.getOrDefault(docId, 0), "解析失败");
+            // 失败：进度保留最后值，desc 区分回退/失败
+            updateProgress(docId, progressGuard.getOrDefault(docId, 0), hadExistingContent ? "解析失败(已回退旧内容)" : "解析失败");
         } finally {
             // 清理解析线程引用与删除标志（delete() 的 DB 物理删除仍可兜底 isDocAlive）
             parseThreads.remove(docId);
@@ -549,7 +570,7 @@ public class DocumentService {
         String oldVectorId = k.getVectorId();
         k.setTitle(title.trim());
         k.setContent(content);
-        k.setContentHash(contentHash(k.getTitle(), k.getContent()));
+        k.setContentHash(contentHash(k.getTitle(), k.getContent(), parseImages(k.getImages())));
         knowledgeMapper.updateById(k);
 
         // 删旧向量（尽力而为）
@@ -693,6 +714,8 @@ public class DocumentService {
             String title = item.get("title") == null ? "" : String.valueOf(item.get("title"));
             String content = item.get("content") == null ? "" : String.valueOf(item.get("content"));
             Object imagesObj = item.get("images");
+            List<String> imgList = imagesObj instanceof List<?> list
+                    ? list.stream().map(String::valueOf).toList() : List.of();
 
             AiKnowledge k = new AiKnowledge();
             if (oldId != null && !oldId.isBlank()) k.setId(oldId);
@@ -701,7 +724,7 @@ public class DocumentService {
             k.setContent(content);
             k.setImages(imagesObj == null ? null : JSON.toJSONString(imagesObj));
             k.setChunkIndex(idx++);
-            k.setContentHash(contentHash(title, content));
+            k.setContentHash(contentHash(title, content, imgList));
             knowledgeMapper.insert(k);
             k.setVectorId(k.getId());
             knowledgeMapper.updateById(k);
@@ -786,14 +809,15 @@ public class DocumentService {
             throw new BizException("该文档正在解析中，请等待完成后再操作");
         }
 
-        // 重解析前先保存当前状态快照（作为版本历史），再清理旧向量与元数据
+        // 重解析前先保存当前状态快照（作为版本历史）；旧知识块保留给增量对比（diff），由 processUpload 匹配复用/清理变更块
         try {
             saveSnapshot(docId, doc.getVersion() == null ? 0 : doc.getVersion());
         } catch (Exception e) {
             log.warn("重解析前保存快照失败: {}", e.getMessage());
         }
-        deleteVectorsAndKnowledge(docId);
-        cleanupImages(docId);
+        // 不整体删除旧向量与知识块：processUpload 的 diff 式重建依赖它们做 content_hash 匹配
+        // （未变块保留 id+向量，变更/删除块由 processUpload 清理；失败时旧内容可回退保留）
+        // 也不清空图片目录：内容寻址文件名下，未变图片文件保留供复用块引用，变更/删除图的旧文件由 processUpload 成功后孤儿清扫
         doc.setStatus(2);
         doc.setFailReason(null);
         documentMapper.updateById(doc);
@@ -885,6 +909,42 @@ public class DocumentService {
         }
     }
 
+    /**
+     * 孤儿图片清扫：删除 data/images/{docId}/ 下未被任何剩余知识块 images 字段引用的文件
+     * （内容寻址文件名下，被删图/变更图的旧文件在这里回收；未变图片保留供复用块引用，保证 URL 稳定）
+     */
+    private void sweepOrphanImages(String docId) {
+        Path dir = Paths.get(properties.getImages().getDir(), "images", docId);
+        if (!Files.exists(dir)) return;
+        try {
+            List<AiKnowledge> blocks = knowledgeMapper.selectList(
+                    new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+            Set<String> referenced = new HashSet<>();
+            for (AiKnowledge b : blocks) {
+                if (b.getImages() == null || b.getImages().isBlank()) continue;
+                try {
+                    JSON.parseArray(b.getImages(), String.class).forEach(u -> {
+                        String fn = u.substring(u.lastIndexOf('/') + 1);
+                        if (!fn.isBlank()) referenced.add(fn);
+                    });
+                } catch (Exception ignored) {
+                }
+            }
+            try (var stream = Files.list(dir)) {
+                stream.filter(p -> Files.isRegularFile(p) && !referenced.contains(p.getFileName().toString()))
+                        .forEach(p -> {
+                            try {
+                                Files.deleteIfExists(p);
+                            } catch (IOException e) {
+                                log.warn("[{}] 孤儿图片删除失败: {}", docId, e.getMessage());
+                            }
+                        });
+            }
+        } catch (IOException e) {
+            log.warn("[{}] 孤儿图片清扫失败: {}", docId, e.getMessage());
+        }
+    }
+
     private String extOf(String fileName) {
         int idx = fileName.lastIndexOf('.');
         return idx < 0 ? "" : fileName.substring(idx + 1).toLowerCase();
@@ -901,18 +961,34 @@ public class DocumentService {
     }
 
     /**
-     * 内容指纹：SHA-256(title + "\n" + content)
-     * 重解析增量对比（未变块保留向量）、知识块编辑/新增维护用
+     * 内容指纹：SHA-256(title + "\n" + content + "\n" + images)
+     * 重解析增量对比（未变块保留向量）、知识块编辑/新增维护用。
+     * 纳入 images：图片删除/替换会使指纹变化 → 块走新增，避免复用块引用已删除图片（裂图）。
      */
     public String contentHash(String title, String content) {
+        return contentHash(title, content, List.of());
+    }
+
+    public String contentHash(String title, String content, List<String> images) {
         try {
+            String img = images == null || images.isEmpty() ? "" : String.join(",", images);
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] d = md.digest((title + "\n" + content).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            byte[] d = md.digest((title + "\n" + content + "\n" + img).getBytes(java.nio.charset.StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder(64);
             for (byte b : d) sb.append(String.format("%02x", b));
             return sb.toString();
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    /** 知识块 images 字段（JSON 数组串）→ List<String>（空/解析失败返回空列表） */
+    private List<String> parseImages(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return JSON.parseArray(json, String.class);
+        } catch (Exception e) {
+            return List.of();
         }
     }
 
