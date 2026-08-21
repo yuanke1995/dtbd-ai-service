@@ -18,4 +18,10 @@ public interface AiKnowledgeMapper extends BaseMapper<AiKnowledge> {
      */
     @org.apache.ibatis.annotations.Delete("DELETE FROM c_ai_knowledge WHERE doc_id = #{docId}")
     int physicalDeleteByDocId(@Param("docId") String docId);
+
+    /**
+     * 物理删除单个知识块（重解析增量对比：清理内容变更/删除的旧块）
+     */
+    @org.apache.ibatis.annotations.Delete("DELETE FROM c_ai_knowledge WHERE id = #{id}")
+    int physicalDeleteById(@Param("id") String id);
 }

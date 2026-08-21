@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -257,16 +258,42 @@ public class DocumentService {
             if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
             updateProgress(docId, 30, "分块完成,准备入库");
 
-            // 构建 Spring AI Document 列表（VectorStore 会自动向量化）
+            // ===== 增量更新：对比式重建 =====
+            // 旧块按 content_hash 索引；内容未变的块保留 knowledgeId+向量（跳过重新 embedding）
+            // 存量旧块无 hash（老版本数据）时视为全部变更 → 首次重解析等价全量重建，语义正确
+            List<AiKnowledge> oldList = knowledgeMapper.selectList(
+                    new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+            Map<String, AiKnowledge> oldByHash = new HashMap<>();
+            for (AiKnowledge ok : oldList) {
+                if (ok.getContentHash() != null && !ok.getContentHash().isBlank()) {
+                    oldByHash.put(ok.getContentHash(), ok);
+                }
+            }
+            List<AiKnowledge> staleOld = new ArrayList<>(oldList);  // 未被新块匹配的旧块（内容变更的旧版/被删段落）→ 清理
+            int reused = 0, added = 0;
             int total = chunks.size();
             for (int i = 0; i < total; i++) {
                 Chunk chunk = chunks.get(i);
+                String hash = contentHash(chunk.title(), chunk.content());
+                AiKnowledge match = oldByHash.remove(hash);
+                if (match != null) {
+                    // 内容未变：保留 knowledgeId + 向量；仅更新 chunkIndex（位置奖励用）
+                    staleOld.remove(match);
+                    if (match.getChunkIndex() == null || match.getChunkIndex() != i) {
+                        match.setChunkIndex(i);
+                        knowledgeMapper.updateById(match);
+                    }
+                    reused++;
+                    continue;
+                }
+                // 新块/变更块：入库 + 待向量化
                 AiKnowledge knowledge = new AiKnowledge();
                 knowledge.setDocId(docId);
                 knowledge.setTitle(chunk.title());
                 knowledge.setContent(chunk.content());
                 knowledge.setImages(chunk.images().isEmpty() ? null : JSON.toJSONString(chunk.images()));
                 knowledge.setChunkIndex(i);
+                knowledge.setContentHash(hash);
                 knowledgeMapper.insert(knowledge);
                 knowledge.setVectorId(knowledge.getId());
                 knowledgeMapper.updateById(knowledge);
@@ -280,15 +307,36 @@ public class DocumentService {
                 }
                 aiDocs.add(new Document(knowledge.getId(),
                         chunk.title() + "\n" + chunk.content(), metadata));
+                added++;
                 // 入库进度：30 → 50（每 10 块上报一次）
                 if ((i + 1) % 10 == 0 || i == total - 1) {
-                    updateProgress(docId, 30 + Math.min(20, (i + 1) * 20 / total), "入库 " + (i + 1) + "/" + total);
+                    updateProgress(docId, 30 + Math.min(20, (i + 1) * 20 / total), "入库 " + added + "（保留 " + reused + "）");
                 }
                 // 删除感知：入库循环内每 10 块检查，删除立即停止（不等循环结束）
                 if ((i + 1) % 10 == 0 && !isDocAlive(docId)) {
                     cleanupPartial(docId, aiDocs);
                     return;
                 }
+            }
+            // 清理未被新块匹配的旧块（内容变更的旧版本 / 被删除的段落与图片）
+            if (!staleOld.isEmpty()) {
+                List<String> delIds = staleOld.stream().map(AiKnowledge::getVectorId)
+                        .filter(Objects::nonNull).filter(s -> !s.isBlank()).toList();
+                if (!delIds.isEmpty()) {
+                    try {
+                        vectorStore.delete(delIds);
+                    } catch (Exception e) {
+                        log.warn("[{}] 增量清理旧向量失败: {}", docId, e.getMessage());
+                    }
+                }
+                for (AiKnowledge d : staleOld) {
+                    try {
+                        knowledgeMapper.physicalDeleteById(d.getId());
+                    } catch (Exception e) {
+                        log.warn("[{}] 增量清理旧块失败: {}", docId, e.getMessage());
+                    }
+                }
+                log.info("[{}] 增量清理旧块 {} 个（内容变更/删除）", docId, staleOld.size());
             }
             // 删除感知：入库后、向量化前再查一次
             if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
@@ -316,7 +364,7 @@ public class DocumentService {
             // 删除感知：向量化后、回写状态前最后确认
             if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
 
-            updateProgress(docId, 100, "解析完成");
+            updateProgress(docId, 100, "解析完成(保留 " + reused + " 新增 " + added + " 清理 " + staleOld.size() + ")");
 
             doc.setChunkCount(chunks.size());
             doc.setStatus(0);
@@ -501,6 +549,7 @@ public class DocumentService {
         String oldVectorId = k.getVectorId();
         k.setTitle(title.trim());
         k.setContent(content);
+        k.setContentHash(contentHash(k.getTitle(), k.getContent()));
         knowledgeMapper.updateById(k);
 
         // 删旧向量（尽力而为）
@@ -652,6 +701,7 @@ public class DocumentService {
             k.setContent(content);
             k.setImages(imagesObj == null ? null : JSON.toJSONString(imagesObj));
             k.setChunkIndex(idx++);
+            k.setContentHash(contentHash(title, content));
             knowledgeMapper.insert(k);
             k.setVectorId(k.getId());
             knowledgeMapper.updateById(k);
@@ -848,6 +898,22 @@ public class DocumentService {
     private String truncate(String s) {
         if (s == null) return "未知错误";
         return s.length() > 200 ? s.substring(0, 200) : s;
+    }
+
+    /**
+     * 内容指纹：SHA-256(title + "\n" + content)
+     * 重解析增量对比（未变块保留向量）、知识块编辑/新增维护用
+     */
+    public String contentHash(String title, String content) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest((title + "\n" + content).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : d) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**

@@ -97,6 +97,7 @@ public class AiKnowledgeController {
         k.setTitle(title);
         k.setContent(content);
         k.setDocId(docId != null && !docId.isBlank() ? docId : null);
+        k.setContentHash(documentService.contentHash(title, content));
         // 先入库，再生成向量（H1：失败降级仅关键词召回，不阻断）
         knowledgeMapper.insert(k);
         documentService.embedAndStore(k, k.getTitle() + "\n" + k.getContent());

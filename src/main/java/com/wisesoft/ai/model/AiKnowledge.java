@@ -40,6 +40,9 @@ public class AiKnowledge {
     /** Redis 向量库中的文档ID */
     private String vectorId;
 
+    /** 内容指纹(SHA-256: title+content)，重解析增量对比用 */
+    private String contentHash;
+
     private LocalDateTime createTime;
 
     @TableLogic

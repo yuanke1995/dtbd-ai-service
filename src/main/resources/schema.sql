@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS `c_ai_knowledge` (
     `images`       VARCHAR(2000) DEFAULT NULL COMMENT '关联图片URL(JSON数组)',
     `chunk_index`  INT          DEFAULT 0 COMMENT '片段序号',
     `vector_id`    VARCHAR(50)  DEFAULT NULL COMMENT 'Redis向量库中的文档ID',
+    `content_hash` VARCHAR(64)  DEFAULT NULL COMMENT '内容指纹(SHA-256: title+content)，重解析增量对比用',
     `create_time`  DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `deleted`      INT          DEFAULT 0 COMMENT '逻辑删除: 0=未删除, 1=已删除',
     PRIMARY KEY (`id`),
