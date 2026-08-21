@@ -268,10 +268,11 @@ public class DocumentService {
             List<AiKnowledge> oldList = knowledgeMapper.selectList(
                     new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
             hadExistingContent = !oldList.isEmpty();
-            Map<String, AiKnowledge> oldByHash = new HashMap<>();
+            // 旧块按 content_hash 索引（同内容多块 → List，逐块一一对应出队，避免重复内容块 id 抖动）
+            Map<String, List<AiKnowledge>> oldByHash = new HashMap<>();
             for (AiKnowledge ok : oldList) {
                 if (ok.getContentHash() != null && !ok.getContentHash().isBlank()) {
-                    oldByHash.put(ok.getContentHash(), ok);
+                    oldByHash.computeIfAbsent(ok.getContentHash(), k -> new ArrayList<>()).add(ok);
                 }
             }
             List<AiKnowledge> staleOld = new ArrayList<>(oldList);  // 未被新块匹配的旧块（内容变更的旧版/被删段落）→ 清理
@@ -280,7 +281,12 @@ public class DocumentService {
             for (int i = 0; i < total; i++) {
                 Chunk chunk = chunks.get(i);
                 String hash = contentHash(chunk.title(), chunk.content(), chunk.images());
-                AiKnowledge match = oldByHash.remove(hash);
+                AiKnowledge match = null;
+                List<AiKnowledge> bucket = oldByHash.get(hash);
+                if (bucket != null && !bucket.isEmpty()) {
+                    match = bucket.remove(bucket.size() - 1);
+                    if (bucket.isEmpty()) oldByHash.remove(hash);
+                }
                 if (match != null) {
                     // 内容未变：保留 knowledgeId + 向量；仅更新 chunkIndex（位置奖励用）
                     staleOld.remove(match);

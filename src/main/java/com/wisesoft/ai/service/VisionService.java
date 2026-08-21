@@ -89,7 +89,7 @@ public class VisionService {
         if (result.isBlank()) {
             log.warn("图片描述最终失败: {}", lastErr == null ? "空响应" : lastErr.getMessage());
         } else if (cacheKey != null) {
-            imageDescCache.put(cacheKey, result);
+            imageDescCache.put(cacheKey, result, model);
         }
         return result;
     }

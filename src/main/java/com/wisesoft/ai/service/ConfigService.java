@@ -40,6 +40,8 @@ public class ConfigService {
             Map.entry("vision.model", "视觉识别模型名"),
             Map.entry("vision.prompt", "视觉识别提示词"),
             Map.entry("vision.concurrency", "图片描述并发数（保存即生效）"),
+            Map.entry("vision.descCacheVersion", "图片描述缓存版本(改动后重解析全量重新描述)"),
+            Map.entry("vision.descCacheTtlDays", "图片描述缓存有效期(天,0=不过期)"),
             Map.entry("chunk.maxChunks", "单文档最大知识块数(0=不限制)"),
             Map.entry("chunk.maxImages", "单文档最多提取图片数(0=不限制)"),
             Map.entry("chunk.overlap", "分块重叠字符数(0=关闭)"),
@@ -204,6 +206,8 @@ public class ConfigService {
         d.put("vision.baseUrl", properties.getVision().getBaseUrl());
         d.put("vision.apiKey", properties.getVision().getApiKey());
         d.put("vision.concurrency", String.valueOf(properties.getVision().getConcurrency()));
+        d.put("vision.descCacheVersion", "1");                 // 图片描述缓存版本（bump 后全量重新描述）
+        d.put("vision.descCacheTtlDays", "180");               // 图片描述缓存有效期(天，0=不过期)
         d.put("embedding.model", env("spring.ai.openai.embedding.options.model", ""));
         d.put("chunk.maxChunks", String.valueOf(properties.getChunk().getMaxChunks()));
         d.put("chunk.maxImages", String.valueOf(properties.getChunk().getMaxImages()));

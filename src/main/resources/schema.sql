@@ -110,6 +110,16 @@ CREATE TABLE IF NOT EXISTS `c_ai_qa_feedback` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_message` (`message_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI问答反馈表';
+
+CREATE TABLE IF NOT EXISTS `c_ai_image_desc` (
+    `cache_key`    VARCHAR(64)  NOT NULL COMMENT '缓存键(v{版本}_{sha256: model+prompt+图片字节})',
+    `description`  TEXT         NOT NULL COMMENT '图片描述',
+    `model`        VARCHAR(128) DEFAULT NULL COMMENT '视觉模型名',
+    `create_time`  DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `update_time`  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最近命中时间(TTL基准)',
+    PRIMARY KEY (`cache_key`),
+    KEY `idx_update` (`update_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='图片描述缓存(内容寻址,持久化)';
 CREATE TABLE IF NOT EXISTS `c_ai_config` (
     `config_key`    VARCHAR(64)   NOT NULL COMMENT '配置键（chat.model/chat.temperature/vision.model/...）',
     `config_value`  TEXT          NOT NULL COMMENT '配置值（TEXT 以容纳长 system prompt）',
