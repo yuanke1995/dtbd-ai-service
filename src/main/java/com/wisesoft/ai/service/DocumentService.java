@@ -123,10 +123,14 @@ public class DocumentService {
             throw new BizException("请选择文件");
         }
 
-        // 同名文档先替换
-        deprecateExisting(fileName);
+        // 同名文档优先复用其 docId 走 diff 重解析（upsert 语义：文档身份/knowledgeId 稳定，未变块增量复用、只重嵌变更处）；
+        // 无可复用（无同名，或同名均解析中已清理）时走全新上传
+        AiDocument reusable = reusableTarget(fileName);
+        if (reusable != null) {
+            return replaceExisting(reusable, file, description, category, parser);
+        }
 
-        // 源文件落盘（异步解析需要；重解析复用）
+        // 全新上传：源文件落盘（异步解析需要；重解析复用）
         AiDocument doc = new AiDocument();
         doc.setFileName(fileName);
         doc.setFileType(ext);
@@ -807,13 +811,7 @@ public class DocumentService {
         if (parser == null) throw new BizException("不支持的文件格式");
 
         // 并发防护（多实例也原子）：CAS 抢占"解析中"状态，失败说明已有解析在进行
-        int locked = documentMapper.update(null, new LambdaUpdateWrapper<AiDocument>()
-                .eq(AiDocument::getId, docId)
-                .and(w -> w.ne(AiDocument::getStatus, 2).or().isNull(AiDocument::getStatus))
-                .set(AiDocument::getStatus, 2));
-        if (locked == 0) {
-            throw new BizException("该文档正在解析中，请等待完成后再操作");
-        }
+        tryLockParsing(docId);
 
         // 重解析前先保存当前状态快照（作为版本历史）；旧知识块保留给增量对比（diff），由 processUpload 匹配复用/清理变更块
         try {
@@ -843,17 +841,96 @@ public class DocumentService {
     }
 
     /**
-     * 同名文档清理：删除旧的生效/解析中/失败记录（避免同名重传残留脏数据），弃用记录保留
+     * 同名复用目标：查同名文档（status 0/2/3，弃用记录保留），优先复用最近一条 status 0（生效）、其次 status 3（失败）的，
+     * 其余同名文档（含正在解析 status=2 的旧任务）删除，保持"替换"语义。无可复用返回 null。
      */
-    private void deprecateExisting(String fileName) {
+    private AiDocument reusableTarget(String fileName) {
         List<AiDocument> existing = documentMapper.selectList(
                 new LambdaQueryWrapper<AiDocument>()
                         .eq(AiDocument::getFileName, fileName)
                         .in(AiDocument::getStatus, 0, 2, 3)
+                        .orderByDesc(AiDocument::getCreateTime)
                         .last("limit 10"));
-        for (AiDocument doc : existing) {
-            log.info("Replacing existing document: {} ({})", fileName, doc.getId());
-            delete(doc.getId());
+        if (existing.isEmpty()) return null;
+        // 优先最近一条生效(status=0)，其次最近一条失败(status=3)：复用后走 diff 增量，避免误删仍有内容的生效文档
+        AiDocument target = existing.stream()
+                .filter(d -> d.getStatus() != null && d.getStatus() == 0)
+                .findFirst()
+                .orElseGet(() -> existing.stream()
+                        .filter(d -> d.getStatus() != null && d.getStatus() == 3)
+                        .findFirst().orElse(null));
+        String targetId = target == null ? "" : target.getId();
+        for (AiDocument d : existing) {
+            if (d.getId().equals(targetId)) continue;
+            log.info("Replacing existing document: {} ({})", fileName, d.getId());
+            delete(d.getId());
+        }
+        return target;
+    }
+
+    /**
+     * 同名替换：复用原 docId（覆盖源文件 + 走 diff 重解析）
+     * 文档身份与 knowledgeId 保持稳定（历史引用/评估集不失效），未变块增量复用、只重嵌变更处。
+     */
+    private AiDocument replaceExisting(AiDocument existing, MultipartFile file, String description, String category,
+                                       DocumentParser parser) throws Exception {
+        String docId = existing.getId();
+        if (category != null && !category.isBlank()) {
+            if (category.trim().length() > 50) throw new BizException("分类过长（最多50字）");
+        }
+        int origStatus = existing.getStatus() == null ? 0 : existing.getStatus();
+        // 并发防护（多实例也原子）：CAS 抢占"解析中"状态，失败说明已有解析在进行
+        tryLockParsing(docId);
+        boolean submitted = false;
+        try {
+            // 保留旧内容快照（可回滚）；旧块保留给 processUpload 的 diff 匹配
+            try {
+                saveSnapshot(docId, existing.getVersion() == null ? 0 : existing.getVersion());
+            } catch (Exception e) {
+                log.warn("[{}] 替换前保存快照失败: {}", docId, e.getMessage());
+            }
+            // 覆盖源文件（同 docId 同路径）
+            Path source = saveSourceFile(file, docId, existing.getFileName());
+            // 更新元数据并置解析中
+            existing.setFileSize(file.getSize());
+            existing.setDescription(description);
+            if (category != null && !category.isBlank()) {
+                existing.setCategory(category.trim());
+            }
+            existing.setStatus(2);
+            existing.setFailReason(null);
+            documentMapper.updateById(existing);
+            documentMetaCache.invalidate(docId);
+            updateProgress(docId, 0, "已提交,等待解析");
+
+            final DocumentParser fp = parser;
+            syncParseConcurrency();
+            parseExecutor.submit(() -> processUpload(docId, existing.getFileName(), source, fp));
+            submitted = true;
+            return existing;
+        } catch (RejectedExecutionException e) {
+            throw new BizException("解析队列繁忙（已有 50 个待解析任务），请稍后再试");
+        } finally {
+            // 未成功提交解析任务时恢复原状态（避免文档卡在"解析中"）
+            if (!submitted) {
+                try {
+                    documentMapper.update(null, new LambdaUpdateWrapper<AiDocument>()
+                            .eq(AiDocument::getId, docId).set(AiDocument::getStatus, origStatus));
+                } catch (Exception ex) {
+                    log.warn("[{}] 恢复文档状态失败: {}", docId, ex.getMessage());
+                }
+            }
+        }
+    }
+
+    /** 并发防护（多实例也原子）：CAS 抢占"解析中"状态，失败说明已有解析在进行 */
+    private void tryLockParsing(String docId) {
+        int locked = documentMapper.update(null, new LambdaUpdateWrapper<AiDocument>()
+                .eq(AiDocument::getId, docId)
+                .and(w -> w.ne(AiDocument::getStatus, 2).or().isNull(AiDocument::getStatus))
+                .set(AiDocument::getStatus, 2));
+        if (locked == 0) {
+            throw new BizException("该文档正在解析中，请等待完成后再操作");
         }
     }
 
