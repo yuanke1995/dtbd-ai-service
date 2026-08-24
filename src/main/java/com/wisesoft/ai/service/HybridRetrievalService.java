@@ -20,6 +20,8 @@ import java.util.stream.Collectors;
 /**
  * 混合检索：向量召回 + MySQL 关键词召回 并行执行 → 按 knowledgeId 合并去重 → 加权排序
  * <p>
+ * 两路召回均只返回生效文档（status=0）的知识块：关键词路 SQL 过滤，向量路按命中块的 docId 批量剔除。
+ * <p>
  * - 向量：topK 可配（retrieval.vectorTopK，默认 15）+ 阈值放宽（0.3），分数归一化到 0~1（(score-0.3)/(1-0.3)）
  * - 关键词：词元 LIKE 召回 + 词频加权（tf×idf，标题词频×2，归一化 0~1）
  * - 融合：双命中**叠加**（向量分 + 关键词分 + 标题奖励），单路命中取各自权重分
@@ -46,10 +48,10 @@ public class HybridRetrievalService {
     private final ConfigService configService;
 
     /**
-     * 混合检索结果（chunkIndex 用于位置奖励）
+     * 混合检索结果（chunkIndex 用于位置奖励；titlePath 章节路径，检索侧拼装上下文用）
      */
     public record Hit(String knowledgeId, String docId, String title, String content,
-                      List<String> images, double score, Integer chunkIndex) {
+                      List<String> images, double score, Integer chunkIndex, String titlePath) {
     }
 
     /**
@@ -67,21 +69,21 @@ public class HybridRetrievalService {
         // 2. 关键词召回（并行，超时兜底）
         List<AiKnowledge> kwDocs = keywordSearch(query);
 
-        // 3. 批量加载向量命中的知识块元数据（一次 selectBatchIds 替代逐条 selectById）+ 弃用文档集合
+        // 3. 批量加载向量命中的知识块元数据（一次 selectBatchIds 替代逐条 selectById）+ 不可召回文档集合
         Map<String, AiKnowledge> kidMap = loadKnowledgeBatch(vectorDocs);
-        Set<String> deprecatedDocIds = loadDeprecatedDocIds(kidMap);
+        Set<String> blockedDocIds = loadNonRetrievableDocIds(kidMap);
 
         // 4. 合并去重 + 加权（A1：双命中叠加，不再取 max）
         Map<String, Hit> merged = new LinkedHashMap<>();
 
-        // 向量命中：score = 向量权重 × 归一化向量分；弃用文档（status=1）跳过（向量路无状态过滤，这里剔除）
+        // 向量命中：score = 向量权重 × 归一化向量分；非生效文档（弃用/解析中/解析失败）跳过，与关键词路 status=0 语义一致
         double vt = vecThreshold();
         for (Document doc : vectorDocs) {
             String kid = String.valueOf(doc.getId());
             AiKnowledge k = kidMap.get(kid);
             String docId = k != null && k.getDocId() != null ? String.valueOf(k.getDocId()) : metadataDocId(doc);
-            if (docId != null && deprecatedDocIds.contains(docId)) {
-                log.debug("[RAG] 跳过弃用文档命中: docId={} kid={}", docId, kid);
+            if (docId != null && blockedDocIds.contains(docId)) {
+                log.debug("[RAG] 跳过非生效文档命中: docId={} kid={}", docId, kid);
                 continue;
             }
             double vecScore = parseScore(doc.getScore());
@@ -99,7 +101,8 @@ public class HybridRetrievalService {
                             oldHit.docId() == null || oldHit.docId().isBlank() ? newHit.docId() : oldHit.docId(),
                             oldHit.title(), oldHit.content(), oldHit.images(),
                             oldHit.score() + newHit.score(), // A1：双命中叠加
-                            oldHit.chunkIndex() == null ? newHit.chunkIndex() : oldHit.chunkIndex()));
+                            oldHit.chunkIndex() == null ? newHit.chunkIndex() : oldHit.chunkIndex(),
+                            oldHit.titlePath() == null ? newHit.titlePath() : oldHit.titlePath()));
         }
 
         // A5：位置奖励（排序前统一加，保证分数与顺序一致）
@@ -109,7 +112,7 @@ public class HybridRetrievalService {
             double bonus = positionBonus(h.chunkIndex());
             if (bonus != 0) {
                 result.set(i, new Hit(h.knowledgeId(), h.docId(), h.title(), h.content(), h.images(),
-                        h.score() + bonus, h.chunkIndex()));
+                        h.score() + bonus, h.chunkIndex(), h.titlePath()));
             }
         }
         result.sort((a, b) -> Double.compare(b.score(), a.score()));
@@ -282,17 +285,23 @@ public class HybridRetrievalService {
         String title = md.get("title") == null ? "" : String.valueOf(md.get("title"));
         List<String> images = imagesFromMd(md);
         Integer chunkIndex = null;
+        String titlePath = null;
         // M6 RedisVectorStore 可能丢弃 metadata（docId/title/images 均可能为空），用批量加载的知识块兜底
         if (k != null) {
             if (docId == null || docId.isEmpty()) docId = String.valueOf(k.getDocId());
             if (title.isEmpty()) title = k.getTitle();
             if (chunkIndex == null) chunkIndex = k.getChunkIndex();
+            if (titlePath == null || titlePath.isBlank()) titlePath = k.getTitlePath();
             if (images.isEmpty() && k.getImages() != null && !k.getImages().isBlank()) {
                 images = com.alibaba.fastjson2.JSON.parseArray(k.getImages(), String.class);
             }
         }
+        if (titlePath == null) {
+            Object tp = md.get("titlePath");
+            titlePath = tp == null ? null : String.valueOf(tp);
+        }
         if (docId == null) docId = "";
-        return new Hit(kid, docId, title, doc.getText(), images, score, chunkIndex);
+        return new Hit(kid, docId, title, doc.getText(), images, score, chunkIndex, titlePath);
     }
 
     /**
@@ -316,10 +325,11 @@ public class HybridRetrievalService {
     }
 
     /**
-     * 弃用文档（status=1 且未删除）id 集合，用于向量路过滤；
-     * 关键词路已按 status=0 过滤，此处保证两条召回路径一致（弃用文档不再从向量路命中）
+     * 不可召回文档 id 集合（status<>0：弃用 1 / 解析中 2 / 解析失败 3），用于向量路过滤；
+     * 关键词路已按 status=0 过滤，此处保证两条召回路径语义一致
+     * （尤其：重解析 diff 复用保留旧向量、崩溃残留半成品，其向量不应进入上下文）
      */
-    private Set<String> loadDeprecatedDocIds(Map<String, AiKnowledge> kidMap) {
+    private Set<String> loadNonRetrievableDocIds(Map<String, AiKnowledge> kidMap) {
         Set<String> docIds = kidMap.values().stream()
                 .map(AiKnowledge::getDocId)
                 .filter(Objects::nonNull)
@@ -328,15 +338,15 @@ public class HybridRetrievalService {
                 .collect(Collectors.toSet());
         if (docIds.isEmpty()) return Set.of();
         try {
-            List<AiDocument> deprecated = documentMapper.selectList(
+            List<AiDocument> blocked = documentMapper.selectList(
                     new QueryWrapper<AiDocument>()
                             .select("id")
                             .in("id", docIds)
-                            .eq("status", 1)
+                            .ne("status", 0)
                             .eq("deleted", 0));
-            return deprecated.stream().map(d -> String.valueOf(d.getId())).collect(Collectors.toSet());
+            return blocked.stream().map(d -> String.valueOf(d.getId())).collect(Collectors.toSet());
         } catch (Exception e) {
-            log.warn("查询弃用文档失败: {}", e.getMessage());
+            log.warn("查询非生效文档失败: {}", e.getMessage());
             return Set.of();
         }
     }
@@ -356,7 +366,7 @@ public class HybridRetrievalService {
             }
         }
         return new Hit(String.valueOf(k.getId()), String.valueOf(k.getDocId()),
-                k.getTitle(), k.getContent(), images, score, k.getChunkIndex());
+                k.getTitle(), k.getContent(), images, score, k.getChunkIndex(), k.getTitlePath());
     }
 
     private List<String> imagesFromMd(Map<String, Object> md) {

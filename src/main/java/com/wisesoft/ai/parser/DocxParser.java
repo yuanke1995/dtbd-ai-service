@@ -448,11 +448,11 @@ public class DocxParser implements DocumentParser {
                                  List<Chunk> chunks, String titlePath, int maxSize) {
         if (content.length() == 0 && currentImages.isEmpty()) return;
         String resolved = resolveImagePlaceholders(content.toString(), currentImages);
-        String prefix = buildPathPrefix(titlePath);
         if (resolved.length() <= maxSize) {
-            chunks.add(new Chunk(title, prefix + resolved, imageUrls(currentImages)));
+            chunks.add(new Chunk(title, resolved, imageUrls(currentImages), titlePath));
         } else {
-            int splitMax = Math.max(200, maxSize - prefix.length());
+            // 路径不入正文，切分预算无需再为前缀留空间
+            int splitMax = Math.max(200, maxSize);
             List<String> urls = imageUrls(currentImages);
             int imgIdx = 0;
             for (String seg : splitByBoundaries(resolved, splitMax)) {
@@ -460,7 +460,7 @@ public class DocxParser implements DocumentParser {
                 for (int i = 0; i < countOccurrences(seg, "[图片") && imgIdx < urls.size(); i++) {
                     segUrls.add(urls.get(imgIdx++));
                 }
-                chunks.add(new Chunk(title, prefix + seg, segUrls));
+                chunks.add(new Chunk(title, seg, segUrls, titlePath));
             }
         }
         content.setLength(0);
@@ -469,13 +469,12 @@ public class DocxParser implements DocumentParser {
 
     /** 结构模式表格入块：≤maxSize 单块；超长按行拆（代码块表格重开/闭合围栏，Markdown 表格重复表头） */
     private void addTableChunks(String title, String tableText, String titlePath, List<Chunk> chunks, int maxSize) {
-        String prefix = buildPathPrefix(titlePath);
         if (tableText.length() <= maxSize) {
-            chunks.add(new Chunk(title, prefix + tableText, List.of()));
+            chunks.add(new Chunk(title, tableText, List.of(), titlePath));
             return;
         }
         for (String seg : splitTableRows(tableText, maxSize)) {
-            chunks.add(new Chunk(title, prefix + seg, List.of()));
+            chunks.add(new Chunk(title, seg, List.of(), titlePath));
         }
     }
 
@@ -607,14 +606,9 @@ public class DocxParser implements DocumentParser {
         return out.toString();
     }
 
-    /** 章节路径前缀（≥2 级才注入——参与向量语义匹配；title 保持短标题避免 titleBonus 误发） */
-    private String buildPathPrefix(String titlePath) {
-        return titlePath == null || titlePath.isBlank() ? "" : "【上下文】" + titlePath + "\n\n";
-    }
-
-    /** 组装分块：章节路径前缀 + 内容 + 图片 URL 列表 */
+    /** 组装分块：净正文 + 图片 URL 列表 + 章节路径（路径不拼进正文，向量化/检索时再拼装） */
     private Chunk buildChunk(String title, String text, List<String> images, String titlePath) {
-        return new Chunk(title, buildPathPrefix(titlePath) + text, images);
+        return new Chunk(title, text, images, titlePath);
     }
 
     private List<String> imageUrls(List<SavedImage> currentImages) {

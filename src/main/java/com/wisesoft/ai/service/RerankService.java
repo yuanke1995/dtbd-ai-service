@@ -97,7 +97,10 @@ public class RerankService {
 
         try {
             List<String> docs = candidates.stream()
-                    .map(h -> h.title() + "\n" + h.content())
+                    .map(h -> h.title() + "\n"
+                            + (h.titlePath() != null && !h.titlePath().isBlank()
+                                    ? "【上下文】" + h.titlePath() + "\n\n" : "")
+                            + h.content())
                     .toList();
             List<Double> scores = rankByOpenAiRerank(query, docs);
             if (scores == null || scores.size() != docs.size()) return candidates;

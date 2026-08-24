@@ -57,6 +57,7 @@ public class AiKnowledgeController {
                     m.put("id", k.getId());
                     m.put("title", k.getTitle());
                     m.put("chunkIndex", k.getChunkIndex());
+                    m.put("titlePath", k.getTitlePath());
                     m.put("content", k.getContent());
                     m.put("images", k.getImages() != null && !k.getImages().isBlank()
                             ? com.alibaba.fastjson2.JSON.parseArray(k.getImages()) : List.of());
@@ -100,7 +101,7 @@ public class AiKnowledgeController {
         k.setContentHash(documentService.contentHash(title, content));
         // 先入库，再生成向量（H1：失败降级仅关键词召回，不阻断）
         knowledgeMapper.insert(k);
-        documentService.embedAndStore(k, k.getTitle() + "\n" + k.getContent());
+        documentService.embedAndStore(k, k.getContent());
         return ResultJson.ok(Map.of("id", k.getId()), "知识块已创建");
     }
 

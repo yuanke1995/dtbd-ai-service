@@ -70,6 +70,8 @@ public class DocumentService {
     private final Map<String, Boolean> deletedFlags = new ConcurrentHashMap<>();
     /** 解析线程引用：delete() 时 interrupt 实现立即中断（图片 join 等待立即响应） */
     private final Map<String, Thread> parseThreads = new ConcurrentHashMap<>();
+    /** 同名上传串行锁：避免并发上传同一文件名时双方都判定"无可复用"而产生重复文档（单实例内有效） */
+    private final Map<String, Object> uploadLocks = new ConcurrentHashMap<>();
 
     /** 解析线程池（并发 parse.concurrency 可调：避免多文档同时解析打爆 embedding/Ollama；保存即生效） */
     private ThreadPoolExecutor parseExecutor;
@@ -97,6 +99,40 @@ public class DocumentService {
         }
         // 多副本提示：数据目录（源文件/图片/评估集）必须指向共享存储，各副本才能访问同一批产物
         log.info("数据目录: {}（多副本部署请确认所有实例指向同一共享存储）", properties.getImages().getDir());
+        recoverStuckParsing();
+    }
+
+    /**
+     * 启动对账：把上次进程异常退出（崩溃/kill）残留的"解析中"(status=2) 文档复位为解析失败。
+     * 这些文档的解析线程已随进程消失，不复位则永久卡在解析中，且 tryLockParsing 会拒绝重解析/替换。
+     * 复位为 3（失败）而非 0：其知识块可能只写了一半，需用户显式重解析或重新上传修复；
+     * 向量路与关键词路均按 status=0 过滤，status=3 期间残留半成品不会进入检索上下文。
+     * <p>
+     * 注意：多副本部署时本方法可能复位其他实例正在解析的文档（其检查点会感知并停止）。
+     * 若采用多副本，应把 parse.recoverStuckOnStartup 置 false 并改由运维单点执行。
+     */
+    private void recoverStuckParsing() {
+        if (!configService.getBoolean("parse.recoverStuckOnStartup")) {
+            log.info("[Recover] 启动对账已关闭（parse.recoverStuckOnStartup=false），跳过 status=2 复位");
+            return;
+        }
+        try {
+            List<AiDocument> stuck = documentMapper.selectList(
+                    new LambdaQueryWrapper<AiDocument>().eq(AiDocument::getStatus, 2));
+            if (stuck.isEmpty()) return;
+            for (AiDocument d : stuck) {
+                documentMapper.update(null, new LambdaUpdateWrapper<AiDocument>()
+                        .eq(AiDocument::getId, d.getId())
+                        .eq(AiDocument::getStatus, 2)
+                        .set(AiDocument::getStatus, 3)
+                        .set(AiDocument::getFailReason, "服务重启中断解析，请重新解析或重新上传")
+                        .set(AiDocument::getParseDesc, "解析中断(服务重启)"));
+                log.warn("[Recover] 复位残留解析中文档: {} ({})", d.getFileName(), d.getId());
+            }
+            log.info("[Recover] 启动对账完成，复位 {} 个残留'解析中'文档", stuck.size());
+        } catch (Exception e) {
+            log.warn("[Recover] 启动对账失败: {}", e.getMessage());
+        }
     }
 
     @PreDestroy
@@ -123,6 +159,21 @@ public class DocumentService {
             throw new BizException("请选择文件");
         }
 
+        // 同名串行：并发上传同一文件名时，避免双方都判定"无可复用"而各建一条文档（本实例内互斥；
+        // 跨实例仍靠 tryLockParsing 的 CAS 兜底，最坏情况产生一条重复记录，可手动删除）
+        Object lock = uploadLocks.computeIfAbsent(fileName, k -> new Object());
+        try {
+            synchronized (lock) {
+                return doUpload(file, fileName, ext, description, category, parser);
+            }
+        } finally {
+            uploadLocks.remove(fileName, lock);
+        }
+    }
+
+    /** 上传主体（已按文件名串行）：优先复用同名文档走 diff，否则新建 */
+    private AiDocument doUpload(MultipartFile file, String fileName, String ext, String description,
+                                String category, DocumentParser parser) throws Exception {
         // 同名文档优先复用其 docId 走 diff 重解析（upsert 语义：文档身份/knowledgeId 稳定，未变块增量复用、只重嵌变更处）；
         // 无可复用（无同名，或同名均解析中已清理）时走全新上传
         AiDocument reusable = reusableTarget(fileName);
@@ -179,10 +230,14 @@ public class DocumentService {
             }
             metadata.put("title", k.getTitle() == null ? "" : k.getTitle());
             metadata.put("knowledgeId", k.getId());
+            if (k.getTitlePath() != null && !k.getTitlePath().isBlank()) {
+                metadata.put("titlePath", k.getTitlePath());
+            }
             if (k.getImages() != null) {
                 metadata.put("images", k.getImages());
             }
-            vectorStore.add(List.of(new Document(k.getId(), content, metadata)));
+            vectorStore.add(List.of(new Document(k.getId(),
+                    buildEmbedText(k.getTitle(), k.getTitlePath(), content, null), metadata)));
             k.setVectorId(k.getId());
             knowledgeMapper.updateById(k);
             return true;
@@ -248,11 +303,9 @@ public class DocumentService {
             updateProgress(docId, 10, "解析文档内容(图片较多时较慢)");
             List<Chunk> chunks = parser.parse(bytes, fileName, docId,
                     (percent, desc) -> updateProgress(docId, percent, desc));
-            // 分块重叠：相邻块尾部 overlap 字符拼入下一块开头，保留被硬切/标题分块截断处的上下文（chunk.overlap 可调，0=关闭）
+            // 分块重叠：不再改写块正文（content 保持净内容），重叠尾巴作为 embedding 文本前缀在循环内计算——
+            // 不入库、不进指纹，因此邻块变动不会连锁改变本块指纹（chunk.overlap 可调，0=关闭）
             int overlap = configService.getInt("chunk.overlap", properties.getChunk().getOverlap());
-            if (overlap > 0) {
-                chunks = applyOverlap(chunks, overlap);
-            }
             // 截断保护：超大文档只保留前 maxChunks 块（防止 embedding 调用数万次/解析失控）
             int maxChunks = configService.getInt("chunk.maxChunks");
             if (maxChunks > 0 && chunks.size() > maxChunks) {
@@ -284,7 +337,18 @@ public class DocumentService {
             int total = chunks.size();
             for (int i = 0; i < total; i++) {
                 Chunk chunk = chunks.get(i);
-                String hash = contentHash(chunk.title(), chunk.content(), chunk.images());
+                // 指纹 = title + 章节路径 + 净正文 + 图片（不含 overlap）：前块变动永不连锁；章节改名重嵌该章（语义正确）
+                String hash = contentHash(chunk.title(), chunk.titlePath(), chunk.content(), chunk.images());
+                // 重叠尾巴：上一块净内容尾部 N 字，仅拼入 embedding 文本（向量语义衔接），不入库不进指纹
+                String overlapPrefix = "";
+                if (overlap > 0 && i > 0) {
+                    String prevContent = chunks.get(i - 1).content();
+                    if (!prevContent.isEmpty()) {
+                        String tail = prevContent.length() <= overlap
+                                ? prevContent : prevContent.substring(prevContent.length() - overlap);
+                        overlapPrefix = tail.replaceAll("\\[图片[^\\]]*\\]", " ").trim();
+                    }
+                }
                 AiKnowledge match = null;
                 List<AiKnowledge> bucket = oldByHash.get(hash);
                 if (bucket != null && !bucket.isEmpty()) {
@@ -306,6 +370,7 @@ public class DocumentService {
                 knowledge.setDocId(docId);
                 knowledge.setTitle(chunk.title());
                 knowledge.setContent(chunk.content());
+                knowledge.setTitlePath(chunk.titlePath());
                 knowledge.setImages(chunk.images().isEmpty() ? null : JSON.toJSONString(chunk.images()));
                 knowledge.setChunkIndex(i);
                 knowledge.setContentHash(hash);
@@ -317,11 +382,14 @@ public class DocumentService {
                 metadata.put("docId", docId);
                 metadata.put("title", chunk.title());
                 metadata.put("knowledgeId", knowledge.getId());
+                if (chunk.titlePath() != null && !chunk.titlePath().isBlank()) {
+                    metadata.put("titlePath", chunk.titlePath());
+                }
                 if (!chunk.images().isEmpty()) {
                     metadata.put("images", JSON.toJSONString(chunk.images()));
                 }
                 aiDocs.add(new Document(knowledge.getId(),
-                        chunk.title() + "\n" + chunk.content(), metadata));
+                        buildEmbedText(chunk.title(), chunk.titlePath(), chunk.content(), overlapPrefix), metadata));
                 added++;
                 // 入库进度：30 → 50（每 10 块上报一次）
                 if ((i + 1) % 10 == 0 || i == total - 1) {
@@ -456,12 +524,20 @@ public class DocumentService {
         }
         List<AiKnowledge> chunks = knowledgeMapper.selectList(
                 new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+        // 删除顺序：先删向量，成功后再删 MySQL 行。
+        // 反序会产生"MySQL 已删、向量残留"的不可见孤儿（无 knowledgeId 可追溯，只能整库重建）；
+        // 本序若向量删除失败则保留 MySQL 行并抛错，用户可重试删除，不产生不可追溯残留。
         if (!chunks.isEmpty()) {
-            List<String> vectorIds = chunks.stream().map(AiKnowledge::getVectorId).toList();
-            try {
-                vectorStore.delete(vectorIds);
-            } catch (Exception e) {
-                log.warn("Failed to delete vectors: {}", e.getMessage());
+            List<String> vectorIds = chunks.stream().map(AiKnowledge::getVectorId)
+                    .filter(Objects::nonNull).filter(s -> !s.isBlank()).toList();
+            if (!vectorIds.isEmpty()) {
+                try {
+                    vectorStore.delete(vectorIds);
+                } catch (Exception e) {
+                    deletedFlags.remove(docId); // 删除未完成，撤销删除标志避免误停后续解析
+                    log.error("[{}] 删除向量失败，已中止删除（MySQL 记录保留，可重试）: {}", docId, e.getMessage());
+                    throw new BizException("删除向量失败，文档未删除，请稍后重试");
+                }
             }
         }
         knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
@@ -564,7 +640,8 @@ public class DocumentService {
     }
 
     /**
-     * 编辑知识块：更新 title/content（images 保留）→ 删旧向量 → 插新向量（同 knowledgeId）
+     * 编辑知识块：先写新向量（同 knowledgeId 覆盖）→ 成功后更新 MySQL → 清理历史遗留的异 id 旧向量。
+     * 顺序保证一致性：向量化失败时 MySQL 与旧向量都不动，抛错让调用方重试，不会出现"内容已改但无向量"。
      */
     public void updateKnowledge(String id, String title, String content) {
         AiKnowledge k = knowledgeMapper.selectById(id);
@@ -578,33 +655,41 @@ public class DocumentService {
         }
 
         String oldVectorId = k.getVectorId();
-        k.setTitle(title.trim());
-        k.setContent(content);
-        k.setContentHash(contentHash(k.getTitle(), k.getContent(), parseImages(k.getImages())));
-        knowledgeMapper.updateById(k);
+        String newTitle = title.trim();
 
-        // 删旧向量（尽力而为）
-        if (oldVectorId != null && !oldVectorId.isBlank()) {
-            try {
-                vectorStore.delete(List.of(oldVectorId));
-            } catch (Exception e) {
-                log.warn("删除旧向量失败 id={}: {}", id, e.getMessage());
-            }
-        }
-        // 插新向量（embedding 失败降级，关键词检索仍可用）
+        // 1. 先写新向量：id 复用 knowledgeId，向量库按 id upsert（同 id 覆盖旧向量）
         try {
             Map<String, Object> metadata = new HashMap<>();
             if (k.getDocId() != null) metadata.put("docId", k.getDocId());
-            metadata.put("title", k.getTitle());
+            metadata.put("title", newTitle);
             metadata.put("knowledgeId", k.getId());
+            if (k.getTitlePath() != null && !k.getTitlePath().isBlank()) {
+                metadata.put("titlePath", k.getTitlePath());
+            }
             if (k.getImages() != null && !k.getImages().isBlank()) {
                 metadata.put("images", k.getImages());
             }
-            vectorStore.add(List.of(new Document(k.getId(), k.getTitle() + "\n" + k.getContent(), metadata)));
-            k.setVectorId(k.getId());
-            knowledgeMapper.updateById(k);
+            vectorStore.add(List.of(new Document(k.getId(),
+                    buildEmbedText(newTitle, k.getTitlePath(), content, null), metadata)));
         } catch (Exception e) {
             log.warn("知识块重新向量化失败 id={}: {}", id, e.getMessage());
+            throw new BizException("知识块向量化失败，内容未修改，请稍后重试");
+        }
+
+        // 2. 向量写入成功后再更新 MySQL（此时两侧内容一致）
+        k.setTitle(newTitle);
+        k.setContent(content);
+        k.setContentHash(contentHash(k.getTitle(), k.getTitlePath(), k.getContent(), parseImages(k.getImages())));
+        k.setVectorId(k.getId());
+        knowledgeMapper.updateById(k);
+
+        // 3. 清理历史遗留的异 id 旧向量（正常链路 vectorId==knowledgeId，已被 upsert 覆盖，无需删除）
+        if (oldVectorId != null && !oldVectorId.isBlank() && !oldVectorId.equals(k.getId())) {
+            try {
+                vectorStore.delete(List.of(oldVectorId));
+            } catch (Exception e) {
+                log.warn("清理旧向量失败 id={} oldVectorId={}: {}", id, oldVectorId, e.getMessage());
+            }
         }
     }
 
@@ -657,6 +742,7 @@ public class DocumentService {
             m.put("id", k.getId());
             m.put("title", k.getTitle());
             m.put("content", k.getContent());
+            m.put("titlePath", k.getTitlePath());
             m.put("images", k.getImages() == null ? null : com.alibaba.fastjson2.JSON.parseArray(k.getImages(), String.class));
             return m;
         }).toList();
@@ -719,10 +805,11 @@ public class DocumentService {
         List<org.springframework.ai.document.Document> aiDocs = new ArrayList<>();
         int idx = 0;
         for (Map<String, Object> item : snapshot) {
-            // 快照字段顺序：id/title/content/images
+            // 快照字段：id/title/content/titlePath/images（旧快照无 titlePath 按 null 兼容）
             String oldId = item.get("id") == null ? null : String.valueOf(item.get("id"));
             String title = item.get("title") == null ? "" : String.valueOf(item.get("title"));
             String content = item.get("content") == null ? "" : String.valueOf(item.get("content"));
+            String titlePath = item.get("titlePath") == null ? null : String.valueOf(item.get("titlePath"));
             Object imagesObj = item.get("images");
             List<String> imgList = imagesObj instanceof List<?> list
                     ? list.stream().map(String::valueOf).toList() : List.of();
@@ -732,9 +819,10 @@ public class DocumentService {
             k.setDocId(docId);
             k.setTitle(title);
             k.setContent(content);
+            k.setTitlePath(titlePath);
             k.setImages(imagesObj == null ? null : JSON.toJSONString(imagesObj));
             k.setChunkIndex(idx++);
-            k.setContentHash(contentHash(title, content, imgList));
+            k.setContentHash(contentHash(title, titlePath, content, imgList));
             knowledgeMapper.insert(k);
             k.setVectorId(k.getId());
             knowledgeMapper.updateById(k);
@@ -743,28 +831,48 @@ public class DocumentService {
             metadata.put("docId", docId);
             metadata.put("title", title);
             metadata.put("knowledgeId", k.getId());
+            if (titlePath != null && !titlePath.isBlank()) metadata.put("titlePath", titlePath);
             if (k.getImages() != null) metadata.put("images", k.getImages());
-            aiDocs.add(new org.springframework.ai.document.Document(k.getId(), title + "\n" + content, metadata));
+            aiDocs.add(new org.springframework.ai.document.Document(k.getId(),
+                    buildEmbedText(title, titlePath, content, null), metadata));
         }
 
-        // 3. 分批向量化
+        // 3. 分批向量化（失败批重试一次；仍失败则记录，最终不谎报回滚成功）
+        int failedBatches = 0;
         if (!aiDocs.isEmpty()) {
             int batchSize = 10;
             for (int i = 0; i < aiDocs.size(); i += batchSize) {
                 int end = Math.min(i + batchSize, aiDocs.size());
+                List<org.springframework.ai.document.Document> batch = aiDocs.subList(i, end);
                 try {
-                    vectorStore.add(aiDocs.subList(i, end));
+                    vectorStore.add(batch);
                 } catch (Exception e) {
-                    log.warn("[{}] 回滚向量化失败 {}-{}: {}", docId, i + 1, end, e.getMessage());
+                    log.warn("[{}] 回滚向量化失败 {}-{}，重试一次: {}", docId, i + 1, end, e.getMessage());
+                    try {
+                        vectorStore.add(batch);
+                    } catch (Exception e2) {
+                        failedBatches++;
+                        log.error("[{}] 回滚向量化重试仍失败 {}-{}: {}", docId, i + 1, end, e2.getMessage());
+                    }
                 }
             }
         }
 
         // 4. 更新文档状态 + 清理较新版本行
         doc.setChunkCount(snapshot.size());
+        doc.setVersion(version);
+        if (failedBatches > 0) {
+            // 部分块无向量（仅关键词可召回）：置失败态并说明，避免"显示回滚成功但向量缺失"的静默不一致
+            doc.setStatus(3);
+            doc.setFailReason("回滚后 " + failedBatches + " 批向量化失败，请重试回滚或重新解析");
+            documentMapper.updateById(doc);
+            documentMetaCache.invalidate(docId);
+            updateProgress(docId, progressGuard.getOrDefault(docId, 0), "回滚向量化失败");
+            log.error("[{}] 回滚到 v{} 未完成: {} 批向量化失败", docId, version, failedBatches);
+            throw new BizException("回滚后有 " + failedBatches + " 批知识块向量化失败，文档已置为解析失败，请重试");
+        }
         doc.setStatus(0);
         doc.setFailReason(null);
-        doc.setVersion(version);
         documentMapper.updateById(doc);
         versionMapper.delete(new LambdaQueryWrapper<com.wisesoft.ai.model.AiDocumentVersion>()
                 .eq(com.wisesoft.ai.model.AiDocumentVersion::getDocId, docId)
@@ -1044,25 +1152,41 @@ public class DocumentService {
     }
 
     /**
-     * 内容指纹：SHA-256(title + "\n" + content + "\n" + images)
+     * 内容指纹：SHA-256(title + "\n" + titlePath + "\n" + content + "\n" + images)
      * 重解析增量对比（未变块保留向量）、知识块编辑/新增维护用。
-     * 纳入 images：图片删除/替换会使指纹变化 → 块走新增，避免复用块引用已删除图片（裂图）。
+     * 含章节路径（章节改名重嵌该章，语义正确）、含 images（图片删除/替换 → 块走新增，避免引用已删图片）。
+     * 不含分块重叠尾巴：前块变动不会连锁改变本块指纹。
      */
     public String contentHash(String title, String content) {
-        return contentHash(title, content, List.of());
+        return contentHash(title, null, content, List.of());
     }
 
-    public String contentHash(String title, String content, List<String> images) {
+    public String contentHash(String title, String titlePath, String content, List<String> images) {
         try {
             String img = images == null || images.isEmpty() ? "" : String.join(",", images);
+            String path = titlePath == null ? "" : titlePath;
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] d = md.digest((title + "\n" + content + "\n" + img).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            byte[] d = md.digest((title + "\n" + path + "\n" + content + "\n" + img)
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder(64);
             for (byte b : d) sb.append(String.format("%02x", b));
             return sb.toString();
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * 向量化/embedding 文本统一拼装：title + 【上下文】章节路径 + 重叠尾巴 + 净正文。
+     * 入库 content 只存净正文；路径与重叠仅作为向量语义的上下文输入，检索时路径另由 RagService 拼装。
+     */
+    private String buildEmbedText(String title, String titlePath, String content, String overlapPrefix) {
+        StringBuilder sb = new StringBuilder();
+        if (title != null && !title.isBlank()) sb.append(title).append("\n");
+        if (titlePath != null && !titlePath.isBlank()) sb.append("【上下文】").append(titlePath).append("\n\n");
+        if (overlapPrefix != null && !overlapPrefix.isBlank()) sb.append(overlapPrefix);
+        sb.append(content);
+        return sb.toString();
     }
 
     /** 知识块 images 字段（JSON 数组串）→ List<String>（空/解析失败返回空列表） */
@@ -1073,31 +1197,5 @@ public class DocumentService {
         } catch (Exception e) {
             return List.of();
         }
-    }
-
-    /**
-     * 分块重叠：除首块外，每块把上一块（原始内容）的尾部 overlap 字符作为前缀拼入，
-     * 保留被硬切/标题分块截断处的上下文（表格、长代码跨块语义）。
-     * 重叠尾巴中剥离 [图片...] 标记与【上下文】路径前缀，避免图片编号/URL/章节路径跨块重复。
-     */
-    private List<Chunk> applyOverlap(List<Chunk> chunks, int overlapChars) {
-        if (overlapChars <= 0 || chunks.size() <= 1) return chunks;
-        List<Chunk> out = new ArrayList<>(chunks.size());
-        for (int i = 0; i < chunks.size(); i++) {
-            Chunk c = chunks.get(i);
-            if (i > 0) {
-                String prevContent = chunks.get(i - 1).content();
-                if (!prevContent.isEmpty()) {
-                    String tail = prevContent.length() <= overlapChars
-                            ? prevContent : prevContent.substring(prevContent.length() - overlapChars);
-                    tail = tail.replaceAll("\\[图片[^\\]]*\\]|【上下文】[^\\n]*\\n?", " ").trim();
-                    if (!tail.isEmpty()) {
-                        c = new Chunk(c.title(), tail + c.content(), c.images());
-                    }
-                }
-            }
-            out.add(c);
-        }
-        return out;
     }
 }

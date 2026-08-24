@@ -140,6 +140,7 @@ public class ChatController {
         m.put("id", k.getId());
         m.put("docId", k.getDocId());
         m.put("title", k.getTitle());
+        m.put("titlePath", k.getTitlePath());
         m.put("content", k.getContent());
         m.put("chunkIndex", k.getChunkIndex());
         m.put("images", (k.getImages() == null || k.getImages().isBlank())

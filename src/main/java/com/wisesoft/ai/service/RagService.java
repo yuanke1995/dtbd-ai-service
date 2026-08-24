@@ -299,6 +299,12 @@ public class RagService {
                     text = extractHitSnippet(text, retrievalTerms, snippetWindow);
                 }
 
+                // 章节路径前置：入库只存净正文，路径在检索时拼入上下文（供 LLM 理解内容出处）。
+                // 放在片段截取之后，保证路径不被窗口截掉、也不占窗口预算。
+                if (hit.titlePath() != null && !hit.titlePath().isBlank()) {
+                    text = "【上下文】" + hit.titlePath() + "\n\n" + text;
+                }
+
                 // 预算控制：累积填充；除第一块外超预算即停止；第一块超预算则截断兜底（保证至少 1 块）
                 int tokens = TokenCounter.estimate(text);
                 if (docNo > 1 && usedTokens + tokens > remainTokens) {

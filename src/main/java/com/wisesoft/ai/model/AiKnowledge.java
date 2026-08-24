@@ -28,7 +28,7 @@ public class AiKnowledge {
     /** 片段标题 */
     private String title;
 
-    /** 片段正文 */
+    /** 片段正文（净内容：不含章节路径前缀、不含分块重叠尾巴） */
     private String content;
 
     /** 关联图片URL列表(JSON数组字符串)，如 ["/ai/images/xxx/1.png", ...] */
@@ -40,8 +40,14 @@ public class AiKnowledge {
     /** Redis 向量库中的文档ID */
     private String vectorId;
 
-    /** 内容指纹(SHA-256: title+content)，重解析增量对比用 */
+    /** 内容指纹(SHA-256: title+titlePath+净content+images)，重解析增量对比用 */
     private String contentHash;
+
+    /**
+     * 章节路径（如 "安装部署/环境准备/依赖安装"）。
+     * 正文只存净内容、路径独立存储：向量化时拼入 embedding 文本，检索时拼入上下文。
+     */
+    private String titlePath;
 
     private LocalDateTime createTime;
 
