@@ -11,11 +11,11 @@ spring:
     # 生产部署：不激活 local，通过环境变量提供密钥与 AI_IMAGES_DIR
     active: local
 
-  # 文件上传限制（Word/PDF 等文档，默认 1MB 太小）
+  # 文件上传物理上限（防内存攻击；业务上限由 c_ai_config 的 upload.maxFileSize 控制，保存即生效）
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 100MB
+      max-file-size: 1024MB
+      max-request-size: 1100MB
 
   # 数据库（独立库，密码必须通过环境变量 DB_PASSWORD 提供，缺失启动即失败）
   datasource:
@@ -93,12 +93,11 @@ ai-app:
     vector-weight: 0.6
     keyword-weight: 0.4
     title-bonus: 0.1
-    # 重排（Ollama 无 rerank 端点，社区 rerank 模型走 /api/embed 近似；也可接独立 OpenAI 兼容服务）
+    # 重排（独立 reranker 服务，OpenAI 兼容 /v1/rerank；本地部署 scripts/win|mac/start_rerank_server.*）
     rerank:
-      provider: ${AI_RERANK_PROVIDER:ollama}
       enabled: ${AI_RERANK_ENABLED:false}
-      base-url: ${AI_RERANK_BASE_URL:http://localhost:11434}
-      model: ${AI_RERANK_MODEL:qllama/bge-reranker-v2-m3}
+      base-url: ${AI_RERANK_BASE_URL:http://localhost:7997}
+      model: ${AI_RERANK_MODEL:BAAI/bge-reranker-v2-m3}
       timeout-ms: 5000
   # 会话
   session:
