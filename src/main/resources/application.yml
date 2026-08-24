@@ -99,6 +99,14 @@ ai-app:
       base-url: ${AI_RERANK_BASE_URL:http://localhost:7997}
       model: ${AI_RERANK_MODEL:BAAI/bge-reranker-v2-m3}
       timeout-ms: 5000
+  # 关键词召回引擎（mysql=LIKE 零依赖但全表扫描；meilisearch=外部索引，中文分词+相关度打分）
+  # 切到 meilisearch 后需先 POST /api/ai/search-index/reindex 建索引；服务不可用时自动降级回 mysql
+  keyword:
+    engine: ${AI_KEYWORD_ENGINE:mysql}
+    base-url: ${AI_MEILI_BASE_URL:http://localhost:7700}
+    api-key: ${AI_MEILI_KEY:}
+    index: ${AI_MEILI_INDEX:ai-doc-chunks}
+    timeout-millis: 1000
   # 会话
   session:
     max-history: 10

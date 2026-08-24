@@ -16,6 +16,7 @@ public class AiAppProperties {
 
     private Chunk chunk = new Chunk();
     private Retrieval retrieval = new Retrieval();
+    private Keyword keyword = new Keyword();
     private Session session = new Session();
     private Images images = new Images();
     private Vision vision = new Vision();
@@ -49,9 +50,26 @@ public class AiAppProperties {
         private double structuralRatio = 0.8;
     }
 
+    /**
+     * 关键词召回引擎：mysql（LIKE，零依赖但全表扫描）/ meilisearch（外部索引，中文分词 + BM25 相关度）。
+     * 引擎/地址/超时可经设置页动态调整；apiKey 只从 env/yml 读取，不落 c_ai_config（避免密钥明文入库）。
+     */
     @Data
-    public static class Retrieval {
-        /** 检索返回 Top-K */
+    public static class Keyword {
+        /** 召回引擎：mysql | meilisearch（默认 mysql，切换后需先 reindex 建索引） */
+        private String engine = "mysql";
+        /** Meilisearch 服务地址 */
+        private String baseUrl = "http://localhost:7700";
+        /** Meilisearch master key（仅 env/yml 配置，不入 DB） */
+        private String apiKey = "";
+        /** 索引名 */
+        private String index = "ai-doc-chunks";
+        /** 单次请求超时(ms)：关键词路是辅助召回，超时即降级，不宜过大 */
+        private int timeoutMillis = 1000;
+    }
+
+    @Data
+    public static class Retrieval {        /** 检索返回 Top-K */
         private int topK = 5;
         /** 相似度阈值 */
         private double similarityThreshold = 0.5;

@@ -1,6 +1,11 @@
 -- ============================================
 -- AI 文档助手 数据库表结构
 -- 数据库: ai_doc_assistant
+--
+-- 存量库升级：无需手动执行 ALTER。启动时 SchemaMigrator 会解析本文件，
+-- 自动为存量表补齐缺失的「列」与「索引」（幂等，失败仅告警不阻塞启动）；
+-- 新表由 spring.sql.init 的 CREATE TABLE IF NOT EXISTS 创建。
+-- 大表补索引耗时较久时，可用 ai-app.schema-auto-index=false 关闭索引自动补齐，改由运维在窗口期执行。
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS `c_ai_document` (
@@ -19,25 +24,31 @@ CREATE TABLE IF NOT EXISTS `c_ai_document` (
     `create_time`  DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `update_time`  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`      INT          DEFAULT 0 COMMENT '逻辑删除: 0=未删除, 1=已删除',
-    PRIMARY KEY (`id`)
+    PRIMARY KEY (`id`),
+    KEY `idx_status_deleted` (`status`, `deleted`),
+    KEY `idx_file_status` (`file_name`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI文档表';
 
--- 2026-08-04: 知识片段新增 images 字段（关联图片URL JSON数组）
 CREATE TABLE IF NOT EXISTS `c_ai_knowledge` (
     `id`           VARCHAR(50)  NOT NULL COMMENT '主键ID',
     `doc_id`       VARCHAR(50)  DEFAULT NULL COMMENT '所属文档ID',
     `title`        VARCHAR(200) DEFAULT NULL COMMENT '片段标题',
-    `content`      TEXT         DEFAULT NULL COMMENT '片段正文',
+    `content`      TEXT         DEFAULT NULL COMMENT '片段正文（净内容：不含章节路径前缀与分块重叠）',
     `images`       VARCHAR(2000) DEFAULT NULL COMMENT '关联图片URL(JSON数组)',
     `chunk_index`  INT          DEFAULT 0 COMMENT '片段序号',
     `vector_id`    VARCHAR(50)  DEFAULT NULL COMMENT 'Redis向量库中的文档ID',
-    `content_hash` VARCHAR(64)  DEFAULT NULL COMMENT '内容指纹(SHA-256: title+content)，重解析增量对比用',
+    `content_hash` VARCHAR(64)  DEFAULT NULL COMMENT '内容指纹(SHA-256: title+title_path+净content+images)，重解析增量对比用',
     `title_path`   VARCHAR(500) DEFAULT NULL COMMENT '章节路径(如 一级/二级/三级)，检索与向量化时拼装上下文，正文不含前缀',
     `create_time`  DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `deleted`      INT          DEFAULT 0 COMMENT '逻辑删除: 0=未删除, 1=已删除',
     PRIMARY KEY (`id`),
-    KEY `idx_doc_id` (`doc_id`)
+    KEY `idx_doc_id` (`doc_id`),
+    KEY `idx_doc_deleted` (`doc_id`, `deleted`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI知识片段表';
+-- 说明：idx_doc_deleted 覆盖按文档取块 + 逻辑删除过滤（增量 diff/孤儿清扫/快照/关键词路 doc 过滤）；
+-- idx_doc_id 为其最左前缀、已冗余，可在窗口期手动 DROP（SchemaMigrator 不会自动删索引）。
+-- 关键词检索：默认走 MySQL content/title LIKE（全表扫描，知识块量大时慢）；
+-- 建议切换到 Meilisearch 引擎（keyword.engine=meilisearch + POST /api/ai/search-index/reindex），根治 LIKE 扫描。
 
 -- ============================================
 -- 2026-08-10: 会话持久化 & 历史回放
@@ -70,18 +81,6 @@ CREATE TABLE IF NOT EXISTS `c_ai_message` (
     PRIMARY KEY (`id`),
     KEY `idx_session_id` (`session_id`, `sequence`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI消息表';
-
--- 2026-08-11: 存量库需手动执行以下 ALTER（消息表新增引用来源列）
--- ALTER TABLE `c_ai_message` ADD COLUMN `sources` TEXT DEFAULT NULL COMMENT '引用来源 (JSON数组字符串)' AFTER `images`;
--- 2026-08-11: 文档表新增解析失败原因列
--- ALTER TABLE `c_ai_document` ADD COLUMN `fail_reason` VARCHAR(500) DEFAULT NULL COMMENT '解析失败原因(status=3)' AFTER `status`;
--- ALTER TABLE `c_ai_document` ADD COLUMN `parse_progress` INT NOT NULL DEFAULT 0 COMMENT '解析进度0-100' AFTER `fail_reason`;
--- ALTER TABLE `c_ai_document` ADD COLUMN `parse_desc` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '解析阶段描述' AFTER `parse_progress`;
--- 2026-08-13: 存量库需手动执行以下 ALTER（问答日志新增改写问题列）
--- ALTER TABLE `c_ai_qa_log` ADD COLUMN `rewritten_query` TEXT DEFAULT NULL COMMENT '改写后的检索用问题' AFTER `question`;
--- 2026-08-15: 存量库需手动执行以下 ALTER（深度思考功能：消息表加思考全文、日志表加深度思考标记）
--- ALTER TABLE `c_ai_message` ADD COLUMN `thinking` TEXT DEFAULT NULL COMMENT '思考过程全文(深度思考)' AFTER `content`;
--- ALTER TABLE `c_ai_qa_log` ADD COLUMN `deep_think` INT DEFAULT 0 COMMENT '是否深度思考: 0=否,1=是' AFTER `rewritten_query`;
 
 -- ============================================
 -- 2026-08-11: 问答数据闭环（日志 + 反馈）
@@ -138,15 +137,9 @@ CREATE TABLE IF NOT EXISTS `c_ai_document_version` (
     `doc_id`        VARCHAR(50)  NOT NULL COMMENT '文档ID',
     `version`       INT          DEFAULT 0 COMMENT '版本号',
     `chunk_count`   INT          DEFAULT 0 COMMENT '该版本知识块数量',
-    `snapshot_json` MEDIUMTEXT   COMMENT '知识块快照(JSON数组:[{id,title,content,images}])',
+    `snapshot_json` MEDIUMTEXT   COMMENT '知识块快照(JSON数组:[{id,title,content,titlePath,images}])',
     `create_time`   DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     `deleted`       INT          DEFAULT 0 COMMENT '逻辑删除: 0=未删除,1=已删除',
     PRIMARY KEY (`id`),
     KEY `idx_doc_version` (`doc_id`, `version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI文档版本快照表';
-
--- 存量库需手动执行以下 ALTER（启动自动建表只覆盖新表，存量表加列需手工）
--- ALTER TABLE `c_ai_session`   ADD COLUMN `is_pinned`   INT DEFAULT 0 COMMENT '是否置顶: 0=否,1=是' AFTER `deleted`,
---                              ADD COLUMN `is_favorite` INT DEFAULT 0 COMMENT '是否收藏: 0=否,1=是' AFTER `is_pinned`;
--- ALTER TABLE `c_ai_document`  ADD COLUMN `category` VARCHAR(50) DEFAULT NULL COMMENT '文档分类' AFTER `description`,
---                              ADD COLUMN `version`   INT DEFAULT 0 COMMENT '当前版本号' AFTER `deleted`;

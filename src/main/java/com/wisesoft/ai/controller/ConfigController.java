@@ -3,6 +3,7 @@ package com.wisesoft.ai.controller;
 import com.wisesoft.ai.dto.ResultJson;
 import com.wisesoft.ai.parser.DocumentParser;
 import com.wisesoft.ai.service.ConfigService;
+import com.wisesoft.ai.service.KeywordIndexService;
 import com.wisesoft.ai.service.RerankService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -30,6 +31,7 @@ public class ConfigController {
     private final ConfigService configService;
     private final List<DocumentParser> parsers;
     private final RerankService rerankService;
+    private final KeywordIndexService keywordIndexService;
 
     @Operation(summary = "获取全量配置", description = "获取所有模型配置项（分组展示 + editable 标记；apiKey 脱敏显示）")
     @GetMapping
@@ -73,6 +75,13 @@ public class ConfigController {
     @GetMapping("/rerank/check")
     public ResultJson checkRerank() {
         return ResultJson.ok(Map.of("available", rerankService.checkAvailable()));
+    }
+
+    /** Meilisearch 可用性探测（设置页切换关键词引擎前校验；绕过缓存真实请求） */
+    @Operation(summary = "探测 Meilisearch", description = "强制探测 Meilisearch /health，返回 available 供前端切换引擎前校验")
+    @GetMapping("/keyword/check")
+    public ResultJson checkKeyword() {
+        return ResultJson.ok(Map.of("available", keywordIndexService.checkAvailable()));
     }
 
     @Operation(summary = "保存配置", description = "保存可编辑的模型配置项（chat.model、chat.temperature、chat.systemPrompt、vision.model、vision.prompt），保存即生效无需重启")

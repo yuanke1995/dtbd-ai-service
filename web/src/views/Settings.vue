@@ -138,8 +138,24 @@
                    message="向量模型不支持页面修改：更换模型后维度可能变化，历史向量全部失效，需删除知识库重新上传文档。" />
         </a-collapse-panel>
 
-        <a-collapse-panel key="retrieval" :id="'cfg-anchor-retrieval'" header="检索设置（混合检索权重 + 重排）">
+        <a-collapse-panel key="retrieval" :id="'cfg-anchor-retrieval'" header="检索设置（混合检索权重 + 重排 + 关键词引擎）">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.keywordEngine" placement="top">关键词引擎 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-select v-model:value="form.keyword.engine" style="width:220px" :options="[
+                { value: 'mysql', label: 'mysql（LIKE，零依赖，库大时慢）' },
+                { value: 'meilisearch', label: 'meilisearch（中文分词+相关度，推荐）' }
+              ]" @change="onKeywordEngineChange" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.keywordBaseUrl" placement="top">引擎服务地址 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.keyword.baseUrl" placeholder="http://localhost:7700" style="width:320px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.keywordTimeout" placement="top">引擎超时(ms) <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.keyword.timeoutMillis" :min="200" :step="100" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">超时自动降级 mysql</span>
+            </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.vectorWeight" placement="top">向量权重 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.retrieval.vectorWeight" :min="0" :max="1" :step="0.05" style="width:200px" />
@@ -315,7 +331,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { QuestionCircleOutlined, SaveOutlined } from '@ant-design/icons-vue'
-import { getConfig, saveConfig, checkRerank } from '../api'
+import { getConfig, saveConfig, checkRerank, checkKeywordEngine } from '../api'
 
 // 折叠面板：默认展开常用分组（chat / retrieval / context / deepReasoning），vision / embedding 收起
 const activeKeys = ref(['chat', 'retrieval', 'context', 'deepReasoning'])
@@ -393,12 +409,36 @@ const tips = {
   retrievalTimeout: '混合检索超时（ms）：关键词子检索与总检索的超时上限，超时降级返回已收集结果。',
   positionBonus: '知识块位置奖励：位于文档首块/前段的内容额外加分。适合"文档开头是摘要"的结构；对顺序无关的文档可调低。',
   rerankMinHits: '触发重排的候选数区间（下限~上限）：候选太少（无意义）或太多（超时风险）时跳过重排，直接用融合分排序。',
-  rerankFailCooldown: '重排服务失败后的冷却时间(ms)：冷却期内不再探测/调用（避免每个请求都撞一次），冷却结束后自动恢复。'
+  rerankFailCooldown: '重排服务失败后的冷却时间(ms)：冷却期内不再探测/调用（避免每个请求都撞一次），冷却结束后自动恢复。',
+  keywordEngine: '关键词召回引擎。mysql=MySQL LIKE（零依赖，知识块量大时全表扫描慢）；meilisearch=外部索引（中文分词+相关度打分，需先启动 Meilisearch 服务并执行全量重建）。切换时自动校验服务可用性，不可用则回滚。',
+  keywordBaseUrl: 'Meilisearch 服务地址（如 http://localhost:7700，docker-compose 部署为容器内地址）。',
+  keywordTimeout: '关键词引擎单次请求超时(ms)：关键词路是辅助召回，超时会自动降级回 MySQL LIKE，不建议设太大。'
 }
 
 const loading = ref(false)
 const saving = ref(false)
 const rerankChecking = ref(false)
+const keywordChecking = ref(false)
+
+// 切换关键词引擎：切到 meilisearch 时先校验服务可用性，不可用则回滚并提示（服务地址需先保存生效）
+const onKeywordEngineChange = async val => {
+  if (val !== 'meilisearch') return
+  keywordChecking.value = true
+  try {
+    const r = await checkKeywordEngine()
+    if (r.success && r.data?.available) {
+      message.success('Meilisearch 服务正常。保存后请执行全量重建（接口 /api/ai/search-index/reindex）再提问')
+    } else {
+      form.value.keyword.engine = 'mysql'
+      message.error('Meilisearch 不可用：请先启动服务（docker compose up meilisearch 或本机二进制），或检查服务地址')
+    }
+  } catch (e) {
+    form.value.keyword.engine = 'mysql'
+    message.error('Meilisearch 校验失败：' + (e.message || '服务不可用'))
+  } finally {
+    keywordChecking.value = false
+  }
+}
 
 // 启用重排开关：打开前先校验服务可用性，服务不正常阻止开启并回滚
 const onRerankEnabledChange = async checked => {
@@ -429,6 +469,7 @@ const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remain
                                  rerank: { enabled: false, baseUrl: 'http://localhost:7997',
                                            model: 'BAAI/bge-reranker-v2-m3', timeoutMillis: 5000,
                                            minHits: 6, maxHits: 15, failCooldownMs: 60000 } },
+                    keyword: { engine: 'mysql', baseUrl: 'http://localhost:7700', timeoutMillis: 1000 },
                     context: { modelWindows: '', defaultWindowTokens: 32768, safetyFactor: 0.7, costCapTokens: 8000,
                                maxOutputTokens: 2000, historyMaxTokens: 1200, historyPerMsgChars: 200,
                                snippetWindowChars: 150, maxContextHits: 8 },
@@ -484,6 +525,10 @@ onMounted(async () => {
       form.value.retrieval.rerank.minHits = Number(rr.minHits?.value ?? 6)
       form.value.retrieval.rerank.maxHits = Number(rr.maxHits?.value ?? 15)
       form.value.retrieval.rerank.failCooldownMs = Number(rr.failCooldownMs?.value ?? 60000)
+      const kw = d.keyword || {}
+      form.value.keyword.engine = kw.engine?.value || 'mysql'
+      form.value.keyword.baseUrl = kw.baseUrl?.value || 'http://localhost:7700'
+      form.value.keyword.timeoutMillis = Number(kw.timeoutMillis?.value ?? 1000)
       const ctx = d.context || {}
       form.value.context.modelWindows = ctx.modelWindows?.value || ''
       form.value.context.defaultWindowTokens = Number(ctx.defaultWindowTokens?.value ?? 32768)
@@ -565,6 +610,9 @@ const save = async () => {
                 minHits: String(form.value.retrieval.rerank.minHits),
                 maxHits: String(form.value.retrieval.rerank.maxHits),
                 failCooldownMs: String(form.value.retrieval.rerank.failCooldownMs) },
+      keyword: { engine: form.value.keyword.engine,
+                 baseUrl: form.value.keyword.baseUrl?.trim(),
+                 timeoutMillis: String(form.value.keyword.timeoutMillis) },
       context: { modelWindows: form.value.context.modelWindows?.trim(),
                  defaultWindowTokens: String(form.value.context.defaultWindowTokens),
                  safetyFactor: String(form.value.context.safetyFactor),

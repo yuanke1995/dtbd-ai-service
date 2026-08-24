@@ -124,7 +124,7 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 
 ## 核心功能
 
-- **混合检索**：Redis 向量 Top-K + MySQL 关键词 LIKE 并行召回（**超时/阈值/召回数/位置奖励等行为参数设置页可调**，保存即生效）；**向量分归一化 + 双命中叠加**（语义+关键词命中 = 向量分+关键词分+标题奖励）；关键词按 **tf×idf 词频加权**（标题词频×2）；**jieba 中文分词**（搜索模式细粒度词元 + 长词 2-gram/4-gram 子词元补充召回宽度，启动预热词典）；**分块位置奖励**（文档首块加权）；Ollama 支持 rerank 时自动启用（候选数在可配置区间内触发），否则回退规则排序
+- **混合检索**：Redis 向量 Top-K + 关键词召回并行（**超时/阈值/召回数/位置奖励等行为参数设置页可调**，保存即生效）；**向量分归一化 + 双命中叠加**（语义+关键词命中 = 向量分+关键词分+标题奖励）；**关键词引擎可切换**（默认 `mysql` LIKE 零依赖；切到 `meilisearch` 用中文分词 + 相关度打分，服务不可用/超时自动降级回 MySQL，首次切换需 `POST /api/ai/search-index/reindex` 全量重建，写索引随解析/编辑/删除增量同步）；**jieba 中文分词**（搜索模式细粒度词元 + 长词 2-gram/4-gram 子词元补充召回宽度，启动预热词典）；**分块位置奖励**（文档首块加权）；Ollama 支持 rerank 时自动启用（候选数在可配置区间内触发），否则回退规则排序
 - **查询改写**：LLM 将用户问题改写为检索关键词（默认开启）；支持多轮对话上下文改写（追问"那删除呢？"自动补全），改写结果入库可评估
 - **上下文与长度控制**：`预算 = min(模型窗口×安全系数 − 输出限制, 成本软上限)`，窗口按当前模型动态匹配；**价值驱动填充**（知识块按相关度分数累积填充，替代固定 8 块）；**块内命中片段截取**（±150 字窗口，边界对齐行/图片标记，长命令不被切断）；**历史裁剪**（单条 200 字 + 总量上限 + 剥离 `[图片N]`）；输出 maxTokens 限制；token 按中英文分语言估算（TokenCounter）
 - **图片链路**：docx 提取图片（去重 + **双图策略**：识别用压缩图 1280px 进视觉模型，**展示用原图**落盘）→ 视觉模型生成描述并随分块落库（Ollama `num_ctx=16384` 防 1280px 视觉 token 截断）→ 检索命中后全局编号 `[图片N：描述]` 供 LLM 选图 → **相关性校验兜底**（`[图片N]` 与描述/上下文不匹配自动剔除并重建编号，防错配）→ SSE `image` 事件 → 前端按标记渲染原图（灯箱：缩放/拖动/多图切换/ESC）；图片描述完成逐张上报进度（10→30 区间"识别图片 k/total"）
@@ -153,7 +153,8 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 | `PUT /api/ai/knowledge/{id}`、`DELETE /api/ai/knowledge/{id}` | 编辑知识块（重新向量化：删旧向量+插新）/ 删除知识块 |
 | `GET /api/ai/knowledge/unmatched`、`POST /api/ai/knowledge` | 无命中问题列表 / 手动创建知识块（自动生成向量） |
 | `POST /api/ai/feedback`、`GET /api/ai/analytics/summary` | 回答反馈 / 看板聚合 |
-| `GET/PUT /api/ai/config` | 模型配置读取（apiKey 脱敏）/ 保存即生效（含检索权重、上下文参数） |
+| `GET/PUT /api/ai/config`、`GET /api/ai/config/keyword/check` | 模型配置读取（apiKey 脱敏）/ 保存即生效（含检索权重、上下文参数）/ 探测 Meilisearch 可用性 |
+| `GET /api/ai/search-index/stats`、`POST /api/ai/search-index/reindex`、`DELETE /api/ai/search-index` | 关键词索引运维：状态统计（indexedCount vs mysqlCount 对比漂移）/ 全量重建（后台执行）/ 清空 |
 | `POST /api/ai/debug/retrieval` | 检索链路分步调试（含检索词元） |
 | `POST /api/ai/eval/generate`、`GET /api/ai/eval/set`、`POST /api/ai/eval/run` | 检索量化评估：从历史问答引用回放生成评估集 / 读取评估集 / 批量参数组对比（recall@k/MRR/命中率 + 弃用文档召回断言） |
 
@@ -202,6 +203,13 @@ curl -X POST http://localhost:8090/api/ai/eval/run \
       {"name":"向量0.7/关键词0.3","mode":"normal","vectorWeight":0.7,"keywordWeight":0.3},
       {"name":"多路合并","mode":"multi"}
     ]}'                                                       # recall@k/MRR/命中率 + 弃用文档断言
+# 5. Meilisearch 关键词引擎（可选，替代 MySQL LIKE 全表扫描）
+docker compose up meilisearch          # 需先设置 AI_MEILI_KEY（master key，与 app 的 AI_MEILI_KEY 一致）
+curl http://localhost:7700/health       # 期望 {"status":"available"}
+# 设置页把"关键词引擎"切到 meilisearch（会自动校验服务可用性）→ 保存
+curl -X POST http://localhost:8090/api/ai/search-index/reindex   # 首次切换/索引漂移后全量重建（后台执行）
+curl http://localhost:8090/api/ai/search-index/stats             # indexedCount 应与 mysqlCount 一致
+# 此后解析/编辑/删除会增量同步索引；服务不可用或超时自动降级回 MySQL LIKE，不影响问答
 ```
 
 **端到端手动验证**（建议每次改动后走一遍）：

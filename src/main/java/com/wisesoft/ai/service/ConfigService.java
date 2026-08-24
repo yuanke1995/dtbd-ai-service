@@ -72,7 +72,10 @@ public class ConfigService {
             Map.entry("rerank.enabled", "重排：是否启用（需先启动本地 reranker 服务）"),
             Map.entry("rerank.baseUrl", "重排：服务地址"),
             Map.entry("rerank.model", "重排：模型名"),
-            Map.entry("rerank.timeoutMillis", "重排：单次超时(ms)"));
+            Map.entry("rerank.timeoutMillis", "重排：单次超时(ms)"),
+            Map.entry("keyword.engine", "关键词引擎：mysql / meilisearch（切换前先探测并重建索引）"),
+            Map.entry("keyword.baseUrl", "关键词引擎：Meilisearch 服务地址"),
+            Map.entry("keyword.timeoutMillis", "关键词引擎：单次超时(ms)"));
 
     private final AiConfigMapper configMapper;
     private final AiAppProperties properties;
@@ -255,6 +258,11 @@ public class ConfigService {
         d.put("rerank.minHits", "6");                      // 触发重排的候选下限
         d.put("rerank.maxHits", "15");                     // 触发重排的候选上限
         d.put("rerank.failCooldownMs", "60000");           // 重排失败后冷却再探测
+        // 关键词召回引擎（mysql=LIKE；meilisearch=外部索引，中文分词+相关度；apiKey/index 只走 yml 不入库）
+        d.put("keyword.engine", properties.getKeyword().getEngine());
+        d.put("keyword.baseUrl", properties.getKeyword().getBaseUrl());
+        d.put("keyword.timeoutMillis", String.valueOf(properties.getKeyword().getTimeoutMillis()));
+        d.put("keyword.failCooldownMs", "60000");          // Meilisearch 失败后冷却再探测
         // 解析行为参数
         d.put("parse.concurrency", "2");                   // 文档解析并发数
         d.put("parse.ocrMinText", "20");                   // PDF 文本少于该长度判定扫描件触发 OCR
@@ -434,6 +442,19 @@ public class ConfigService {
                 throw new IllegalArgumentException("rerank.timeoutMillis 必须是整数");
             }
         }
+        // 关键词引擎校验
+        String ke = updates.get("keyword.engine");
+        if (ke != null && !ke.isBlank() && !"mysql".equalsIgnoreCase(ke) && !"meilisearch".equalsIgnoreCase(ke)) {
+            throw new IllegalArgumentException("keyword.engine 仅允许 mysql / meilisearch");
+        }
+        String kt = updates.get("keyword.timeoutMillis");
+        if (kt != null && !kt.isBlank()) {
+            try {
+                if (Integer.parseInt(kt.trim()) < 200) throw new IllegalArgumentException("keyword.timeoutMillis 不能小于 200");
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("keyword.timeoutMillis 必须是整数");
+            }
+        }
         // 解析参数校验：非负整数（0 表示不限制）
         for (String iKey : new String[]{"chunk.maxChunks", "chunk.maxImages", "vision.concurrency"}) {
             String v = updates.get(iKey);
@@ -484,7 +505,7 @@ public class ConfigService {
     /** 全量配置（供配置界面展示；apiKey 脱敏） */
     public Map<String, Object> snapshot() {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] groups = {"chat", "vision", "embedding", "chunk", "upload", "retrieval", "rerank", "context", "deepReasoning"};
+        String[] groups = {"chat", "vision", "embedding", "chunk", "upload", "retrieval", "rerank", "keyword", "context", "deepReasoning"};
         for (String g : groups) {
             Map<String, Object> items = new LinkedHashMap<>();
             for (Map.Entry<String, String> d : defaults().entrySet()) {

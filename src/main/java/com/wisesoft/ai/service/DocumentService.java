@@ -64,6 +64,7 @@ public class DocumentService {
     private final com.wisesoft.ai.mapper.AiQaLogMapper qaLogMapper;
     private final List<DocumentParser> parsers;
     private final ConfigService configService;
+    private final KeywordIndexService keywordIndexService;
     /** 解析进度节流守卫：docId -> 已上报 progress（值未变化不写库） */
     private final Map<String, Integer> progressGuard = new ConcurrentHashMap<>();
     /** 删除标志：delete() 立即置位，解析线程检查点秒查（不等 DB） */
@@ -240,6 +241,7 @@ public class DocumentService {
                     buildEmbedText(k.getTitle(), k.getTitlePath(), content, null), metadata)));
             k.setVectorId(k.getId());
             knowledgeMapper.updateById(k);
+            keywordIndexService.indexChunks(List.of(k)); // 关键词索引同步（best-effort）
             return true;
         } catch (Exception e) {
             log.warn("知识块向量化失败 id={}: {}", k.getId(), e.getMessage());
@@ -267,6 +269,7 @@ public class DocumentService {
             log.warn("[{}] 补偿删除向量失败: {}", docId, e.getMessage());
         }
         knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+        keywordIndexService.deleteByDoc(docId); // 关键词索引同步（best-effort）
         cleanupImages(docId);
     }
 
@@ -333,6 +336,7 @@ public class DocumentService {
                 }
             }
             List<AiKnowledge> staleOld = new ArrayList<>(oldList);  // 未被新块匹配的旧块（内容变更的旧版/被删段落）→ 清理
+            List<AiKnowledge> newBlocks = new ArrayList<>();        // 本次新增/变更块（向量化成功后同步关键词索引）
             int reused = 0, added = 0;
             int total = chunks.size();
             for (int i = 0; i < total; i++) {
@@ -390,6 +394,7 @@ public class DocumentService {
                 }
                 aiDocs.add(new Document(knowledge.getId(),
                         buildEmbedText(chunk.title(), chunk.titlePath(), chunk.content(), overlapPrefix), metadata));
+                newBlocks.add(knowledge);
                 added++;
                 // 入库进度：30 → 50（每 10 块上报一次）
                 if ((i + 1) % 10 == 0 || i == total - 1) {
@@ -420,6 +425,9 @@ public class DocumentService {
                     }
                 }
                 log.info("[{}] 增量清理旧块 {} 个（内容变更/删除）", docId, staleOld.size());
+                // 关键词索引同步：删除变更/被删块（best-effort）
+                keywordIndexService.deleteChunks(staleOld.stream().map(AiKnowledge::getId)
+                        .filter(Objects::nonNull).toList());
             }
             // 删除感知：入库后、向量化前再查一次
             if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
@@ -446,6 +454,9 @@ public class DocumentService {
 
             // 删除感知：向量化后、回写状态前最后确认
             if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
+
+            // 关键词索引同步：向量化成功后写入本次新增/变更块（best-effort，失败可用 /search-index/reindex 修复）
+            keywordIndexService.indexChunks(newBlocks);
 
             // 孤儿图片清扫：删除未被任何剩余知识块引用的图片文件（被删图/变更图的旧文件；未变图保留供复用块引用）
             sweepOrphanImages(docId);
@@ -488,6 +499,8 @@ public class DocumentService {
                     log.warn("[{}] 补偿删除知识块失败: {}", docId, ex.getMessage());
                 }
             }
+            // 关键词索引同步：删除本次新增块（best-effort）
+            keywordIndexService.deleteChunks(aiDocs.stream().map(Document::getId).toList());
             if (hadExistingContent) {
                 // 重解析失败：未变旧块仍在（变更块已被 diff 清理），回退到生效状态继续可用
                 doc.setStatus(0);
@@ -542,6 +555,7 @@ public class DocumentService {
         }
         knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
         documentMapper.deleteById(docId);
+        keywordIndexService.deleteByDoc(docId); // 关键词索引同步（best-effort）
         // 清理版本快照
         try {
             versionMapper.delete(new LambdaQueryWrapper<com.wisesoft.ai.model.AiDocumentVersion>()
@@ -682,7 +696,7 @@ public class DocumentService {
         k.setContentHash(contentHash(k.getTitle(), k.getTitlePath(), k.getContent(), parseImages(k.getImages())));
         k.setVectorId(k.getId());
         knowledgeMapper.updateById(k);
-
+        keywordIndexService.indexChunks(List.of(k)); // 关键词索引同步：按 id upsert（best-effort）
         // 3. 清理历史遗留的异 id 旧向量（正常链路 vectorId==knowledgeId，已被 upsert 覆盖，无需删除）
         if (oldVectorId != null && !oldVectorId.isBlank() && !oldVectorId.equals(k.getId())) {
             try {
@@ -712,6 +726,7 @@ public class DocumentService {
             }
         }
         knowledgeMapper.deleteById(id);
+        keywordIndexService.deleteChunks(List.of(id)); // 关键词索引同步（best-effort）
 
         // 扣减文档 chunk_count（尽力而为）
         if (k.getDocId() != null) {
@@ -800,9 +815,11 @@ public class DocumentService {
         // 1. 物理清空现有知识块 + 向量（释放主键，允许按原 id 重建）
         deleteVectorsAndKnowledge(docId);
         knowledgeMapper.physicalDeleteByDocId(docId);
+        keywordIndexService.deleteByDoc(docId); // 关键词索引同步：清空该文档旧块（best-effort）
 
         // 2. 按快照重建（复用原 id 保持历史引用可溯源）
         List<org.springframework.ai.document.Document> aiDocs = new ArrayList<>();
+        List<AiKnowledge> rebuilt = new ArrayList<>();
         int idx = 0;
         for (Map<String, Object> item : snapshot) {
             // 快照字段：id/title/content/titlePath/images（旧快照无 titlePath 按 null 兼容）
@@ -835,6 +852,7 @@ public class DocumentService {
             if (k.getImages() != null) metadata.put("images", k.getImages());
             aiDocs.add(new org.springframework.ai.document.Document(k.getId(),
                     buildEmbedText(title, titlePath, content, null), metadata));
+            rebuilt.add(k);
         }
 
         // 3. 分批向量化（失败批重试一次；仍失败则记录，最终不谎报回滚成功）
@@ -878,6 +896,7 @@ public class DocumentService {
                 .eq(com.wisesoft.ai.model.AiDocumentVersion::getDocId, docId)
                 .gt(com.wisesoft.ai.model.AiDocumentVersion::getVersion, version));
         documentMetaCache.invalidate(docId);
+        keywordIndexService.indexChunks(rebuilt); // 关键词索引同步：写入重建块（best-effort）
         log.info("[{}] 回滚到 v{} 完成: {} chunks", docId, version, snapshot.size());
     }
 

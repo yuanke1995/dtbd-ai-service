@@ -217,6 +217,15 @@ export const getRuntimeConfig = () => request('/config/public')
 /** 探测重排服务是否可用（设置页开启前校验） */
 export const checkRerank = () => request('/config/rerank/check')
 
+/** 探测 Meilisearch 是否可用（设置页切换关键词引擎前校验） */
+export const checkKeywordEngine = () => request('/config/keyword/check')
+
+/** 关键词索引运维：引擎状态/索引统计 */
+export const getSearchIndexStats = () => request('/search-index/stats')
+
+/** 关键词索引运维：全量重建（后台执行） */
+export const reindexSearchIndex = () => request('/search-index/reindex', { method: 'POST' })
+
 /** 模型配置：保存可编辑项 {"chat":{...},"vision":{...}} */
 export const saveConfig = payload => request('/config', { method: 'PUT', body: JSON.stringify(payload) })
 

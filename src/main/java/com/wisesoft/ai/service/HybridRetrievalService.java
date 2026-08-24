@@ -46,6 +46,7 @@ public class HybridRetrievalService {
     private final AiAppProperties properties;
     private final KeywordExtractor keywordExtractor;
     private final ConfigService configService;
+    private final KeywordIndexService keywordIndexService;
 
     /**
      * 混合检索结果（chunkIndex 用于位置奖励；titlePath 章节路径，检索侧拼装上下文用）
@@ -183,14 +184,78 @@ public class HybridRetrievalService {
     }
 
     /**
-     * 关键词检索：词元 OR LIKE（content/title），自动排除弃用文档；
-     * 命中后按词频加权（tf×idf，标题词频×2）归一化到 kwScore（0~1）
+     * 关键词检索：按 keyword.engine 分派——
+     * meilisearch（可用时）走外部索引（中文分词 + 相关度打分）；否则/不可用时降级 MySQL 词元 LIKE。
+     * 两条实现返回同一契约：List&lt;AiKnowledge&gt; 且已填充 kwScore/titleHit/hitTerms/totalTerms。
      */
     public List<AiKnowledge> keywordSearch(String query) {
         List<String> terms = keywordExtractor.extract(query);
         if (terms.isEmpty()) return List.of();
         // LIMIT 必须在调用线程求值：supplyAsync 内跑在 commonPool 线程，ThreadLocal 参数覆盖（评估扫参）传不进去
         int limit = keywordLimit();
+        if (keywordIndexService.isAvailable()) {
+            List<AiKnowledge> hits = keywordSearchMeili(query, terms, limit);
+            if (!hits.isEmpty()) return hits;
+            // 索引空/未重建时不静默返回空，回退 MySQL 保证召回（首次切换引擎未 reindex 的常见场景）
+            log.debug("[Keyword] Meilisearch 无命中，回退 MySQL 关键词召回");
+        }
+        return keywordSearchMysql(terms, limit);
+    }
+
+    /**
+     * Meilisearch 关键词召回：索引取 id + 相关度 → 批量载回实体（@TableLogic 自动过滤逻辑删除）
+     * → 剔除非生效文档的块（docId 为空的手动知识块保留，与 MySQL 路 isNull(doc_id) 语义一致）
+     * → 保持索引给出的相关度顺序，截到 limit
+     */
+    private List<AiKnowledge> keywordSearchMeili(String query, List<String> terms, int limit) {
+        // 过量取回（×2）为状态过滤留余量，避免被弃用/解析中文档的块挤掉有效命中
+        List<KeywordIndexService.ScoredId> scored = keywordIndexService.search(query, Math.max(limit * 2, limit));
+        if (scored.isEmpty()) return List.of();
+        Map<String, Double> scoreById = new LinkedHashMap<>();
+        for (KeywordIndexService.ScoredId s : scored) scoreById.put(s.id(), s.score());
+        List<AiKnowledge> loaded;
+        try {
+            loaded = knowledgeMapper.selectBatchIds(scoreById.keySet());
+        } catch (Exception e) {
+            log.warn("[Keyword] 批量载回知识块失败，降级 MySQL: {}", e.getMessage());
+            return List.of();
+        }
+        if (loaded.isEmpty()) return List.of();
+        Map<String, AiKnowledge> byId = loaded.stream()
+                .collect(Collectors.toMap(k -> String.valueOf(k.getId()), k -> k, (a, b) -> a));
+        Set<String> blockedDocIds = loadNonRetrievableDocIds(byId);
+
+        List<AiKnowledge> result = new ArrayList<>();
+        for (Map.Entry<String, Double> e : scoreById.entrySet()) {
+            if (result.size() >= limit) break;
+            AiKnowledge k = byId.get(e.getKey());
+            if (k == null) continue; // 索引有、库已删（漂移）：跳过，reindex 可修正
+            String docId = k.getDocId() == null ? null : String.valueOf(k.getDocId());
+            if (docId != null && !docId.isBlank() && blockedDocIds.contains(docId)) continue;
+            k.setKwScore(e.getValue());   // Meilisearch _rankingScore 已是 0~1 绝对分，直接进融合
+            fillTermStats(k, terms);
+            result.add(k);
+        }
+        return result;
+    }
+
+    /** 回填词元命中统计（titleHit 参与融合的标题奖励；hitTerms/totalTerms 供检索调试展示） */
+    private void fillTermStats(AiKnowledge k, List<String> terms) {
+        int hit = 0;
+        for (String term : terms) {
+            if (countOccurrences(k.getContent(), term) > 0 || countOccurrences(k.getTitle(), term) > 0) hit++;
+        }
+        k.setHitTerms(hit);
+        k.setTotalTerms(terms.size());
+        k.setTitleHit(k.getTitle() != null && terms.stream().anyMatch(k.getTitle()::contains));
+    }
+
+    /**
+     * MySQL 关键词召回（降级路径）：词元 OR LIKE（content/title），自动排除非生效文档；
+     * 命中后按词频加权（tf×idf，标题词频×2）在命中集内归一化到 kwScore（0~1）。
+     * 注意：LIKE 无法走索引，知识块量大时依赖 keywordTimeoutMs 超时兜底。
+     */
+    private List<AiKnowledge> keywordSearchMysql(List<String> terms, int limit) {
         try {
             return CompletableFuture.supplyAsync(() -> {
                 // WHERE doc_id IN (生效文档) AND ((content LIKE ? OR title LIKE ?) OR ...)

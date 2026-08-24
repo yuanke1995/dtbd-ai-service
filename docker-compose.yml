@@ -12,6 +12,23 @@ services:
       timeout: 3s
       retries: 5
 
+  meilisearch:
+    image: getmeili/meilisearch:v1.11
+    container_name: ai-doc-meilisearch
+    ports:
+      - "7700:7700"
+    environment:
+      # master key 必填（缺失将启动失败）；与 app 的 AI_MEILI_KEY 保持一致
+      MEILI_MASTER_KEY: ${AI_MEILI_KEY:?请设置 AI_MEILI_KEY（Meilisearch master key，与 AI_MEILI_KEY 相同）}
+      MEILI_ENV: production
+    volumes:
+      - meili-data:/meili_data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   app:
     build: .
     container_name: ai-doc-assistant
@@ -29,12 +46,20 @@ services:
       AI_IMAGES_DIR: /app/data
       AI_IMAGES_AUTH_ENABLED: ${AI_IMAGES_AUTH_ENABLED:-true}
       LOG_LEVEL_APP: ${LOG_LEVEL_APP:-info}
+      # 关键词检索引擎（mysql=LIKE 零依赖；meilisearch=外部索引，需同时设置以下 Meili 相关变量）
+      AI_KEYWORD_ENGINE: ${AI_KEYWORD_ENGINE:-mysql}
+      AI_MEILI_BASE_URL: http://meilisearch:7700
+      AI_MEILI_KEY: ${AI_MEILI_KEY:-}
+      AI_MEILI_INDEX: ${AI_MEILI_INDEX:-ai-doc-chunks}
     volumes:
       - app-data:/app/data
     depends_on:
       redis-stack:
         condition: service_healthy
+      meilisearch:
+        condition: service_healthy
 
 volumes:
   redis-data:
   app-data:
+  meili-data:
