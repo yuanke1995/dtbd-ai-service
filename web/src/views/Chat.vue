@@ -57,10 +57,10 @@
                     <span v-else class="think-badge">已完成</span>
                   </div>
                   <div v-show="m.thinkOpen" class="think-body" :ref="el => thinkingBodyRefs[i] = el" @click.stop>
-                    <div class="md" v-html="render(m.thinking, [])"></div>
+                    <div class="md" v-html="renderMd(m.thinking, [])"></div>
                   </div>
                 </div>
-                <div class="md" :data-msg-index="i" v-html="render(m.content, m.images)"></div>
+                <div class="md" :data-msg-index="i" v-html="renderMd(m.content, m.images)"></div>
                 <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
                 <!-- 引用来源（回答中 [N] 角标点击查看原文片段） -->
                 <div v-if="m.role === 'ai' && m.sources && m.sources.length" class="src-chips">
@@ -134,7 +134,7 @@
           <template v-else>
             <!-- 知识块全文（溯源；内嵌图片点击可灯箱放大并左右切换；代码块可复制） -->
             <div class="md src-content" @click="openPreview"
-                 v-html="render(prepKnowledgeContent(sourceContent || sourceSnippet, sourceImages), sourceImages)"></div>
+                 v-html="renderMd(prepKnowledgeContent(sourceContent || sourceSnippet, sourceImages), sourceImages)"></div>
           </template>
           <!-- 右下角拖拽伸缩手柄（JS 实现，antd modal teleport 场景 CSS resize 不可靠） -->
           <div class="src-resizer" title="拖拽调整大小" @mousedown="onSrcResizeStart" />
@@ -243,14 +243,11 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import MarkdownIt from 'markdown-it'
-import DOMPurify from 'dompurify'
-import hljs from 'highlight.js/lib/common'
-import 'highlight.js/styles/github.css'
 import { message } from 'ant-design-vue'
 import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
+import { renderMd, resolveImg, onImgError, copyCode, prepKnowledgeContent } from '../utils/markdown'
 
 const text = ref('')
 const textareaRef = ref(null)
@@ -294,11 +291,6 @@ const offset = ref({ x: 0, y: 0 })
 const dragState = ref(null)
 const abortController = ref(null)
 
-// 图片加载兜底：加载失败替换为灰底占位图（签名过期/文件缺失等场景避免裂图）
-const FALLBACK_IMG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120"><rect width="100%" height="100%" fill="#f5f5f5"/><text x="50%" y="50%" fill="#999" font-size="14" text-anchor="middle" dominant-baseline="middle">图片加载失败</text></svg>')
-const onImgError = e => { e.target.onerror = null; e.target.src = FALLBACK_IMG }
-
 // 侧边栏宽度驱动：可拖拽伸缩，缩到阈值(<150px)自动切换为图标条（48px）
 const SIDEBAR_ICON_W = 48
 const SIDEBAR_ICON_THRESHOLD = 150
@@ -333,49 +325,6 @@ function onSidebarDrag(e) {
 const tips = ['系统有哪些功能？', '如何创建一个新表单？', '字段验证怎么设置？', '什么是填报周期？']
 
 // 文档图片访问：data URL（用户上传预览）原样返回；http 原样；其余走 /proxy
-const resolveImg = u => u.startsWith('data:') ? u : u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
-
-// 复制图标 SVG（antd CopyOutlined / CheckOutlined 路径，render 内联生成无需 vRender 组件挂载）
-const COPY_SVG = '<span class="anticon"><svg viewBox="64 64 896 896" width="1em" height="1em" fill="currentColor"><path d="M832 64H296c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496v688c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8V96c0-17.7-14.3-32-32-32zM704 192H192c-17.7 0-32 14.3-32 32v530.7c0 8.5 3.4 16.6 9.4 22.6l173.3 173.3c12.9 12.9 30.2 20 48.4 20H704c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32zM384 824l-128-128h128v128z"/></svg></span>'
-const CHECK_SVG = '<span class="anticon"><svg viewBox="64 64 896 896" width="1em" height="1em" fill="currentColor"><path d="M912 190h-69.9c-9.8 0-19.1 4.5-25.1 12.2L404.7 724.5 207 474c-6.1-7.7-15.3-12.2-25.1-12.2H112c-6.7 0-12.7 4.1-15.2 10.3-2.4 6.3-1.1 13.4 3.6 18.3l235.3 258.5c12.5 13.7 32.5 14.9 46.5 2.7l446.5-424.3c6.4-6.1 9-15.1 5.7-23.4-2.9-7.2-9.8-12.1-17.4-12.1z"/></svg></span>'
-
-// 代码块复制（事件委托入口）：clipboard API 优先（localhost 安全上下文），execCommand 兜底
-const copyCode = btn => {
-  const pre = btn.closest('pre')
-  if (!pre) return
-  const txt = (pre.querySelector('code')?.textContent ?? pre.innerText).trim()
-  if (!txt) return
-  const ok = () => {
-    btn.classList.add('copied')
-    btn.title = '已复制'
-    btn.innerHTML = CHECK_SVG
-    setTimeout(() => { btn.classList.remove('copied'); btn.title = '复制'; btn.innerHTML = COPY_SVG }, 1600)
-  }
-  const fallbackCopy = () => {
-    try {
-      const ta = document.createElement('textarea')
-      ta.value = txt
-      ta.setAttribute('readonly', '')
-      ta.style.position = 'absolute'
-      ta.style.left = '-9999px'
-      ta.style.top = '0'
-      document.body.appendChild(ta)
-      ta.focus()
-      ta.select()
-      ta.setSelectionRange(0, txt.length)
-      const flag = document.execCommand('copy')
-      ta.remove()
-      if (flag) ok()
-      else message.error('复制失败，请手动复制')
-    } catch (err) { message.error('复制失败，请手动复制') }
-  }
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(txt).then(ok).catch(fallbackCopy)
-  } else {
-    fallbackCopy()
-  }
-}
-
 // 点击回答内容：复制按钮 / 引用角标 [N] → 来源详情；图片 → 灯箱预览（事件委托）
 const openPreview = e => {
   const t = e.target
@@ -421,16 +370,6 @@ const sourceSnippet = ref('')
 const sourceImages = ref([])
 const sourceContent = ref('')      // 知识块全文（异步加载）
 const sourceLoading = ref(false)
-// 知识块原文：把无编号的 [图片]/[图片：描述] 按 images 顺序编号，供 render() 渲染
-const prepKnowledgeContent = (content, images) => {
-  if (!content) return ''
-  if (!images.length) return content.replace(/\[图片(?:[：:][^\]]*)?\]/g, '')
-  let i = 0
-  return content.replace(/\[图片(?:[：:][^\]]*)?\]/g, () => {
-    i++
-    return i <= images.length ? `[图片${i}]` : '[图片]'
-  })
-}
 const openSource = async s => {
   if (!s) return
   sourceTitle.value = (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '')
@@ -439,6 +378,13 @@ const openSource = async s => {
   sourceContent.value = ''
   sourceLoading.value = true
   sourceVisible.value = true
+  // 重置上次拖拽残留的高度：antd modal 关闭后 DOM 保留（display:none），
+  // width 会被 props 重写，但 JS 设置的 style.height 没有 prop 对应会残留，
+  // 不重置会导致再次打开时弹窗保持上次拉高后的尺寸
+  nextTick(() => {
+    const modal = document.querySelector('.source-modal .ant-modal')
+    if (modal) modal.style.height = ''
+  })
   try {
     const r = await getKnowledgeDetail(s.knowledgeId)
     if (r.success && r.data) {
@@ -451,9 +397,19 @@ const openSource = async s => {
 }
 
 // 引用弹窗右下角拖拽伸缩（JS 实现：mousedown 记录起点，mousemove 更新 modal 宽高）
+// 拖拽不误关的原理：
+// 1. mousedown 必须 stopPropagation——阻止冒泡到 content 触发 antd 的 onContentMouseDown，
+//    否则 contentClickRef 被置 true；若拖拽结束时 mouseup 落在 modal 外（居中对称扩展时
+//    鼠标易跑出 modal），onContentMouseUp 不触发，该标记残留 true，下次打开弹窗点遮罩会被
+//    antd 误判为「内容内点击」导致遮罩关闭失效。
+// 2. 拖拽结束瞬间（mouseup 后同步派发）的 click 目标常是 wrap（鼠标跑出 modal 落到遮罩上），
+//    不拦截会被 antd 的 onWrapperClick 当作「点遮罩关闭」→ 弹窗被误关。用 capture 阶段
+//    拦截该 click（srcResizing 标志 + setTimeout 延迟移除 guard，恰好覆盖 click 派发）。
+let srcResizing = false
 const onSrcResizeStart = e => {
   e.preventDefault()
   e.stopPropagation()
+  srcResizing = true
   const modal = document.querySelector('.source-modal .ant-modal')
   if (!modal) return
   const startX = e.clientX, startY = e.clientY
@@ -462,14 +418,23 @@ const onSrcResizeStart = e => {
     modal.style.width = Math.max(420, startW + ev.clientX - startX) + 'px'
     modal.style.height = Math.max(240, startH + ev.clientY - startY) + 'px'
   }
+  const onClickGuard = e => {
+    if (srcResizing) e.stopPropagation() // 吞掉拖拽结束的 click，阻止 antd 误关
+  }
   const onUp = () => {
     window.removeEventListener('mousemove', onMove)
     window.removeEventListener('mouseup', onUp)
     document.body.style.userSelect = ''
+    // click 在 mouseup 之后同步派发，setTimeout(0) 确保 click 先经过 guard 再移除
+    setTimeout(() => {
+      window.removeEventListener('click', onClickGuard, true)
+      srcResizing = false
+    }, 0)
   }
   document.body.style.userSelect = 'none' // 拖拽中防选中文本
   window.addEventListener('mousemove', onMove)
   window.addEventListener('mouseup', onUp)
+  window.addEventListener('click', onClickGuard, true)
 }
 // 灯箱切换：重置缩放/平移，到头禁用（不循环）
 const resetView = () => { zoom.value = 1; offset.value = { x: 0, y: 0 } }
@@ -1038,86 +1003,8 @@ const stop = () => {
 
 const ask = q => { text.value = q; nextTick(send) }
 
-// ==================== Markdown 渲染（markdown-it + DOMPurify + highlight.js） ====================
-// 安全：html:false（不渲染原始 HTML）+ DOMPurify 白名单双保险
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,                 // 单换行即换行，贴近原手写行为
-  langPrefix: 'hljs language-', // 代码块带 hljs 类才能着色
-  highlight(str, lang) {
-    if (lang && hljs.getLanguage(lang)) {
-      try { return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value } catch (e) { /* 落空走兜底 */ }
-    }
-    return md.utils.escapeHtml(str) // 兜底必须手动转义（markdown-it 不自动转义 highlight 返回值）
-  }
-})
-// 降级标题：h1→h2 ... h6 封顶（保持原手写 #→h2 行为，h1 留给页面）
-md.renderer.rules.heading_open = t => `<h${Math.min(+t[0].tag[1] + 1, 6)}>`
-md.renderer.rules.heading_close = t => `</h${Math.min(+t[0].tag[1] + 1, 6)}>`
-
-const render = (t, images = []) => {
-  if (!t) return ''
-  // ① 预处理：图片标记 [图片N：描述]/[图片N] → markdown 图片占位（保留位置/顺序）
-  const pre = t.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？\s]*/g, '![img](__AI_IMG_$1__)')
-  // ② 渲染 + 消毒（放行内部图片占位前缀 __AI_IMG_，否则 DOMPurify 会剥掉其 src 导致图片丢失）
-  let html = DOMPurify.sanitize(md.render(pre), {
-    ALLOWED_URI_REGEXP: /^(?:__AI_IMG_|https?:|data:|mailto:|tel:)/i
-  })
-  // ③ DOM 后处理（sanitize 之后新建元素不受白名单限制）
-  const box = document.createElement('div')
-  box.innerHTML = html
-  // 图片：占位 → 真实 src + 居中 + data-seq；图片缺失保留原文 [图片N]
-  box.querySelectorAll('img[src^="__AI_IMG_"]').forEach(img => {
-    const m = (img.getAttribute('src') || '').match(/^__AI_IMG_(\d+)__$/)
-    const n = m ? m[1] : ''
-    const u = images[Number(n) - 1]
-    if (!u) { img.replaceWith(document.createTextNode(`[图片${n}]`)); return }
-    const wrap = document.createElement('div')
-    wrap.style.textAlign = 'center'
-    const real = document.createElement('img')
-    real.className = 'md-img'
-    real.src = resolveImg(u)
-    real.alt = '文档图片'
-    real.onerror = onImgError
-    real.dataset.seq = n
-    wrap.appendChild(real)
-    img.replaceWith(wrap)
-  })
-  // 引用角标：[N] → sup（TreeWalker 跳过 pre/code/a，防误伤代码块/链接内的 [1]）
-  const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT)
-  const targets = []
-  while (walker.nextNode()) {
-    const node = walker.currentNode
-    if (node.nodeValue && /\[\d+\]/.test(node.nodeValue) && !node.parentElement.closest('pre,code,a')) targets.push(node)
-  }
-  for (const node of targets) {
-    const frag = document.createDocumentFragment()
-    node.nodeValue.split(/(\[\d+\])/).forEach(part => {
-      const m = part.match(/^\[(\d+)\]$/)
-      if (m) {
-        const sup = document.createElement('sup')
-        sup.className = 'ref-sup'
-        sup.dataset.ref = m[1]
-        sup.textContent = part
-        frag.appendChild(sup)
-      } else if (part) {
-        frag.appendChild(document.createTextNode(part))
-      }
-    })
-    node.parentNode.replaceChild(frag, node)
-  }
-  // 代码块复制按钮：只生成 HTML 结构（事件统一委托到 openPreview，避免 innerHTML 序列化丢失事件）
-  box.querySelectorAll('pre').forEach(pre => {
-    const btn = document.createElement('button')
-    btn.type = 'button'
-    btn.className = 'code-copy'
-    btn.title = '复制'
-    btn.innerHTML = COPY_SVG
-    pre.appendChild(btn)
-  })
-  return box.innerHTML
-}
+// Markdown 渲染统一走公共模块（utils/markdown.js）：renderMd / resolveImg / onImgError / copyCode / prepKnowledgeContent
+// 交互事件（角标→来源弹窗、图片→灯箱、代码复制）由 openPreview 事件委托处理
 
 const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.value.scrollHeight })
 </script>
@@ -1316,25 +1203,6 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .input-suffix :deep(.ant-btn) { padding: 0; }
 .input-suffix .anticon-send { color: #1677ff; }
 .input-suffix .anticon-send:hover { opacity: .8; }
-.md :deep(img) { max-width: 100%; max-height: 320px; border: 1px solid #e0e0e0; border-radius: 6px; display: block; margin: 8px 0; cursor: zoom-in; }
-/* 引用角标 [N] */
-.md :deep(.ref-sup) { color: #1677ff; font-size: 12px; cursor: pointer; user-select: none; }
-/* Markdown 完整渲染样式 */
-.md :deep(p) { margin: 6px 0; }
-.md :deep(h2), .md :deep(h3), .md :deep(h4), .md :deep(h5) { margin: 12px 0 6px; font-weight: 600; }
-.md :deep(h2) { font-size: 17px; } .md :deep(h3) { font-size: 15px; } .md :deep(h4) { font-size: 14px; }
-.md :deep(code) { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
-.md :deep(pre) { background: #f6f8fa; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; margin: 8px 0; position: relative; max-height: 360px; overflow-y: auto; }
-.md :deep(pre code) { background: none; padding: 0; display: block; white-space: pre-wrap; word-break: break-word; }
-.md :deep(table) { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px; }
-.md :deep(th), .md :deep(td) { border: 1px solid #e0e0e0; padding: 6px 10px; text-align: left; word-break: break-word; }
-.md :deep(th) { background: #fafafa; font-weight: 600; white-space: nowrap; }
-.md :deep(blockquote) { margin: 8px 0; padding: 6px 12px; border-left: 3px solid #d9d9d9; color: #666; background: #fafafa; border-radius: 0 4px 4px 0; }
-.md :deep(ul), .md :deep(ol) { margin: 4px 0; padding-left: 20px; }
-.md :deep(li) { margin: 2px 0; }
-.md :deep(li.ul-item.d1) { margin-left: 16px; list-style-type: circle; }
-.md :deep(li.ul-item.d2) { margin-left: 32px; list-style-type: square; }
-.md :deep(hr) { border: none; border-top: 1px solid #e8e8e8; margin: 10px 0; }
 /* 检索调试面板 */
 .dbg-item { padding: 6px 8px; margin-bottom: 6px; border: 1px solid #f0f0f0; border-radius: 6px; background: #fafafa; }
 /* 检索词元展示行 */
@@ -1343,20 +1211,6 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .dbg-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .dbg-title { font-weight: 500; font-size: 13px; }
 .dbg-snippet { margin-top: 3px; font-size: 12px; color: #888; word-break: break-all; }
-/* 代码块复制按钮（antd Tooltip 渲染页面层；render 动态创建，scoped 需 :deep） */
-.md :deep(.code-copy) {
-  position: absolute; top: 8px; right: 8px; z-index: 1;
-  width: 26px; height: 26px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 14px;
-  color: #555; background: rgba(255,255,255,.85);
-  border: 1px solid #e0e0e0; border-radius: 4px;
-  cursor: pointer; opacity: 0; transition: opacity .15s;
-}
-.md :deep(pre:hover .code-copy) { opacity: 1; }
-.md :deep(.code-copy:hover) { color: #1677ff; border-color: #1677ff; }
-.md :deep(.code-copy.copied) { color: #52c41a; border-color: #52c41a; }
-.md :deep(.ref-sup:hover) { text-decoration: underline; }
 /* 来源引用 chips */
 .src-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
 .src-chips :deep(.ant-tag) { font-size: 12px; }

@@ -11,10 +11,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
+import java.net.http.HttpClient;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -104,9 +106,14 @@ public class KeywordIndexService {
         if (client == null || !url.equals(clientBaseUrl) || t != clientTimeout) {
             synchronized (this) {
                 if (client == null || !url.equals(clientBaseUrl) || t != clientTimeout) {
-                    SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-                    factory.setConnectTimeout(2000);
-                    factory.setReadTimeout(t);
+                    // 注意：不能用 SimpleClientHttpRequestFactory（HttpURLConnection 不支持 PATCH，settings 校准会抛
+                    // ProtocolException: Invalid HTTP method: PATCH）；改用 JdkClientHttpRequestFactory（java.net.http.HttpClient）。
+                    // 其连接超时只能在构造 HttpClient 时配置，读超时用 setReadTimeout(Duration)
+                    HttpClient httpClient = HttpClient.newBuilder()
+                            .connectTimeout(Duration.ofMillis(2000))
+                            .build();
+                    JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
+                    factory.setReadTimeout(Duration.ofMillis(t));
                     RestClient.Builder builder = RestClient.builder().baseUrl(url).requestFactory(factory);
                     String key = apiKey();
                     if (key != null && !key.isBlank()) {

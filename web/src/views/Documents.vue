@@ -86,14 +86,21 @@
       </a-spin>
     </a-modal>
 
-    <!-- 知识块编辑弹窗（title/content；图片保留） -->
+    <!-- 知识块编辑弹窗（title/content；图片保留；编辑/预览切换） -->
     <a-modal v-model:open="kbEditVisible" title="编辑知识块" :footer="null" width="640">
       <a-form layout="vertical">
         <a-form-item label="标题">
           <a-input v-model:value="kbEditForm.title" maxlength="200" placeholder="知识块标题" />
         </a-form-item>
         <a-form-item label="内容">
-          <a-textarea v-model:value="kbEditForm.content" :rows="10" placeholder="知识块正文" />
+          <a-tabs v-model:active-key="kbEditTab" size="small">
+            <a-tab-pane key="edit" tab="编辑">
+              <a-textarea v-model:value="kbEditForm.content" :rows="10" placeholder="知识块正文（支持 Markdown 语法，图片用 [图片N] 占位）" />
+            </a-tab-pane>
+            <a-tab-pane key="preview" tab="预览">
+              <div class="md" style="max-height:280px;overflow-y:auto;font-size:14px;line-height:1.7;color:#333;padding:2px 4px" v-html="kbEditPreviewHtml"></div>
+            </a-tab-pane>
+          </a-tabs>
         </a-form-item>
       </a-form>
       <div style="text-align:right">
@@ -122,33 +129,22 @@
       </a-spin>
     </a-modal>
 
-    <!-- 知识块详情 -->
+    <!-- 知识块详情（markdown 渲染 + 图片按原文位置交错，与问答页引用弹窗一致） -->
     <a-modal v-model:open="kbDetailVisible" :title="kbDetail?.title || '知识块详情'" :footer="null" width="720">
-      <div style="white-space:pre-wrap;font-size:13px;line-height:1.7">{{ kbDetail?.content }}</div>
-      <div v-if="kbDetail?.images?.length" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">
-        <img v-for="(u, ui) in kbDetail.images" :key="ui" :src="resolveImg(u)"
-             style="width:120px;border-radius:6px;border:1px solid #eee" :alt="'知识块图片' + (ui + 1)" @error="onImgError" />
-      </div>
+      <div class="md" style="max-height:60vh;overflow-y:auto;font-size:14px;line-height:1.7;color:#333;padding-right:6px" v-html="kbDetailHtml"></div>
     </a-modal>
   </a-card>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { UploadOutlined, DeleteOutlined } from '@ant-design/icons-vue'
 import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocument, deleteDocument,
          batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats, listKnowledgeByDoc, getKnowledgeDetail,
          updateKnowledge, deleteKnowledge, listDocumentVersions, rollbackDocument,
          getRuntimeConfig } from '../api'
-
-// 知识块预览：图片 URL 兼容（/ai/ 前缀走 /proxy）
-const resolveImg = u => u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
-
-// 图片加载兜底：加载失败替换为灰底占位图（签名过期/文件缺失等场景避免裂图）
-const FALLBACK_IMG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120"><rect width="100%" height="100%" fill="#f5f5f5"/><text x="50%" y="50%" fill="#999" font-size="14" text-anchor="middle" dominant-baseline="middle">图片加载失败</text></svg>')
-const onImgError = e => { e.target.onerror = null; e.target.src = FALLBACK_IMG }
+import { renderMd } from '../utils/markdown'
 
 // 知识块预览状态
 const kbVisible = ref(false)
@@ -157,6 +153,8 @@ const kbList = ref([])
 const kbDocName = ref('')
 const kbDetailVisible = ref(false)
 const kbDetail = ref(null)
+// 详情弹窗：markdown 渲染 + 图片按原文位置交错（与问答页引用弹窗一致）
+const kbDetailHtml = computed(() => renderMd(kbDetail.value?.content, kbDetail.value?.images))
 const openKb = async record => {
   kbDocName.value = record.fileName
   kbDocId.value = record.id
@@ -183,9 +181,21 @@ const openKbDetail = async row => {
 const kbEditVisible = ref(false)
 const kbEditSaving = ref(false)
 const kbEditForm = ref({ id: '', title: '', content: '' })
-const openKbEdit = row => {
+const kbEditTab = ref('edit')        // 编辑弹窗内 tab：edit 源码 / preview 渲染
+const kbEditImages = ref([])         // 预览用图片（列表 record 无 images，打开时异步补）
+const kbEditPreviewHtml = computed(() => renderMd(kbEditForm.value.content, kbEditImages.value))
+const openKbEdit = async row => {
   kbEditForm.value = { id: row.id, title: row.title || '', content: row.content || '' }
+  kbEditImages.value = []
+  kbEditTab.value = 'edit'
   kbEditVisible.value = true
+  // 预览需要图片：正文含 [图片 占位时异步补充 images（失败则空数组，预览时图片位显示 [图片N] 原文）
+  if (/\s*\[图片/.test(kbEditForm.value.content)) {
+    try {
+      const r = await getKnowledgeDetail(row.id)
+      if (r.success && Array.isArray(r.data?.images)) kbEditImages.value = r.data.images
+    } catch (e) { /* 预览降级为无图，不阻塞编辑 */ }
+  }
 }
 const saveKnowledgeEdit = async () => {
   if (!kbEditForm.value.title.trim()) { message.warning('标题不能为空'); return }
