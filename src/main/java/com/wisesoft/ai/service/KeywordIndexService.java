@@ -3,9 +3,13 @@ package com.wisesoft.ai.service;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.wisesoft.ai.config.AiAppProperties;
+import com.wisesoft.ai.mapper.AiKnowledgeMapper;
 import com.wisesoft.ai.model.AiKnowledge;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
@@ -27,7 +31,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - 启用开关 keyword.engine=meilisearch；未启用/探测失败/调用失败 → 调用方自动降级回 MySQL LIKE
  * - 探测结果缓存 + 失败冷却（keyword.failCooldownMs），冷却结束自动重探，避免每请求都撞
  * - 配置（baseUrl/timeout）变更自动重建客户端并重置探测
- * - 写索引全部 best-effort（失败只告警不抛），最终一致由 /api/ai/search-index/reindex 全量重建兜底
+ * - 写索引全部 best-effort（失败只告警不抛），最终一致由 reindexAll() 全量重建兜底
+ *   （切换引擎保存配置时自动触发，无需手动调接口；运维也可调 /api/ai/search-index/reindex）
  */
 @Slf4j
 @Service
@@ -35,6 +40,7 @@ public class KeywordIndexService {
 
     private final AiAppProperties properties;
     private final ConfigService configService;
+    private final AiKnowledgeMapper knowledgeMapper;
 
     private final AtomicBoolean supportChecked = new AtomicBoolean(false);
     private volatile boolean available = false;
@@ -42,13 +48,17 @@ public class KeywordIndexService {
     /** 索引与 settings 是否已初始化（每次客户端重建后重新初始化） */
     private volatile boolean indexReady = false;
 
+    /** 全量重建进行中标志（防并发重复重建） */
+    private final AtomicBoolean reindexing = new AtomicBoolean(false);
+
     private volatile RestClient client;
     private volatile String clientBaseUrl = "";
     private volatile int clientTimeout = 0;
 
-    public KeywordIndexService(AiAppProperties properties, ConfigService configService) {
+    public KeywordIndexService(AiAppProperties properties, ConfigService configService, AiKnowledgeMapper knowledgeMapper) {
         this.properties = properties;
         this.configService = configService;
+        this.knowledgeMapper = knowledgeMapper;
     }
 
     // ==================== 配置（动态读取，保存即生效） ====================
@@ -315,7 +325,100 @@ public class KeywordIndexService {
         }
     }
 
-    /** 索引内文档数（探测失败或未启用返回 -1） */
+    /**
+     * 全量重建索引：分批（每批 1000）从 MySQL 读取 push，避免一次性载入全部块。
+     * 首次切换引擎、索引漂移后使用；切换引擎保存配置时自动触发，也可手动调 /reindex。
+     * 防并发重复（AtomicBoolean），后台线程执行不阻塞调用方。
+     */
+    public void reindexAll() {
+        if (!enabled()) {
+            log.info("[Reindex] 关键词引擎未启用 Meilisearch（keyword.engine=mysql），跳过全量重建");
+            return;
+        }
+        // 先确保索引存在（首次切换/索引被删时 404 index_not_found 会误判为服务不可用；ensureIndex 幂等，失败仅告警）
+        ensureIndex();
+        if (!isAvailable()) {
+            log.warn("[Reindex] Meilisearch 服务不可用，跳过全量重建");
+            return;
+        }
+        if (!reindexing.compareAndSet(false, true)) {
+            log.info("[Reindex] 全量重建进行中，跳过本次触发");
+            return;
+        }
+        new Thread(() -> {
+            long total = 0;
+            try {
+                String lastId = "";
+                while (true) {
+                    // 只灌有效块（status=0 文档的块 + 手动块 docId IS NULL），使"索引集合 = 有效块集合"闭环：
+                    // 弃用/失败文档的块不入索引，启动对账（indexedCount vs 有效块数）不会因残留而每次重建
+                    List<AiKnowledge> batch = knowledgeMapper.selectList(
+                            new LambdaQueryWrapper<AiKnowledge>()
+                                    .gt(AiKnowledge::getId, lastId) // UUID 字符串升序游标
+                                    .and(w -> w.isNull(AiKnowledge::getDocId)
+                                            .or().inSql(AiKnowledge::getDocId,
+                                                    "SELECT id FROM c_ai_document WHERE status=0 AND deleted=0"))
+                                    .orderByAsc(AiKnowledge::getId)
+                                    .last("LIMIT 1000"));
+                    if (batch.isEmpty()) break;
+                    indexChunks(batch);
+                    lastId = batch.get(batch.size() - 1).getId();
+                    total += batch.size();
+                    log.info("[Reindex] 已重建 {} 块", total);
+                    if (batch.size() < 1000) break;
+                }
+                log.info("[Reindex] 全量重建完成，共 {} 块", total);
+            } catch (Exception e) {
+                log.error("[Reindex] 全量重建失败（已完成 {} 块）: {}", total, e.getMessage());
+            } finally {
+                reindexing.set(false);
+            }
+        }, "search-index-reindex").start();
+    }
+
+    /**
+     * 启动索引对账（自愈漂移）：engine=meilisearch 且 keyword.reconcileOnStartup 开（默认 true）时，
+     * 比对索引文档数 vs MySQL 有效块数，不一致 → 后台全量重建。
+     * 放在 ApplicationReadyEvent：晚于 SchemaMigrator/所有 @PostConstruct，配置与表结构就绪。
+     * 多副本：reindexAll 幂等 + AtomicBoolean 防重入，重复重建无害（upsert 覆盖）。
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void reconcileOnStartup() {
+        try {
+            if (!enabled()) return;
+            if (!configService.getBoolean("keyword.reconcileOnStartup")) return;
+            long effective = effectiveCount();
+            long indexed = indexedCount();
+            if (effective < 0 || indexed < 0) {
+                log.info("[Reconcile] 启动对账跳过（计数不可用：effective={}, indexed={}）", effective, indexed);
+                return;
+            }
+            if (indexed != effective) {
+                log.warn("[Reconcile] 索引漂移（索引 {} vs 有效块 {}），自动全量重建", indexed, effective);
+                reindexAll();
+            } else {
+                log.info("[Reconcile] 关键词索引一致（{} 块），无需重建", indexed);
+            }
+        } catch (Exception e) {
+            log.warn("[Reconcile] 启动对账失败: {}", e.getMessage());
+        }
+    }
+
+    /** MySQL 有效知识块数（status=0 文档的块 + 手动块 docId IS NULL；失败返回 -1） */
+    private long effectiveCount() {
+        try {
+            Long n = knowledgeMapper.selectCount(new LambdaQueryWrapper<AiKnowledge>()
+                    .and(w -> w.isNull(AiKnowledge::getDocId)
+                            .or().inSql(AiKnowledge::getDocId,
+                                    "SELECT id FROM c_ai_document WHERE status=0 AND deleted=0")));
+            return n == null ? 0 : n;
+        } catch (Exception e) {
+            log.warn("[Reconcile] 有效块计数失败: {}", e.getMessage());
+            return -1;
+        }
+    }
+
+    /** 索引内文档数（探测失败或未启用返回 -1；索引尚未创建返回 0） */
     public long indexedCount() {
         if (!isAvailable()) return -1;
         try {
@@ -324,6 +427,11 @@ public class KeywordIndexService {
             Long n = JSON.parseObject(resp).getLong("numberOfDocuments");
             return n == null ? -1 : n;
         } catch (Exception e) {
+            // 索引尚未创建（404 index_not_found）= 0 文档，不是服务故障：不触发冷却，
+            // 由 ensureIndex/reindexAll 自动创建索引后重建
+            if (e.getMessage() != null && e.getMessage().contains("index_not_found")) {
+                return 0;
+            }
             markFailed("查询索引统计", e);
             return -1;
         }

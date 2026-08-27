@@ -406,29 +406,6 @@ public class DocumentService {
                     return;
                 }
             }
-            // 清理未被新块匹配的旧块（内容变更的旧版本 / 被删除的段落与图片）
-            if (!staleOld.isEmpty()) {
-                List<String> delIds = staleOld.stream().map(AiKnowledge::getVectorId)
-                        .filter(Objects::nonNull).filter(s -> !s.isBlank()).toList();
-                if (!delIds.isEmpty()) {
-                    try {
-                        vectorStore.delete(delIds);
-                    } catch (Exception e) {
-                        log.warn("[{}] 增量清理旧向量失败: {}", docId, e.getMessage());
-                    }
-                }
-                for (AiKnowledge d : staleOld) {
-                    try {
-                        knowledgeMapper.physicalDeleteById(d.getId());
-                    } catch (Exception e) {
-                        log.warn("[{}] 增量清理旧块失败: {}", docId, e.getMessage());
-                    }
-                }
-                log.info("[{}] 增量清理旧块 {} 个（内容变更/删除）", docId, staleOld.size());
-                // 关键词索引同步：删除变更/被删块（best-effort）
-                keywordIndexService.deleteChunks(staleOld.stream().map(AiKnowledge::getId)
-                        .filter(Objects::nonNull).toList());
-            }
             // 删除感知：入库后、向量化前再查一次
             if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
 
@@ -457,6 +434,32 @@ public class DocumentService {
 
             // 关键词索引同步：向量化成功后写入本次新增/变更块（best-effort，失败可用 /search-index/reindex 修复）
             keywordIndexService.indexChunks(newBlocks);
+
+            // 清理未被新块匹配的旧块（内容变更的旧版本 / 被删除的段落与图片）。
+            // 时机必须在向量化成功之后：若向量化失败，旧块仍保留 → hadExistingContent 回退 status=0 时内容完整可用；
+            // 若提前删除，失败后旧版已毁、新版未建成，文档知识块全空（回退失效）。
+            if (!staleOld.isEmpty()) {
+                List<String> delIds = staleOld.stream().map(AiKnowledge::getVectorId)
+                        .filter(Objects::nonNull).filter(s -> !s.isBlank()).toList();
+                if (!delIds.isEmpty()) {
+                    try {
+                        vectorStore.delete(delIds);
+                    } catch (Exception e) {
+                        log.warn("[{}] 增量清理旧向量失败: {}", docId, e.getMessage());
+                    }
+                }
+                for (AiKnowledge d : staleOld) {
+                    try {
+                        knowledgeMapper.physicalDeleteById(d.getId());
+                    } catch (Exception e) {
+                        log.warn("[{}] 增量清理旧块失败: {}", docId, e.getMessage());
+                    }
+                }
+                // 关键词索引同步：删除变更/被删块（best-effort）
+                keywordIndexService.deleteChunks(staleOld.stream().map(AiKnowledge::getId)
+                        .filter(Objects::nonNull).toList());
+                log.info("[{}] 增量清理旧块 {} 个（内容变更/删除）", docId, staleOld.size());
+            }
 
             // 孤儿图片清扫：删除未被任何剩余知识块引用的图片文件（被删图/变更图的旧文件；未变图保留供复用块引用）
             sweepOrphanImages(docId);
@@ -612,7 +615,9 @@ public class DocumentService {
     }
 
     /**
-     * 启停用文档（仅改 MySQL status + 缓存；向量保留，检索侧按 status 过滤实现即时生效）
+     * 启停用文档（改 MySQL status + 缓存 + 关键词索引同步）。
+     * 向量保留，检索侧按 status 过滤即时生效；索引同步使 Meilisearch 与有效块集合保持一致：
+     * 弃用 → 从索引删除该文档全部块（不漂移、不占位）；恢复 → 现存块重新灌入。
      */
     public void updateStatus(String docId, int status) {
         AiDocument doc = documentMapper.selectById(docId);
@@ -621,6 +626,22 @@ public class DocumentService {
         doc.setStatus(status);
         documentMapper.updateById(doc);
         documentMetaCache.invalidate(docId);
+        // 关键词索引同步（best-effort，失败仅告警；检索侧 loadNonRetrievableDocIds 已兜底过滤弃用）
+        try {
+            if (status == 1) {
+                keywordIndexService.deleteByDoc(docId);
+                log.info("[{}] 文档已弃用，关键词索引已移除", docId);
+            } else {
+                List<AiKnowledge> blocks = knowledgeMapper.selectList(
+                        new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+                if (!blocks.isEmpty()) {
+                    keywordIndexService.indexChunks(blocks);
+                    log.info("[{}] 文档已恢复，关键词索引已灌入 {} 块", docId, blocks.size());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[{}] 关键词索引同步失败（可稍后 /reindex 修复）: {}", docId, e.getMessage());
+        }
     }
 
     /**

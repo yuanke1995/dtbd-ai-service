@@ -82,6 +82,8 @@ public class ConfigService {
     private final Environment environment;
     private final StringRedisTemplate redisTemplate;
     private final RedisProperties redisProperties;
+    /** @Lazy 打破循环依赖：KeywordIndexService 构造依赖本类，仅引擎切换校验/重建时使用 */
+    private final KeywordIndexService keywordIndexService;
 
     /** 配置变更广播 channel（多实例同步：任意实例保存配置 → 其他实例订阅后重载缓存） */
     public static final String CONFIG_CHANNEL = "ai:config:changed";
@@ -89,12 +91,14 @@ public class ConfigService {
     private volatile Map<String, String> cache = new HashMap<>();
 
     public ConfigService(AiConfigMapper configMapper, AiAppProperties properties, Environment environment,
-                         StringRedisTemplate redisTemplate, RedisProperties redisProperties) {
+                         StringRedisTemplate redisTemplate, RedisProperties redisProperties,
+                         @org.springframework.context.annotation.Lazy KeywordIndexService keywordIndexService) {
         this.configMapper = configMapper;
         this.properties = properties;
         this.environment = environment;
         this.redisTemplate = redisTemplate;
         this.redisProperties = redisProperties;
+        this.keywordIndexService = keywordIndexService;
     }
 
     @jakarta.annotation.PostConstruct
@@ -263,6 +267,7 @@ public class ConfigService {
         d.put("keyword.baseUrl", properties.getKeyword().getBaseUrl());
         d.put("keyword.timeoutMillis", String.valueOf(properties.getKeyword().getTimeoutMillis()));
         d.put("keyword.failCooldownMs", "60000");          // Meilisearch 失败后冷却再探测
+        d.put("keyword.reconcileOnStartup", "true");       // 启动索引对账：漂移自动重建（多副本部署可置 false 由运维单点执行）
         // 解析行为参数
         d.put("parse.concurrency", "2");                   // 文档解析并发数
         d.put("parse.ocrMinText", "20");                   // PDF 文本少于该长度判定扫描件触发 OCR
@@ -447,6 +452,14 @@ public class ConfigService {
         if (ke != null && !ke.isBlank() && !"mysql".equalsIgnoreCase(ke) && !"meilisearch".equalsIgnoreCase(ke)) {
             throw new IllegalArgumentException("keyword.engine 仅允许 mysql / meilisearch");
         }
+        // 切换到 meilisearch：保存前强制探测服务可用性，不可用则阻止保存（避免切到不可用的空索引）
+        if (ke != null && "meilisearch".equalsIgnoreCase(ke)) {
+            if (!keywordIndexService.checkAvailable()) {
+                String reason = keywordIndexService.debugUnavailableReason();
+                throw new IllegalArgumentException("Meilisearch 服务不可用（" + (reason == null ? "探测失败" : reason)
+                        + "），请先启动 Meilisearch（docker compose 或本地）再切换");
+            }
+        }
         String kt = updates.get("keyword.timeoutMillis");
         if (kt != null && !kt.isBlank()) {
             try {
@@ -499,6 +512,16 @@ public class ConfigService {
         log.info("模型配置已更新: {}", updates.keySet());
         // 广播其他实例刷新（多副本部署配置同步）
         publishConfigChanged();
+        // 自动全量重建：本次保存把引擎设为 meilisearch → 无条件全量灌入（以 MySQL 为准覆盖，
+        // 索引是否已有数据不影响——旧数据可能漂移/残留；reindexAll 内部有防重入与可用性检查）
+        if (updates.containsKey("keyword.engine") && "meilisearch".equalsIgnoreCase(updates.get("keyword.engine"))) {
+            try {
+                keywordIndexService.reindexAll();
+                log.info("[Config] 关键词引擎已切换至 Meilisearch，自动触发索引全量重建");
+            } catch (Exception e) {
+                log.warn("[Config] 自动触发索引重建失败（可稍后手动调 /api/ai/search-index/reindex）: {}", e.getMessage());
+            }
+        }
         return updates;
     }
 
