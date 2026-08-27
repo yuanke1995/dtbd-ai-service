@@ -1,0 +1,154 @@
+// ==================== Markdown 渲染公共模块 ====================
+// 问答页（Chat.vue）与文档管理（Documents.vue）共用同一渲染管线：
+// markdown-it + DOMPurify + highlight.js，图文交错、引用角标、代码复制按钮。
+// 纯函数设计：不依赖任何组件状态/消息上下文，产物 HTML 由调用方决定交互语义
+// （Chat：角标→来源弹窗、图片→灯箱；Documents：仅展示）。
+import MarkdownIt from 'markdown-it'
+import DOMPurify from 'dompurify'
+import hljs from 'highlight.js/lib/common'
+import 'highlight.js/styles/github.css'
+import { message } from 'ant-design-vue'
+
+// 图片 URL 兼容（/ai/ 前缀走 /proxy；data:/http 原样）
+export const resolveImg = u => u.startsWith('data:') ? u : u.startsWith('http') ? u : '/proxy' + u.replace(/^\/ai/, '')
+
+// 图片加载兜底：加载失败替换为灰底占位图（签名过期/文件缺失等场景避免裂图）
+export const FALLBACK_IMG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120"><rect width="100%" height="100%" fill="#f5f5f5"/><text x="50%" y="50%" fill="#999" font-size="14" text-anchor="middle" dominant-baseline="middle">图片加载失败</text></svg>')
+export const onImgError = e => { e.target.onerror = null; e.target.src = FALLBACK_IMG }
+
+// 复制图标 SVG（antd CopyOutlined / CheckOutlined 路径，render 内联生成无需 vRender 组件挂载）
+const COPY_SVG = '<span class="anticon"><svg viewBox="64 64 896 896" width="1em" height="1em" fill="currentColor"><path d="M832 64H296c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496v688c0 4.4 3.6 8 8 8h56c4.4 0 8-3.6 8-8V96c0-17.7-14.3-32-32-32zM704 192H192c-17.7 0-32 14.3-32 32v530.7c0 8.5 3.4 16.6 9.4 22.6l173.3 173.3c12.9 12.9 30.2 20 48.4 20H704c17.7 0 32-14.3 32-32V224c0-17.7-14.3-32-32-32zM384 824l-128-128h128v128z"/></svg></span>'
+const CHECK_SVG = '<span class="anticon"><svg viewBox="64 64 896 896" width="1em" height="1em" fill="currentColor"><path d="M912 190h-69.9c-9.8 0-19.1 4.5-25.1 12.2L404.7 724.5 207 474c-6.1-7.7-15.3-12.2-25.1-12.2H112c-6.7 0-12.7 4.1-15.2 10.3-2.4 6.3-1.1 13.4 3.6 18.3l235.3 258.5c12.5 13.7 32.5 14.9 46.5 2.7l446.5-424.3c6.4-6.1 9-15.1 5.7-23.4-2.9-7.2-9.8-12.1-17.4-12.1z"/></svg></span>'
+
+// markdown-it 实例（配置与渲染管线整体一致）
+// 安全：html:false（不渲染原始 HTML）+ DOMPurify 白名单双保险
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true,                 // 单换行即换行，贴近原手写行为
+  langPrefix: 'hljs language-', // 代码块带 hljs 类才能着色
+  highlight(str, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      try { return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value } catch (e) { /* 落空走兜底 */ }
+    }
+    return md.utils.escapeHtml(str) // 兜底必须手动转义（markdown-it 不自动转义 highlight 返回值）
+  }
+})
+// 降级标题：h1→h2 ... h6 封顶（保持原手写 #→h2 行为，h1 留给页面）
+md.renderer.rules.heading_open = t => `<h${Math.min(+t[0].tag[1] + 1, 6)}>`
+md.renderer.rules.heading_close = t => `</h${Math.min(+t[0].tag[1] + 1, 6)}>`
+
+// 代码块复制（事件委托入口）：clipboard API 优先（localhost 安全上下文），execCommand 兜底
+export const copyCode = btn => {
+  const pre = btn.closest('pre')
+  if (!pre) return
+  const txt = (pre.querySelector('code')?.textContent ?? pre.innerText).trim()
+  if (!txt) return
+  const ok = () => {
+    btn.classList.add('copied')
+    btn.title = '已复制'
+    btn.innerHTML = CHECK_SVG
+    setTimeout(() => { btn.classList.remove('copied'); btn.title = '复制'; btn.innerHTML = COPY_SVG }, 1600)
+  }
+  const fallbackCopy = () => {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = txt
+      ta.setAttribute('readonly', '')
+      ta.style.position = 'absolute'
+      ta.style.left = '-9999px'
+      ta.style.top = '0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      ta.setSelectionRange(0, txt.length)
+      const flag = document.execCommand('copy')
+      ta.remove()
+      if (flag) ok()
+      else message.error('复制失败，请手动复制')
+    } catch (err) { message.error('复制失败，请手动复制') }
+  }
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(txt).then(ok).catch(fallbackCopy)
+  } else {
+    fallbackCopy()
+  }
+}
+
+// 知识块原文：把无编号的 [图片]/[图片：描述] 按 images 顺序编号，供 renderMd() 渲染
+export const prepKnowledgeContent = (content, images) => {
+  if (!content) return ''
+  if (!images.length) return content.replace(/\[图片(?:[：:][^\]]*)?\]/g, '')
+  let i = 0
+  return content.replace(/\[图片(?:[：:][^\]]*)?\]/g, () => {
+    i++
+    return i <= images.length ? `[图片${i}]` : '[图片]'
+  })
+}
+
+// 核心渲染：content(markdown，含 [图片N] 占位) + images(数组) → 安全 HTML
+// 产物结构：标题/表格/代码高亮/图文交错(md-img 居中 data-seq)/引用角标(ref-sup)/代码复制按钮(code-copy)
+// 事件委托由调用方处理（点击 .code-copy 调 copyCode；.ref-sup/.md-img 按页面语义处理）
+export const renderMd = (t, images = []) => {
+  if (!t) return ''
+  // ① 预处理：图片标记 [图片N：描述]/[图片N] → markdown 图片占位（保留位置/顺序）
+  const pre = t.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？\s]*/g, '![img](__AI_IMG_$1__)')
+  // ② 渲染 + 消毒（放行内部图片占位前缀 __AI_IMG_，否则 DOMPurify 会剥掉其 src 导致图片丢失）
+  let html = DOMPurify.sanitize(md.render(pre), {
+    ALLOWED_URI_REGEXP: /^(?:__AI_IMG_|https?:|data:|mailto:|tel:)/i
+  })
+  // ③ DOM 后处理（sanitize 之后新建元素不受白名单限制）
+  const box = document.createElement('div')
+  box.innerHTML = html
+  // 图片：占位 → 真实 src + 居中 + data-seq；图片缺失保留原文 [图片N]
+  box.querySelectorAll('img[src^="__AI_IMG_"]').forEach(img => {
+    const m = (img.getAttribute('src') || '').match(/^__AI_IMG_(\d+)__$/)
+    const n = m ? m[1] : ''
+    const u = images[Number(n) - 1]
+    if (!u) { img.replaceWith(document.createTextNode(`[图片${n}]`)); return }
+    const wrap = document.createElement('div')
+    wrap.style.textAlign = 'center'
+    const real = document.createElement('img')
+    real.className = 'md-img'
+    real.src = resolveImg(u)
+    real.alt = '文档图片'
+    real.onerror = onImgError
+    real.dataset.seq = n
+    wrap.appendChild(real)
+    img.replaceWith(wrap)
+  })
+  // 引用角标：[N] → sup（TreeWalker 跳过 pre/code/a，防误伤代码块/链接内的 [1]）
+  const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT)
+  const targets = []
+  while (walker.nextNode()) {
+    const node = walker.currentNode
+    if (node.nodeValue && /\[\d+\]/.test(node.nodeValue) && !node.parentElement.closest('pre,code,a')) targets.push(node)
+  }
+  for (const node of targets) {
+    const frag = document.createDocumentFragment()
+    node.nodeValue.split(/(\[\d+\])/).forEach(part => {
+      const m = part.match(/^\[(\d+)\]$/)
+      if (m) {
+        const sup = document.createElement('sup')
+        sup.className = 'ref-sup'
+        sup.dataset.ref = m[1]
+        sup.textContent = part
+        frag.appendChild(sup)
+      } else if (part) {
+        frag.appendChild(document.createTextNode(part))
+      }
+    })
+    node.parentNode.replaceChild(frag, node)
+  }
+  // 代码块复制按钮：只生成 HTML 结构（事件统一由调用方委托，避免 innerHTML 序列化丢失事件）
+  box.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'code-copy'
+    btn.title = '复制'
+    btn.innerHTML = COPY_SVG
+    pre.appendChild(btn)
+  })
+  return box.innerHTML
+}
