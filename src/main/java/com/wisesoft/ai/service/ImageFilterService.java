@@ -65,6 +65,8 @@ public class ImageFilterService {
      * 相关性判定：desc 切 2 字滑窗（去重），任一窗口出现在 judgeText 中即命中，命中数 ≥ minHits 为相关。
      * judgeText / desc 为空一律放行（true）。宁漏检、勿误杀：漏检仅维持现状（图不额外剔除），误杀会丢掉正确配图。
      * 不用 KeywordExtractor：其长整词（如"评分组件怎么使用"）与短描述（"评分框五星"）做 contains 必然失配，会误杀。
+     * 宽松回退：2 字窗不足时，任一连续 4 字子串（主题词级，如"分页子表"）命中判定文本也放行——
+     * 视觉补描述的通用句式（"界面截图展示操作流程…"）2 字窗常与回答失配，但主题词往往对得上。
      */
     public boolean relevant(String judgeText, String desc, int minHits) {
         if (judgeText == null || judgeText.isBlank() || desc == null || desc.isBlank() || desc.length() < 2) return true;
@@ -78,7 +80,13 @@ public class ImageFilterService {
             String w = desc.substring(i, i + 2);
             if (seen.add(w) && judgeText.contains(w)) hits++;
         }
-        return hits >= minHits;
+        if (hits >= minHits) return true;
+        // 宽松回退：连续 4 字主题词命中判定文本即放行
+        for (int i = 0; i <= desc.length() - 4; i++) {
+            String w4 = desc.substring(i, i + 4);
+            if (w4.charAt(0) != ' ' && judgeText.contains(w4)) return true;
+        }
+        return false;
     }
 
     /**

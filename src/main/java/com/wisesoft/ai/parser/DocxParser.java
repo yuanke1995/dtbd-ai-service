@@ -714,12 +714,17 @@ public class DocxParser implements DocumentParser {
                 break;
             }
         } catch (Exception e) {
-            log.debug("样式层级解析失败（回退启发式识别）: {}", e.getMessage());
+            // fail-loud：样式映射失败 → 标题识别退化，块会全用默认标题——必须 warn 可见（此前 debug 级静默吞掉难排查）
+            log.warn("[FAIL-LOUD] 样式层级映射解析失败，标题识别将退化（块标题可能全部相同）: {}", e.getMessage());
         }
         return map;
     }
 
-    /** 取直接子元素文本（逐级 path 查找：w:name 或 w:pPr/w:outlineLvl/w:val） */
+    /**
+     * 取直接子元素值（逐级 path 查找：w:name 或 w:pPr/w:outlineLvl/w:val）。
+     * OOXML 的值通常承载在 w:val 属性而非元素文本（如 &lt;w:name w:val="heading 1"/&gt;），
+     * 文本为空时回退读 w:val 属性——否则 name/outlineLvl 全取空，样式映射建立失败（标题全部识别为 0）。
+     */
     private static String childText(org.w3c.dom.Element parent, String... path) {
         org.w3c.dom.Element cur = parent;
         for (String tag : path) {
@@ -733,7 +738,10 @@ public class DocxParser implements DocumentParser {
             if (next == null) return null;
             cur = next;
         }
-        return cur.getTextContent();
+        String text = cur.getTextContent();
+        if (text != null && !text.isBlank()) return text.trim();
+        String val = cur.getAttribute("w:val");
+        return (val == null || val.isEmpty()) ? null : val;
     }
 
     /**

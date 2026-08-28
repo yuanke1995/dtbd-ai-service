@@ -53,7 +53,7 @@ public class RagService {
      * 仅当 chat.showDebugDegradations=true 时展示（默认只进 [FAIL-LOUD] 日志）。
      */
     private static final Set<String> USER_DEGRADATION_CODES = Set.of(
-            "noHit", "streamError", "deepThinkDegraded", "contextTruncated");
+            "noHit", "streamError", "deepThinkDegraded", "contextTruncated", "imgFilterDropped");
 
     /** fail-loud：按 code 去重添加降级事件（user 级默认展示；debug 级由 chat.showDebugDegradations 开关控制） */
     private void addDegradation(List<Map<String, String>> list, Set<String> codes, String code, String msg) {
@@ -82,6 +82,8 @@ public class RagService {
     private static final int SNIPPET_LEN = 80;
 
     private static final Pattern relatedPattern = Pattern.compile("<related>([\\s\\S]*?)</related>");
+    /** 全局编号后的图片占位：[图片N] 或 [图片N：描述]（描述内不含 ]；用于收集片段截取丢掉的图） */
+    private static final Pattern IMG_NUMBER_PATTERN = Pattern.compile("\\[图片\\d+[^\\]]*\\]");
 
     private final ChatClient chatClient;
     private final SessionService sessionService;
@@ -286,10 +288,11 @@ public class RagService {
                     .append("\n\n【规则】\n")
                     .append("参考资料中以 [1][2] 编号标注来源，回答引用了某个资料时，在对应句末用 [N] 标注（如\"评分组件支持自定义总分[1]\"）。")
                     .append("\n参考资料中图片标记格式为 [图片N：图片内容描述]（冒号后是这张截图的实际内容）。")
-                    .append("\n回答需要配图时，必须严格根据描述选择与内容匹配的编号：例如回答\"评分组件\"时，只能选择描述里含有\"评分/五星/星级\"等词的 [图片N]，"
-                            + "绝不能使用描述与回答内容无关的编号（如描述是下拉列表、日期、JSON 数据的图片）。")
-                    .append("\n选定后把 [图片N] 输出在描述对应内容的准确位置（例如\"如图[图片8]所示，评分组件支持自定义总分\"），"
-                            + "不要把图片标记堆到回答结尾，也不要编造不存在的编号。")
+                    .append("\n回答操作步骤、界面操作、配置方法类问题时，应尽量在对应步骤处配图：从参考资料中选择描述与该步骤界面/弹窗/页面匹配的 [图片N]，"
+                            + "例如回答\"评分组件\"时，只能选择描述里含有\"评分/五星/星级\"等词的 [图片N]，"
+                            + "绝不能使用描述与回答内容无关的编号（如描述是下拉列表、日期、JSON 数据的图片），也不要编造不存在的编号。")
+                    .append("\n选定后把 [图片N] 输出在对应步骤的准确位置（例如\"点击左上角的'+'新建分类[图片1]\"），"
+                            + "不要把图片标记堆到回答结尾。")
                     .append("\n注意：插入 [图片N] 时，标记前后不要紧贴任何标点，[图片N] 应独立成行；"
                             + "若句末需要标点，放在标记之前的文字末尾，如\"布局组件[图片1]\"，不要写成\"布局组件[图片1]、\"。")
                     .append("\n参考资料中包含表格时（以 | 分隔的 Markdown 表格），若回答涉及表格内容，请用同样的 Markdown 表格格式呈现，不要改写成一长串用竖线连起来的文字。")
@@ -337,20 +340,32 @@ public class RagService {
                 String text = hit.content();
                 List<String> urls = hit.images();
 
-                // 将正文中的 [图片] / [图片：xxx] 替换为全局编号 [图片N]，保留描述
+                // 将正文中的 [图片] / [图片：xxx] 替换为全局编号 [图片N]，保留描述。
+                // 预筛（生成时即避免错配）：与本次检索问题相关性不足的图不编号（替换为裸 [图片]，LLM 不可引用），
+                // 避免"先输出后剔除"导致图闪一下再消失；图片仍留在 sources.images 供引用弹窗查看。
+                boolean imgPrefilter = retrievalQuery != null && retrievalQuery.length() >= 2;
                 int imgIdxForChunk = 0;
                 Matcher matcher = imgPattern.matcher(text);
                 StringBuffer sb = new StringBuffer();
                 while (matcher.find()) {
                     if (imgIdxForChunk < urls.size()) {
-                        int globalSeq = imgIndex.size() + 1;
-                        imgIndex.put(globalSeq, urls.get(imgIdxForChunk));
                         String raw = matcher.group();
                         String desc = "";
                         int colonIdx = raw.indexOf("：");
                         if (colonIdx >= 0 && raw.length() > colonIdx + 2) {
                             desc = raw.substring(colonIdx + 1, raw.length() - 1).trim();
                         }
+                        // 与问题无关的图（描述与检索 query 无共同主题词）→ 不编号
+                        if (imgPrefilter && !desc.isEmpty()
+                                && !imageFilterService.relevant(retrievalQuery, desc, 1)) {
+                            log.debug("[IMG-PRE] 与问题相关性不足，图不编号（{}）: {}", imgIdxForChunk,
+                                    desc.length() > 24 ? desc.substring(0, 24) + "…" : desc);
+                            matcher.appendReplacement(sb, Matcher.quoteReplacement("[图片]"));
+                            imgIdxForChunk++;
+                            continue;
+                        }
+                        int globalSeq = imgIndex.size() + 1;
+                        imgIndex.put(globalSeq, urls.get(imgIdxForChunk));
                         String replacement = desc.isEmpty()
                                 ? "[图片" + globalSeq + "]"
                                 : "[图片" + globalSeq + "：" + desc + "]";
@@ -365,8 +380,22 @@ public class RagService {
                 text = sb.toString();
 
                 // 块内片段截取：按检索词元定位命中位置，取 ±窗口（省 token 保精度；未命中则整块）
+                String fullTextForImg = text; // 截取前的完整文本（占位已替换为 [图片N：desc]）
                 if (snippetWindow > 0) {
-                    text = extractHitSnippet(text, retrievalTerms, snippetWindow);
+                    text = extractHitSnippet(fullTextForImg, retrievalTerms, snippetWindow);
+                    // 片段截取会丢掉窗口外的 [图片N：描述] 占位 → LLM 看不到图、漏配图。
+                    // 把片段里没有的图片占位（描述截断到 60 字符）追加到片段末尾，保证 LLM 有完整配图依据
+                    List<String> cutImgs = new ArrayList<>();
+                    Matcher im = IMG_NUMBER_PATTERN.matcher(fullTextForImg);
+                    while (im.find()) {
+                        String g = im.group();
+                        if (!text.contains(g)) {
+                            cutImgs.add(g.length() > 60 ? g.substring(0, 60) + "]" : g);
+                        }
+                    }
+                    if (!cutImgs.isEmpty()) {
+                        text = text + "\n（本块其他截图：" + String.join(" ", cutImgs) + "）";
+                    }
                 }
 
                 // 章节路径前置：入库只存净正文，路径在检索时拼入上下文（供 LLM 理解内容出处）。
