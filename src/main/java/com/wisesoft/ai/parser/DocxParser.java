@@ -4,19 +4,12 @@ import com.wisesoft.ai.config.AiAppProperties;
 import com.wisesoft.ai.model.Chunk;
 import com.wisesoft.ai.service.ConfigService;
 import com.wisesoft.ai.service.VisionService;
+import com.wisesoft.ai.util.ImageCompressor;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.xwpf.usermodel.*;
 import org.springframework.stereotype.Component;
 
-import javax.imageio.ImageIO;
-import javax.imageio.ImageWriteParam;
-import javax.imageio.ImageWriter;
-import javax.imageio.stream.ImageOutputStream;
-import java.awt.*;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -49,37 +42,40 @@ public class DocxParser implements DocumentParser {
     private final ExecutorService visionExecutor;
     /** 图片描述并发限流（容量随配置动态调整，保存即生效） */
     private volatile Semaphore visionSemaphore;
+    /** 上次生效的图片描述并发数（判断配置是否变化；不能用 availablePermits——运行期许可被占会误判触发重建） */
+    private volatile int visionConcurrency;
 
     public DocxParser(AiAppProperties properties, VisionService visionService, ConfigService configService) {
         this.properties = properties;
         this.visionService = visionService;
         this.configService = configService;
-        this.visionSemaphore = new Semaphore(Math.max(1, properties.getVision().getConcurrency()));
+        int initC = Math.max(1, properties.getVision().getConcurrency());
+        this.visionConcurrency = initC;
+        this.visionSemaphore = new Semaphore(initC);
         // 有界线程池（替代 cached：图片多时 cached 会为每张图建阻塞线程，线程数随图片数膨胀）
-        // 队列 = 并发×2，满则拒绝并降级为无描述（图片仍展示），避免资源失控
-        int c = Math.max(1, properties.getVision().getConcurrency());
-        this.visionExecutor = new ThreadPoolExecutor(c, c, 0L, TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(c * 2), r -> {
+        // CallerRunsPolicy：队列满时由提交线程（doc-parse）直接执行 → 天然背压，任务不丢、不降级无描述；
+        // 并发仍由信号量限流（c 个许可），不会无界堆积内存
+        this.visionExecutor = new ThreadPoolExecutor(initC, initC, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(Math.max(4, initC * 2)), r -> {
             Thread t = new Thread(r, "vision-desc");
             t.setDaemon(true);
             return t;
-        });
+        }, new ThreadPoolExecutor.CallerRunsPolicy());
     }
 
-    /** 动态并发信号量：配置变更时重建（cached 线程池 + 信号量限流，保存即生效） */
+    /** 动态并发信号量：配置变更时重建（保存即生效）；以配置值判断而非 availablePermits，避免运行期误判 */
     private Semaphore visionSemaphore() {
         int want = Math.max(1, configService.getInt("vision.concurrency"));
-        Semaphore s = visionSemaphore;
-        if (s.availablePermits() != want) {
+        if (want != visionConcurrency) {
             synchronized (this) {
-                if (visionSemaphore.availablePermits() != want) {
+                if (want != visionConcurrency) {
+                    log.info("[DocxParser] 图片描述并发调整: {} -> {}", visionConcurrency, want);
                     visionSemaphore = new Semaphore(want);
-                    s = visionSemaphore;
-                    log.info("[DocxParser] 图片描述并发调整: {} -> {}", s.availablePermits(), want);
+                    visionConcurrency = want;
                 }
             }
         }
-        return s;
+        return visionSemaphore;
     }
 
     @PreDestroy
@@ -291,7 +287,8 @@ public class DocxParser implements DocumentParser {
         if (saved == null) {
             try {
                 // 双图策略：压缩图只进内存供视觉模型识别（不落盘）；原图落盘用于回答/知识库展示（保持清晰）
-                CompressedImage ci = compress(data.getData(), ext);
+                ImageCompressor.CompressedImage ci = ImageCompressor.compress(data.getData(), ext,
+                        properties.getImages().getMaxWidth(), properties.getImages().getQuality());
                 // 内容寻址文件名（sha256 原图字节）：同图跨重解析 URL 稳定 → 块 images 列表稳定 → 块级 diff 可复用；变更图生成新文件
                 String url = persistImage(data.getData(), ext, docId, sha256Hex(data.getData()));
                 // 并发限流（动态信号量，保存即生效）
@@ -308,9 +305,10 @@ public class DocxParser implements DocumentParser {
                                 }
                             }, visionExecutor);
                 } catch (RejectedExecutionException e) {
-                    // 图片描述队列已满：释放许可并降级为无描述（图片仍落盘展示，不阻断解析）
+                    // 兜底（正常不会触发：executor 用 CallerRunsPolicy 背压，队列满由提交线程自己执行）；
+                    // 极端情况（如线程池已 shutdown）才走这里：释放许可并降级为无描述（图片仍落盘展示，不阻断解析）
                     sem.release();
-                    log.warn("[{}] 图片描述任务队列已满，该图降级为无描述", docId);
+                    log.warn("[{}] 图片描述任务被拒绝，该图降级为无描述", docId);
                     descFuture = CompletableFuture.completedFuture(null);
                 }
                 // 图片识别进度：每张描述完成（成功/失败均计数）上报一次
@@ -384,47 +382,30 @@ public class DocxParser implements DocumentParser {
     }
 
     /**
-     * 图片压缩：等比缩放（最长边超过 max-width 时）+ 重编码
+     * 按图片 URL 补齐描述（解析后补描述回写知识块用）：
+     * URL → 落盘原图 → 压缩（与解析时同规则）→ 视觉模型描述。
+     * 图片缺失/压缩失败/视觉失败返回空串（调用方保留裸占位，下次再补）。
      */
-    private CompressedImage compress(byte[] original, String ext) {
+    public String describeImageUrl(String url) {
+        if (url == null || url.isBlank()) return "";
         try {
-            BufferedImage img = ImageIO.read(new ByteArrayInputStream(original));
-            if (img == null) return new CompressedImage(original, ext);
-
-            int maxWidth = properties.getImages().getMaxWidth();
-            // 按最长边缩放（宽或高超限都等比缩小，竖长图不再绕过）
-            int longest = Math.max(img.getWidth(), img.getHeight());
-            if (maxWidth > 0 && longest > maxWidth) {
-                int w = (int) Math.round(img.getWidth() * (double) maxWidth / longest);
-                int h = (int) Math.round(img.getHeight() * (double) maxWidth / longest);
-                int type = img.getType() == 0 ? BufferedImage.TYPE_INT_RGB : img.getType();
-                BufferedImage scaled = new BufferedImage(w, h, type);
-                Graphics2D g = scaled.createGraphics();
-                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-                g.drawImage(img, 0, 0, w, h, null);
-                g.dispose();
-                img = scaled;
+            String prefix = properties.getImages().getUrlPrefix();
+            String rel = url.startsWith(prefix) ? url.substring(prefix.length()) : url;
+            Path p = Paths.get(properties.getImages().getDir(), "images", rel);
+            if (!Files.exists(p)) {
+                log.warn("[ImageDescBackfill] 图片文件不存在，跳过: {}", p);
+                return "";
             }
-
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            if (img.getColorModel().hasAlpha()) {
-                ImageIO.write(img, "png", out);
-                return new CompressedImage(out.toByteArray(), "png");
-            }
-            ImageWriter writer = ImageIO.getImageWritersByFormatName("jpg").next();
-            ImageWriteParam param = writer.getDefaultWriteParam();
-            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-            param.setCompressionQuality(properties.getImages().getQuality());
-            try (ImageOutputStream ios = ImageIO.createImageOutputStream(out)) {
-                writer.setOutput(ios);
-                writer.write(img);
-            } finally {
-                writer.dispose();
-            }
-            return new CompressedImage(out.toByteArray(), "jpg");
+            byte[] bytes = Files.readAllBytes(p);
+            String ext = p.getFileName().toString().contains(".")
+                    ? p.getFileName().toString().substring(p.getFileName().toString().lastIndexOf('.') + 1).toLowerCase()
+                    : "png";
+            ImageCompressor.CompressedImage ci = ImageCompressor.compress(bytes, ext,
+                    properties.getImages().getMaxWidth(), properties.getImages().getQuality());
+            return visionService.describe(ci.bytes(), ci.ext());
         } catch (Exception e) {
-            log.debug("图片压缩失败，使用原图: {}", e.getMessage());
-            return new CompressedImage(original, ext);
+            log.warn("[ImageDescBackfill] 图片描述补齐失败 url={}: {}", url, e.getMessage());
+            return "";
         }
     }
 
@@ -595,7 +576,8 @@ public class DocxParser implements DocumentParser {
         while (m.find() && imgIdx < currentImages.size()) {
             SavedImage img = currentImages.get(imgIdx++);
             String desc = img.descFuture().join();
-            m.appendReplacement(out, desc.isBlank()
+            // desc 可能为 null：队列满降级（completedFuture(null)）或视觉模型调用失败返回 null，均按"无描述"处理
+            m.appendReplacement(out, desc == null || desc.isBlank()
                     ? "[图片]"
                     : "[图片：" + Matcher.quoteReplacement(desc) + "]");
         }
@@ -677,7 +659,4 @@ public class DocxParser implements DocumentParser {
 
     /** 已保存图片：URL + 异步生成的描述（flush 时 join） */
     private record SavedImage(String url, CompletableFuture<String> descFuture) {}
-
-    /** 压缩后图片 */
-    private record CompressedImage(byte[] bytes, String ext) {}
 }

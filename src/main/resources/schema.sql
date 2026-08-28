@@ -112,7 +112,7 @@ CREATE TABLE IF NOT EXISTS `c_ai_qa_feedback` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI问答反馈表';
 
 CREATE TABLE IF NOT EXISTS `c_ai_image_desc` (
-    `cache_key`    VARCHAR(64)  NOT NULL COMMENT '缓存键(v{版本}_{sha256: model+prompt+图片字节})',
+    `cache_key`    VARCHAR(128) NOT NULL COMMENT '缓存键(v{版本}_{sha256: model+prompt+图片字节})',
     `description`  TEXT         NOT NULL COMMENT '图片描述',
     `model`        VARCHAR(128) DEFAULT NULL COMMENT '视觉模型名',
     `create_time`  DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',

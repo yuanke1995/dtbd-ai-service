@@ -64,7 +64,7 @@
     <!-- 知识块预览：列表（点击行查看详情；编辑/删除操作） -->
     <a-modal v-model:open="kbVisible" :title="'知识块预览 · ' + kbDocName" :footer="null" width="820">
       <a-spin :spinning="kbLoading">
-        <a-table :data-source="kbList" size="small" row-key="id" :pagination="{ pageSize: 8 }"
+        <a-table :data-source="kbList" size="small" row-key="id" :pagination="{ pageSize: 20 }"
                  :locale="{ emptyText: '暂无知识块' }"
                  :custom-row="r => ({ onClick: () => openKbDetail(r) })"
                  style="cursor:pointer">

@@ -59,6 +59,7 @@ public class KeywordIndexService {
 
     private volatile RestClient client;
     private volatile String clientBaseUrl = "";
+    private volatile String clientApiKey = "";
     private volatile int clientTimeout = 0;
 
     public KeywordIndexService(AiAppProperties properties, ConfigService configService, AiKnowledgeMapper knowledgeMapper) {
@@ -94,22 +95,27 @@ public class KeywordIndexService {
         return configService.getInt("keyword.failCooldownMs", 60_000);
     }
 
-    /** master key 只从 env/yml 读取，不入 c_ai_config（避免密钥明文落库） */
+    /**
+     * master key：优先读设置页配置（c_ai_config 的 keyword.apiKey，明文入库，保存即生效免重启），
+     * 未配置时回退 yml/env 的 AI_MEILI_KEY。
+     */
     private String apiKey() {
-        return properties.getKeyword().getApiKey();
+        String k = configService.get("keyword.apiKey");
+        return k == null || k.isBlank() ? properties.getKeyword().getApiKey() : k.trim();
     }
 
     private String index() {
         return properties.getKeyword().getIndex();
     }
 
-    /** 配置变化（baseUrl/timeout）时重建 RestClient 并重置探测与索引初始化状态 */
+    /** 配置变化（baseUrl/timeout/apiKey）时重建 RestClient 并重置探测与索引初始化状态 */
     private RestClient client() {
         String url = baseUrl();
         int t = timeoutMillis();
-        if (client == null || !url.equals(clientBaseUrl) || t != clientTimeout) {
+        String key = apiKey() == null ? "" : apiKey();
+        if (client == null || !url.equals(clientBaseUrl) || t != clientTimeout || !key.equals(clientApiKey)) {
             synchronized (this) {
-                if (client == null || !url.equals(clientBaseUrl) || t != clientTimeout) {
+                if (client == null || !url.equals(clientBaseUrl) || t != clientTimeout || !key.equals(clientApiKey)) {
                     // 注意：不能用 SimpleClientHttpRequestFactory（HttpURLConnection 不支持 PATCH，settings 校准会抛
                     // ProtocolException: Invalid HTTP method: PATCH）；改用 JdkClientHttpRequestFactory（java.net.http.HttpClient）。
                     // 其连接超时只能在构造 HttpClient 时配置，读超时用 setReadTimeout(Duration)
@@ -119,17 +125,17 @@ public class KeywordIndexService {
                     JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
                     factory.setReadTimeout(Duration.ofMillis(t));
                     RestClient.Builder builder = RestClient.builder().baseUrl(url).requestFactory(factory);
-                    String key = apiKey();
-                    if (key != null && !key.isBlank()) {
+                    if (!key.isBlank()) {
                         builder.defaultHeader("Authorization", "Bearer " + key);
                     }
                     client = builder.build();
                     clientBaseUrl = url;
                     clientTimeout = t;
+                    clientApiKey = key;
                     supportChecked.set(false);
                     available = false;
                     indexReady = false;
-                    log.info("[Keyword] Meilisearch 客户端重建: {}，索引 {}，超时 {}ms", url, index(), t);
+                    log.info("[Keyword] Meilisearch 客户端重建: {}，索引 {}，超时 {}ms，key 已配置: {}", url, index(), t, !key.isBlank());
                 }
             }
         }
@@ -155,16 +161,22 @@ public class KeywordIndexService {
         synchronized (this) {
             if (supportChecked.get()) return available;
             try {
-                String resp = client().get().uri("/health").retrieve().body(String.class);
-                available = resp != null && resp.contains("available");
+                // 探测受保护端点 /indexes（/health 是公开端点不校验 key）：
+                // 服务端设了 master key 而客户端未配/配错 → 401 → 这里即失败，避免"探测通过但实际 401 降级"
+                String resp = client().get().uri("/indexes").retrieve().body(String.class);
+                available = resp != null;
                 if (!available) {
                     lastFailTs = System.currentTimeMillis();
-                    log.warn("[Keyword] /health 无有效响应，Meilisearch 不可用（关键词路降级 MySQL）");
+                    log.warn("[Keyword] /indexes 无有效响应，Meilisearch 不可用（关键词路降级 MySQL）");
                 }
             } catch (Exception e) {
                 available = false;
                 lastFailTs = System.currentTimeMillis();
-                log.warn("[Keyword] Meilisearch 探测失败（关键词路降级 MySQL）baseUrl={}: {}", baseUrl(), e.getMessage());
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                boolean authIssue = msg.contains("401") || msg.contains("403")
+                        || msg.contains("Unauthorized") || msg.contains("invalid_api_key");
+                log.warn("[Keyword] Meilisearch 探测失败（关键词路降级 MySQL）baseUrl={}: {}{}",
+                        baseUrl(), msg, authIssue ? "（疑似 master key 未配置或与服务端不一致，请在设置页配置 Meilisearch Key）" : "");
             }
             supportChecked.set(true);
             return available;
@@ -187,7 +199,7 @@ public class KeywordIndexService {
             long left = failCooldownMs() - (System.currentTimeMillis() - lastFailTs);
             return left > 0
                     ? "服务不可用，冷却中（" + (left / 1000) + "s 后重试）"
-                    : "服务探测失败：" + baseUrl();
+                    : "服务探测失败：" + baseUrl() + "（若服务端已设置 master key，请检查设置页的 Meilisearch Key 是否一致）";
         }
         return null;
     }

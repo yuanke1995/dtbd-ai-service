@@ -152,6 +152,10 @@
               <a-input v-model:value="form.keyword.baseUrl" placeholder="http://localhost:7700" style="width:320px" />
             </a-form-item>
             <a-form-item>
+              <template #label><a-tooltip :title="tips.keywordApiKey" placement="top">引擎 Key <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-password v-model:value="form.keyword.apiKey" placeholder="Meilisearch master key（服务端未设置可留空）" style="width:320px" />
+            </a-form-item>
+            <a-form-item>
               <template #label><a-tooltip :title="tips.keywordTimeout" placement="top">引擎超时(ms) <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.keyword.timeoutMillis" :min="200" :step="100" style="width:200px" />
               <span style="margin-left:12px;color:#999;font-size:12px">超时自动降级 mysql</span>
@@ -412,6 +416,7 @@ const tips = {
   rerankFailCooldown: '重排服务失败后的冷却时间(ms)：冷却期内不再探测/调用（避免每个请求都撞一次），冷却结束后自动恢复。',
   keywordEngine: '关键词召回引擎。mysql=MySQL LIKE（零依赖，知识块量大时全表扫描慢）；meilisearch=外部索引（中文分词+相关度打分）。切换到 meilisearch 时自动校验服务可用性（不可用则保存失败）并自动全量重建索引，无需手动操作。',
   keywordBaseUrl: 'Meilisearch 服务地址（如 http://localhost:7700，docker-compose 部署为容器内地址）。',
+  keywordApiKey: 'Meilisearch master key（需与服务端 MEILI_MASTER_KEY 一致）。留空时回退读取环境变量 AI_MEILI_KEY；服务端已设置 key 而此处为空/错误，切换引擎时会校验失败并阻止保存。',
   keywordTimeout: '关键词引擎单次请求超时(ms)：关键词路是辅助召回，超时会自动降级回 MySQL LIKE，不建议设太大。'
 }
 
@@ -469,7 +474,7 @@ const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remain
                                  rerank: { enabled: false, baseUrl: 'http://localhost:7997',
                                            model: 'BAAI/bge-reranker-v2-m3', timeoutMillis: 5000,
                                            minHits: 6, maxHits: 15, failCooldownMs: 60000 } },
-                    keyword: { engine: 'mysql', baseUrl: 'http://localhost:7700', timeoutMillis: 1000 },
+                    keyword: { engine: 'mysql', baseUrl: 'http://localhost:7700', apiKey: '', timeoutMillis: 1000 },
                     context: { modelWindows: '', defaultWindowTokens: 32768, safetyFactor: 0.7, costCapTokens: 8000,
                                maxOutputTokens: 2000, historyMaxTokens: 1200, historyPerMsgChars: 200,
                                snippetWindowChars: 150, maxContextHits: 8 },
@@ -528,6 +533,7 @@ onMounted(async () => {
       const kw = d.keyword || {}
       form.value.keyword.engine = kw.engine?.value || 'mysql'
       form.value.keyword.baseUrl = kw.baseUrl?.value || 'http://localhost:7700'
+      form.value.keyword.apiKey = kw.apiKey?.value || ''
       form.value.keyword.timeoutMillis = Number(kw.timeoutMillis?.value ?? 1000)
       const ctx = d.context || {}
       form.value.context.modelWindows = ctx.modelWindows?.value || ''
@@ -612,6 +618,8 @@ const save = async () => {
                 failCooldownMs: String(form.value.retrieval.rerank.failCooldownMs) },
       keyword: { engine: form.value.keyword.engine,
                  baseUrl: form.value.keyword.baseUrl?.trim(),
+                 // 后端 snapshot 对 apiKey 脱敏（****后4位），掩码原样提交会覆盖真实 key：未修改（**** 开头）则不提交
+                 apiKey: form.value.keyword.apiKey?.trim().startsWith('****') ? undefined : form.value.keyword.apiKey?.trim(),
                  timeoutMillis: String(form.value.keyword.timeoutMillis) },
       context: { modelWindows: form.value.context.modelWindows?.trim(),
                  defaultWindowTokens: String(form.value.context.defaultWindowTokens),

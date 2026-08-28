@@ -131,6 +131,14 @@ public class DocumentController {
         return ResultJson.ok("已重新提交解析");
     }
 
+    @Operation(summary = "补齐图片描述", description = "对解析时未描述成功的图片后台补描述并回写知识块（重新向量化+索引同步）")
+    @PostMapping("/{id}/backfill-descriptions")
+    public ResultJson backfillDescriptions(
+            @Parameter(description = "文档 ID") @PathVariable("id") String id) {
+        documentService.backfillImageDescriptions(id);
+        return ResultJson.ok("已提交图片描述补齐任务");
+    }
+
     @Operation(summary = "批量删除文档", description = "批量删除多个文档")
     @PostMapping("/batch/delete")
     public ResultJson batchDelete(

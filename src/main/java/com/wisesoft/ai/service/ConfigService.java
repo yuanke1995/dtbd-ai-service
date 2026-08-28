@@ -75,6 +75,7 @@ public class ConfigService {
             Map.entry("rerank.timeoutMillis", "重排：单次超时(ms)"),
             Map.entry("keyword.engine", "关键词引擎：mysql / meilisearch（切换前先探测并重建索引）"),
             Map.entry("keyword.baseUrl", "关键词引擎：Meilisearch 服务地址"),
+            Map.entry("keyword.apiKey", "关键词引擎：Meilisearch master key（留空回退环境变量 AI_MEILI_KEY）"),
             Map.entry("keyword.timeoutMillis", "关键词引擎：单次超时(ms)"));
 
     private final AiConfigMapper configMapper;
@@ -248,9 +249,10 @@ public class ConfigService {
         d.put("rerank.minHits", "6");                      // 触发重排的候选下限
         d.put("rerank.maxHits", "15");                     // 触发重排的候选上限
         d.put("rerank.failCooldownMs", "60000");           // 重排失败后冷却再探测
-        // 关键词召回引擎（mysql=LIKE；meilisearch=外部索引，中文分词+相关度；apiKey/index 只走 yml 不入库）
+        // 关键词召回引擎（mysql=LIKE；meilisearch=外部索引，中文分词+相关度；index 只走 yml 不入库）
         d.put("keyword.engine", properties.getKeyword().getEngine());
         d.put("keyword.baseUrl", properties.getKeyword().getBaseUrl());
+        d.put("keyword.apiKey", properties.getKeyword().getApiKey());   // master key 明文入库（设置页可改，改后客户端自动重建）；未配置时回退 env AI_MEILI_KEY
         d.put("keyword.timeoutMillis", String.valueOf(properties.getKeyword().getTimeoutMillis()));
         d.put("keyword.failCooldownMs", "60000");          // Meilisearch 失败后冷却再探测
         d.put("keyword.reconcileOnStartup", "true");       // 启动索引对账：漂移自动重建（多副本部署可置 false 由运维单点执行）
@@ -478,6 +480,11 @@ public class ConfigService {
                 throw new IllegalArgumentException("upload.maxFileSize 必须是整数(字节)");
             }
         }
+
+        // 掩码回写保护：snapshot 对 *.apiKey 脱敏为 "****后4位"，前端未修改 key 时会把掩码原样提交；
+        // 掩码值（**** 开头）一律跳过更新，避免覆盖库中真实 key（真实 master key 不可能以 **** 开头）
+        updates.entrySet().removeIf(kv ->
+                kv.getKey().endsWith(".apiKey") && kv.getValue() != null && kv.getValue().startsWith("****"));
 
         for (Map.Entry<String, String> kv : updates.entrySet()) {
             AiConfig c = configMapper.selectById(kv.getKey());

@@ -11,6 +11,8 @@ import com.wisesoft.ai.model.AiDocument;
 import com.wisesoft.ai.model.AiKnowledge;
 import com.wisesoft.ai.model.Chunk;
 import com.wisesoft.ai.parser.DocumentParser;
+import com.wisesoft.ai.parser.DocxParser;
+import com.wisesoft.ai.thread.ThreadPoolManager;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
@@ -30,6 +32,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -38,6 +41,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -65,8 +70,12 @@ public class DocumentService {
     private final List<DocumentParser> parsers;
     private final ConfigService configService;
     private final KeywordIndexService keywordIndexService;
+    /** docx 解析器：图片描述补齐用（解析时失败/超限的图，按 URL 重新描述） */
+    private final DocxParser docxParser;
     /** 解析进度节流守卫：docId -> 已上报 progress（值未变化不写库） */
     private final Map<String, Integer> progressGuard = new ConcurrentHashMap<>();
+    /** 图片描述补齐进行中标志（docId -> true；防并发重复触发） */
+    private final Map<String, Boolean> descBackfillRunning = new ConcurrentHashMap<>();
     /** 删除标志：delete() 立即置位，解析线程检查点秒查（不等 DB） */
     private final Map<String, Boolean> deletedFlags = new ConcurrentHashMap<>();
     /** 解析线程引用：delete() 时 interrupt 实现立即中断（图片 join 等待立即响应） */
@@ -483,6 +492,8 @@ public class DocumentService {
                 log.warn("[{}] 保存版本快照失败: {}", docId, e.getMessage());
             }
             log.info("[{}] 解析成功: {} chunks", docId, chunks.size());
+            // 图片描述补齐：解析中视觉调用失败/超限的图，后台补描述并回写知识块（图片语义全部进入 RAG）
+            backfillImageDescriptions(docId);
         } catch (Exception e) {
             // 删除场景：线程被 delete() 中断（interrupt）或检查点发现删除 → 只清理产物，不置失败状态
             if (deletedFlags.containsKey(docId)) {
@@ -1233,6 +1244,97 @@ public class DocumentService {
         if (overlapPrefix != null && !overlapPrefix.isBlank()) sb.append(overlapPrefix);
         sb.append(content);
         return sb.toString();
+    }
+
+    /** 知识块占位符：有描述 [图片：xxx] 或无描述 [图片] */
+    private static final Pattern IMG_PH = Pattern.compile("\\[图片(?:：[^\\]]*)?]");
+
+    /**
+     * 补齐文档中"无描述"图片（解析时视觉调用失败/超限留下的裸 [图片] 占位）：
+     * 后台逐图调视觉模型补描述，成功则回写知识块（[图片]→[图片：描述]）并重新向量化 + 关键词索引同步，
+     * 保证图片语义最终全部进入 RAG。仍失败的图保留裸占位（下次触发/重解析再补），全程不阻断主流程。
+     */
+    public void backfillImageDescriptions(String docId) {
+        if (docId == null || docId.isBlank()) return;
+        if (descBackfillRunning.putIfAbsent(docId, Boolean.TRUE) != null) return; // 防重入
+        ThreadPoolManager.execute(() -> {
+            try {
+                List<AiKnowledge> blocks = knowledgeMapper.selectList(
+                        new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId)
+                                .orderByAsc(AiKnowledge::getChunkIndex));
+                if (blocks.isEmpty()) return;
+                // 1. 收集全部无描述图 URL（块内裸 [图片] 占位按序对应 images 列表）
+                Set<String> missing = new LinkedHashSet<>();
+                for (AiKnowledge k : blocks) {
+                    collectMissingImages(k.getContent(), parseImages(k.getImages()), missing);
+                }
+                if (missing.isEmpty()) return;
+                // 2. 逐图补描述（串行：视觉模型是本机共享资源，不与解析/问答抢占并发）
+                Map<String, String> descByUrl = new HashMap<>();
+                for (String url : missing) {
+                    String desc = docxParser.describeImageUrl(url);
+                    if (desc != null && !desc.isBlank()) descByUrl.put(url, desc);
+                }
+                if (descByUrl.isEmpty()) return;
+                // 3. 回写命中块（裸占位替换；复用 updateKnowledge 重新向量化 + 索引同步）
+                int written = 0;
+                for (AiKnowledge k : blocks) {
+                    String newContent = replaceMissingImages(k.getContent(), parseImages(k.getImages()), descByUrl);
+                    if (!newContent.equals(k.getContent())) {
+                        try {
+                            updateKnowledge(k.getId(), k.getTitle(), newContent);
+                            written++;
+                        } catch (Exception e) {
+                            log.warn("[{}] 知识块补描述回写失败 id={}: {}", docId, k.getId(), e.getMessage());
+                        }
+                    }
+                }
+                log.info("[{}] 图片描述补齐完成：补 {}/{} 张，回写 {} 块", docId, descByUrl.size(), missing.size(), written);
+            } catch (Exception e) {
+                log.warn("[{}] 图片描述补齐任务异常: {}", docId, e.getMessage());
+            } finally {
+                descBackfillRunning.remove(docId);
+            }
+        });
+    }
+
+    /** 收集块内"无描述图"URL：content 中裸 [图片]（后无冒号）按序对应 images 列表 */
+    private void collectMissingImages(String content, List<String> images, Set<String> missing) {
+        if (content == null || content.isBlank() || images == null || images.isEmpty()) return;
+        Matcher m = IMG_PH.matcher(content);
+        int idx = 0;
+        while (m.find()) {
+            String url = images.get(Math.min(idx, images.size() - 1));
+            idx++;
+            if ("[图片]".equals(m.group()) && url != null && !url.isBlank()) missing.add(url);
+        }
+    }
+
+    /** 替换块内已补到描述的裸占位（[图片]→[图片：描述]）；无命中返回原 content */
+    private String replaceMissingImages(String content, List<String> images, Map<String, String> descByUrl) {
+        if (content == null || content.isBlank() || images == null || images.isEmpty() || descByUrl.isEmpty()) {
+            return content;
+        }
+        Matcher m = IMG_PH.matcher(content);
+        StringBuilder sb = new StringBuilder();
+        int idx = 0;
+        boolean changed = false;
+        while (m.find()) {
+            String ph = m.group();
+            String url = images.get(Math.min(idx, images.size() - 1));
+            idx++;
+            if ("[图片]".equals(ph)) {
+                String desc = descByUrl.get(url);
+                if (desc != null && !desc.isBlank()) {
+                    m.appendReplacement(sb, "[图片：" + Matcher.quoteReplacement(desc) + "]");
+                    changed = true;
+                    continue;
+                }
+            }
+            m.appendReplacement(sb, ph);
+        }
+        m.appendTail(sb);
+        return changed ? sb.toString() : content;
     }
 
     /** 知识块 images 字段（JSON 数组串）→ List<String>（空/解析失败返回空列表） */
