@@ -110,7 +110,7 @@ public class ConfigService {
         log.info("模型配置加载完成，共 {} 项", cache.size());
     }
 
-    /** 全量重读 c_ai_config 进缓存（本地更新 / Redis 订阅通知均调用） */
+    /** 全量重读 c_ai_config 进缓存（本地更新 / Redis 订阅通知 / schedule 包周期兜底均调用） */
     public void reload() {
         try {
             List<AiConfig> all = configMapper.selectList(new LambdaQueryWrapper<AiConfig>());
@@ -127,7 +127,8 @@ public class ConfigService {
     /**
      * 多实例配置同步：daemon 线程订阅 Redis channel，任意实例保存配置后广播，
      * 本实例收到即全量重载缓存（保存即生效跨实例成立）。Redis 不可用时仅告警不影响启动。
-     * 另起周期兜底 reload：订阅断线期间错过的变更由轮询补齐（每 5 分钟全量重读一次）。
+     * 订阅线程是永久阻塞的事件监听（不适合进线程池）；周期兜底 reload
+     * （订阅断线期间错过的变更由轮询补齐，每 5 分钟）已移至 schedule 包 ScheduleCenter。
      */
     private void startRedisConfigSync() {
         Thread t = new Thread(() -> {
@@ -155,21 +156,6 @@ public class ConfigService {
         }, "config-redis-sync");
         t.setDaemon(true);
         t.start();
-
-        // 兜底轮询：订阅不可用时仍能收敛配置（防止长期不一致）
-        Thread poll = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    Thread.sleep(5 * 60 * 1000L);
-                    reload();
-                    log.debug("[Config] 周期兜底刷新配置缓存");
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }, "config-sync-poll");
-        poll.setDaemon(true);
-        poll.start();
     }
 
     /** 本地保存后广播（其他实例订阅刷新；Redis 异常不影响保存结果） */
@@ -268,6 +254,7 @@ public class ConfigService {
         d.put("keyword.timeoutMillis", String.valueOf(properties.getKeyword().getTimeoutMillis()));
         d.put("keyword.failCooldownMs", "60000");          // Meilisearch 失败后冷却再探测
         d.put("keyword.reconcileOnStartup", "true");       // 启动索引对账：漂移自动重建（多副本部署可置 false 由运维单点执行）
+        d.put("keyword.reconcileIntervalMs", "3600000");   // 周期索引对账间隔(ms,≤0=暂停)：按(id,hash)精确比对并定向修复漂移（schedule 包调度）
         // 解析行为参数
         d.put("parse.concurrency", "2");                   // 文档解析并发数
         d.put("parse.ocrMinText", "20");                   // PDF 文本少于该长度判定扫描件触发 OCR

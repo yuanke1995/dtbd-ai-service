@@ -5,13 +5,13 @@ import com.wisesoft.ai.mapper.AiQaFeedbackMapper;
 import com.wisesoft.ai.mapper.AiQaLogMapper;
 import com.wisesoft.ai.model.AiQaFeedback;
 import com.wisesoft.ai.model.AiQaLog;
+import com.wisesoft.ai.thread.ThreadPoolManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
@@ -36,7 +36,7 @@ public class QaLogService {
     public void logAsync(String sessionId, String question, String answer,
                          List<String> hitDocIds, boolean hasCitation, long elapsedMs,
                          String rewrittenQuery) {
-        CompletableFuture.runAsync(() -> {
+        ThreadPoolManager.execute(() -> {
             try {
                 AiQaLog log = new AiQaLog();
                 log.setSessionId(sessionId);

@@ -89,7 +89,10 @@ public class DocumentService {
 
     @PostConstruct
     void init() {
-        parseExecutor = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(50));
+        // 命名线程工厂：线程 dump 可辨识解析任务归属。非守护线程——停机时 shutdown() 不打断在跑解析，
+        // 让其自然收尾（真被强杀残留的 status=2 由启动对账 recoverStuckParsing 复位）
+        parseExecutor = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(50),
+                r -> new Thread(r, "doc-parse"));
         // 跨平台保护：Windows 绝对路径（如 D:/xxx、C:\xxx）在非 Windows 系统上会被 Paths.get() 当作
         // 相对路径，拼到 Tomcat 工作目录下导致上传/落盘失败。检测到即回退默认 ./data 并告警。
         String dir = properties.getImages().getDir();
@@ -618,11 +621,14 @@ public class DocumentService {
      * 启停用文档（改 MySQL status + 缓存 + 关键词索引同步）。
      * 向量保留，检索侧按 status 过滤即时生效；索引同步使 Meilisearch 与有效块集合保持一致：
      * 弃用 → 从索引删除该文档全部块（不漂移、不占位）；恢复 → 现存块重新灌入。
+     * 解析中（status=2）禁止启停用：解析完成会把状态覆写回 0 并重灌索引，启停用意图会被静默丢弃
+     * （与 updateKnowledge/rollback 的解析中拦截一致）。
      */
     public void updateStatus(String docId, int status) {
         AiDocument doc = documentMapper.selectById(docId);
         if (doc == null) throw new BizException("文档不存在");
         if (status != 0 && status != 1) throw new BizException("非法状态");
+        if (doc.getStatus() != null && doc.getStatus() == 2) throw new BizException("文档解析中，暂不可启停用");
         doc.setStatus(status);
         documentMapper.updateById(doc);
         documentMetaCache.invalidate(docId);

@@ -10,6 +10,7 @@ import com.wisesoft.ai.mapper.AiMessageMapper;
 import com.wisesoft.ai.mapper.AiSessionMapper;
 import com.wisesoft.ai.model.AiMessage;
 import com.wisesoft.ai.model.AiSession;
+import com.wisesoft.ai.thread.ThreadPoolManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -412,10 +413,10 @@ public class SessionService {
     }
 
     /**
-     * 将 Redis 数据异步补写到 MySQL（新线程执行）
+     * 将 Redis 数据异步补写到 MySQL（线程池后台执行，不阻塞会话读取）
      */
     private void backfillToMysql(String sessionId, List<Map<String, Object>> messages) {
-        new Thread(() -> {
+        ThreadPoolManager.execute(() -> {
             try {
                 // 检查 MySQL 是否已有数据，避免重复 backfill
                 LambdaQueryWrapper<AiMessage> check = new LambdaQueryWrapper<>();
@@ -479,6 +480,6 @@ public class SessionService {
             } catch (Exception e) {
                 log.warn("Backfill 失败 (session={}): {}", sessionId, e.getMessage());
             }
-        }, "backfill-" + sessionId).start();
+        });
     }
 }

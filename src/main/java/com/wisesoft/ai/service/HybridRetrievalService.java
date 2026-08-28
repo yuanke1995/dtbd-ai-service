@@ -127,9 +127,25 @@ public class HybridRetrievalService {
         return t;
     });
 
+    /**
+     * MySQL 关键词降级检索池：唯一用途是给阻塞式 LIKE 查询套上超时（keywordTimeoutMs）。
+     * 必须独立于 multiSearchPool：searchMulti 的外层任务跑在 multiSearchPool 上，其内部
+     * 会调到本方法，同池嵌套提交会在 4 个线程被外层占满时让内层任务永远等不到线程（starvation）。
+     * 也不用共享池：队列满时共享池的拒绝策略会阻塞调用方，把压力反弹成请求延迟。
+     * 本池队列满即 AbortPolicy 拒绝 → 调用方降级为空结果（关键词路本身就是可选增强）。
+     */
+    private final ThreadPoolExecutor keywordFallbackPool = new ThreadPoolExecutor(
+            2, 2, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(16),
+            r -> {
+                Thread t = new Thread(r, "keyword-mysql");
+                t.setDaemon(true);
+                return t;
+            }, new ThreadPoolExecutor.AbortPolicy());
+
     @jakarta.annotation.PreDestroy
     void shutdownMultiSearch() {
         multiSearchPool.shutdownNow();
+        keywordFallbackPool.shutdownNow();
     }
 
     /**
@@ -256,8 +272,9 @@ public class HybridRetrievalService {
      * 注意：LIKE 无法走索引，知识块量大时依赖 keywordTimeoutMs 超时兜底。
      */
     private List<AiKnowledge> keywordSearchMysql(List<String> terms, int limit) {
+        Future<List<AiKnowledge>> future;
         try {
-            return CompletableFuture.supplyAsync(() -> {
+            future = keywordFallbackPool.submit(() -> {
                 // WHERE doc_id IN (生效文档) AND ((content LIKE ? OR title LIKE ?) OR ...)
                 QueryWrapper<AiKnowledge> wrapper = new QueryWrapper<AiKnowledge>()
                         .and(w -> w.inSql("doc_id", "SELECT id FROM c_ai_document WHERE status=0 AND deleted=0")
@@ -273,8 +290,17 @@ public class HybridRetrievalService {
                 List<AiKnowledge> hits = knowledgeMapper.selectList(wrapper);
                 if (hits.isEmpty()) return hits;
                 return scoreKeywordHits(hits, terms);
-            }).get(keywordTimeoutMs(), TimeUnit.MILLISECONDS);
+            });
+        } catch (RejectedExecutionException e) {
+            // 队列已满（LIKE 查询积压）或已停机：跳过关键词路，向量路结果照常返回
+            log.warn("关键词降级检索繁忙，本次跳过关键词召回");
+            return List.of();
+        }
+        try {
+            return future.get(keywordTimeoutMs(), TimeUnit.MILLISECONDS);
         } catch (Exception e) {
+            // 取消：未开始的任务直接出队，避免超时后仍堆积无人取用的慢 LIKE 查询
+            future.cancel(true);
             log.warn("关键词检索失败/超时: {}", e.getMessage());
             return List.of();
         }

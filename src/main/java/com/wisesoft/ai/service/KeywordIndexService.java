@@ -7,9 +7,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.wisesoft.ai.config.AiAppProperties;
 import com.wisesoft.ai.mapper.AiKnowledgeMapper;
 import com.wisesoft.ai.model.AiKnowledge;
+import com.wisesoft.ai.thread.ThreadPoolManager;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
@@ -33,8 +32,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - 启用开关 keyword.engine=meilisearch；未启用/探测失败/调用失败 → 调用方自动降级回 MySQL LIKE
  * - 探测结果缓存 + 失败冷却（keyword.failCooldownMs），冷却结束自动重探，避免每请求都撞
  * - 配置（baseUrl/timeout）变更自动重建客户端并重置探测
- * - 写索引全部 best-effort（失败只告警不抛），最终一致由 reindexAll() 全量重建兜底
- *   （切换引擎保存配置时自动触发，无需手动调接口；运维也可调 /api/ai/search-index/reindex）
+ * - 写索引全部 best-effort（失败只告警不抛），最终一致由周期精确对账兜底：按 (id, contentHash)
+ *   双向比对 MySQL 有效块与索引文档，仅定向修复差异块（schedule 包调度中心驱动：启动先跑一次
+ *   + keyword.reconcileIntervalMs 周期执行；差异过大降级全量重建。切换引擎保存配置时也自动
+ *   全量重建，运维可调 /api/ai/search-index/reindex）
  */
 @Slf4j
 @Service
@@ -52,6 +53,9 @@ public class KeywordIndexService {
 
     /** 全量重建进行中标志（防并发重复重建） */
     private final AtomicBoolean reindexing = new AtomicBoolean(false);
+
+    /** 精确对账进行中标志（防 daemon 周期重叠） */
+    private final AtomicBoolean reconciling = new AtomicBoolean(false);
 
     private volatile RestClient client;
     private volatile String clientBaseUrl = "";
@@ -276,6 +280,8 @@ public class KeywordIndexService {
                 d.put("title", k.getTitle() == null ? "" : k.getTitle());
                 d.put("titlePath", k.getTitlePath() == null ? "" : k.getTitlePath());
                 d.put("content", k.getContent() == null ? "" : k.getContent());
+                // 对账指纹（不入 searchableAttributes，不影响检索）：精确对账按它识别"数量相同但内容过期"的漂移
+                d.put("contentHash", k.getContentHash() == null ? "" : k.getContentHash());
                 docs.add(d);
             }
             if (docs.isEmpty()) return;
@@ -335,7 +341,7 @@ public class KeywordIndexService {
     /**
      * 全量重建索引：分批（每批 1000）从 MySQL 读取 push，避免一次性载入全部块。
      * 首次切换引擎、索引漂移后使用；切换引擎保存配置时自动触发，也可手动调 /reindex。
-     * 防并发重复（AtomicBoolean），后台线程执行不阻塞调用方。
+     * 防并发重复（AtomicBoolean），线程池后台执行不阻塞调用方。
      */
     public void reindexAll() {
         if (!enabled()) {
@@ -352,7 +358,7 @@ public class KeywordIndexService {
             log.info("[Reindex] 全量重建进行中，跳过本次触发");
             return;
         }
-        new Thread(() -> {
+        ThreadPoolManager.execute(() -> {
             long total = 0;
             try {
                 String lastId = "";
@@ -380,48 +386,135 @@ public class KeywordIndexService {
             } finally {
                 reindexing.set(false);
             }
-        }, "search-index-reindex").start();
+        });
     }
 
     /**
-     * 启动索引对账（自愈漂移）：engine=meilisearch 且 keyword.reconcileOnStartup 开（默认 true）时，
-     * 比对索引文档数 vs MySQL 有效块数，不一致 → 后台全量重建。
-     * 放在 ApplicationReadyEvent：晚于 SchemaMigrator/所有 @PostConstruct，配置与表结构就绪。
-     * 多副本：reindexAll 幂等 + AtomicBoolean 防重入，重复重建无害（upsert 覆盖）。
+     * 精确对账：按 (id, contentHash) 双向比对 MySQL 有效块集合与索引文档集合，只定向修复差异块——
+     * 相比计数对账能发现"数量相同但内容过期"的漂移（如 upsert 失败后索引残留旧内容）。
+     * 缺失/过期块补写（差异过大降级全量重建），多余块删除（已删块/已删文档/弃用文档的块）。
+     * 首轮会给存量文档补写 contentHash 字段（索引缺该字段判为过期，upsert 一次自愈，无需手动重建）。
+     * 调度（启动首轮 + 周期间隔，见 keyword.reconcileOnStartup / keyword.reconcileIntervalMs）
+     * 由 schedule 包 ScheduleCenter 驱动；失败只告警不抛，下轮重试。
      */
-    @EventListener(ApplicationReadyEvent.class)
-    public void reconcileOnStartup() {
+    public void reconcile() {
+        if (!enabled()) return;
+        if (!isAvailable()) {
+            log.info("[Reconcile] Meilisearch 不可用，跳过本轮对账");
+            return;
+        }
+        if (reindexing.get()) {
+            log.info("[Reconcile] 全量重建进行中，跳过本轮对账");
+            return;
+        }
+        if (!reconciling.compareAndSet(false, true)) return;
         try {
-            if (!enabled()) return;
-            if (!configService.getBoolean("keyword.reconcileOnStartup")) return;
-            long effective = effectiveCount();
-            long indexed = indexedCount();
-            if (effective < 0 || indexed < 0) {
-                log.info("[Reconcile] 启动对账跳过（计数不可用：effective={}, indexed={}）", effective, indexed);
+            Map<String, String> effective = loadEffectiveHashes();
+            Map<String, String> indexed = loadIndexedHashes();
+            if (effective == null || indexed == null) return; // 读侧失败，下轮重试
+
+            List<String> stale = new ArrayList<>(); // 缺失或内容过期的块 id → 补写
+            for (Map.Entry<String, String> e : effective.entrySet()) {
+                String idxHash = indexed.get(e.getKey());
+                // MySQL 侧 hash 为空（存量老块）只做存在性比较，避免每轮误判重灌；重解析后块带 hash 自然收敛
+                if (idxHash == null || (!e.getValue().isEmpty() && !e.getValue().equals(idxHash))) {
+                    stale.add(e.getKey());
+                }
+            }
+            List<String> extra = new ArrayList<>(); // 索引多余块 id（已删块/已删文档/弃用文档的块）→ 删除
+            for (String id : indexed.keySet()) {
+                if (!effective.containsKey(id)) extra.add(id);
+            }
+
+            if (stale.isEmpty() && extra.isEmpty()) {
+                log.info("[Reconcile] 关键词索引一致（有效块 {} = 索引 {}），无需修复", effective.size(), indexed.size());
                 return;
             }
-            if (indexed != effective) {
-                log.warn("[Reconcile] 索引漂移（索引 {} vs 有效块 {}），自动全量重建", indexed, effective);
+            log.warn("[Reconcile] 索引漂移：缺失/过期 {} 块、多余 {} 块（有效 {}，索引 {}）→ 定向修复",
+                    stale.size(), extra.size(), effective.size(), indexed.size());
+            for (int i = 0; i < extra.size(); i += 1000) {
+                deleteChunks(extra.subList(i, Math.min(i + 1000, extra.size())));
+            }
+            if (stale.size() > Math.max(1000, effective.size() / 3)) {
+                // 差异过大（首轮 hash 补齐 / 长期漂移）：逐块补写不如全量重灌划算
+                log.info("[Reconcile] 差异过大（{} 块），转全量重建", stale.size());
                 reindexAll();
             } else {
-                log.info("[Reconcile] 关键词索引一致（{} 块），无需重建", indexed);
+                for (int i = 0; i < stale.size(); i += 1000) {
+                    List<AiKnowledge> rows = knowledgeMapper.selectBatchIds(
+                            stale.subList(i, Math.min(i + 1000, stale.size())));
+                    indexChunks(rows);
+                }
             }
+            log.info("[Reconcile] 修复完成：补写 {} 块、删除 {} 块", stale.size(), extra.size());
         } catch (Exception e) {
-            log.warn("[Reconcile] 启动对账失败: {}", e.getMessage());
+            log.warn("[Reconcile] 对账失败（下轮重试）: {}", e.getMessage());
+        } finally {
+            reconciling.set(false);
         }
     }
 
-    /** MySQL 有效知识块数（status=0 文档的块 + 手动块 docId IS NULL；失败返回 -1） */
-    private long effectiveCount() {
+    /** MySQL 有效块 id → contentHash（status=0 文档的块 + 手动块 docId IS NULL；扫描失败返回 null） */
+    private Map<String, String> loadEffectiveHashes() {
         try {
-            Long n = knowledgeMapper.selectCount(new LambdaQueryWrapper<AiKnowledge>()
-                    .and(w -> w.isNull(AiKnowledge::getDocId)
-                            .or().inSql(AiKnowledge::getDocId,
-                                    "SELECT id FROM c_ai_document WHERE status=0 AND deleted=0")));
-            return n == null ? 0 : n;
+            Map<String, String> map = new LinkedHashMap<>();
+            String lastId = "";
+            while (true) {
+                List<AiKnowledge> batch = knowledgeMapper.selectList(
+                        new LambdaQueryWrapper<AiKnowledge>()
+                                .select(AiKnowledge::getId, AiKnowledge::getContentHash)
+                                .gt(AiKnowledge::getId, lastId)
+                                .and(w -> w.isNull(AiKnowledge::getDocId)
+                                        .or().inSql(AiKnowledge::getDocId,
+                                                "SELECT id FROM c_ai_document WHERE status=0 AND deleted=0"))
+                                .orderByAsc(AiKnowledge::getId)
+                                .last("LIMIT 1000"));
+                if (batch.isEmpty()) break;
+                for (AiKnowledge k : batch) {
+                    map.put(k.getId(), k.getContentHash() == null ? "" : k.getContentHash());
+                }
+                lastId = batch.get(batch.size() - 1).getId();
+                if (batch.size() < 1000) break;
+            }
+            return map;
         } catch (Exception e) {
-            log.warn("[Reconcile] 有效块计数失败: {}", e.getMessage());
-            return -1;
+            log.warn("[Reconcile] 有效块扫描失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** 索引文档 id → contentHash（分页拉取全部；服务异常返回 null；索引不存在视为空集合） */
+    private Map<String, String> loadIndexedHashes() {
+        Map<String, String> map = new LinkedHashMap<>();
+        try {
+            int offset = 0;
+            while (true) {
+                final int off = offset;
+                String resp = client().get()
+                        .uri(b -> b.path("/indexes/" + index() + "/documents")
+                                .queryParam("fields", "id,contentHash")
+                                .queryParam("limit", 1000)
+                                .queryParam("offset", off)
+                                .build())
+                        .retrieve().body(String.class);
+                JSONArray docs = resp == null ? null : JSON.parseArray(resp);
+                if (docs == null || docs.isEmpty()) break;
+                for (int i = 0; i < docs.size(); i++) {
+                    JSONObject d = docs.getJSONObject(i);
+                    String id = d.getString("id");
+                    if (id != null && !id.isBlank()) {
+                        String h = d.getString("contentHash");
+                        map.put(id, h == null ? "" : h);
+                    }
+                }
+                offset += docs.size();
+            }
+            return map;
+        } catch (Exception e) {
+            // 索引尚未创建（404 index_not_found）= 空集合：全部判缺失走全量重建，不是服务故障
+            if (e.getMessage() != null && e.getMessage().contains("index_not_found")) return map;
+            markFailed("对账拉取索引文档", e);
+            return null;
         }
     }
 
