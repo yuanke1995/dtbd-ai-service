@@ -8,6 +8,7 @@ import com.wisesoft.ai.mapper.AiKnowledgeMapper;
 import com.wisesoft.ai.model.AiKnowledge;
 import com.wisesoft.ai.service.ImageUrlSigner;
 import com.wisesoft.ai.service.RagService;
+import com.wisesoft.ai.service.ConfigService;
 import com.wisesoft.ai.service.SessionService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -41,6 +42,7 @@ public class ChatController {
     private final SessionService sessionService;
     private final ImageUrlSigner imageUrlSigner;
     private final AiKnowledgeMapper knowledgeMapper;
+    private final ConfigService configService;
 
     @Operation(summary = "SSE 流式问答",
             description = "发送问题（可含图片），通过 SSE 流式返回 AI 回答。事件类型：thinking（深度思考增量）、thinking_done（思考结束）、token（文本增量）、image（图片 URL 列表）、done（引用来源/相关推荐/消息ID/思考全文）、error（错误信息）")
@@ -55,7 +57,10 @@ public class ChatController {
             sessionId = sessionService.createSession();
         }
 
-        SseEmitter emitter = new SseEmitter(300000L);
+        // 超时配置化（chat.sseTimeoutMs，默认 5 分钟）；超时由 RagService.onTimeout 先发 warn 再 dispose（fail-loud）
+        long sseTimeout = configService.getLong("chat.sseTimeoutMs");
+        if (sseTimeout <= 0) sseTimeout = 300000L;
+        SseEmitter emitter = new SseEmitter(sseTimeout);
         ragService.chat(sessionId, question, request.getImages(), request.isDeepThink(), emitter);
         return emitter;
     }

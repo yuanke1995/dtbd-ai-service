@@ -58,6 +58,7 @@ public class AiKnowledgeController {
                     m.put("title", k.getTitle());
                     m.put("chunkIndex", k.getChunkIndex());
                     m.put("titlePath", k.getTitlePath());
+                    m.put("vectorId", k.getVectorId());   // M11：空 = 未向量化（前端角标）
                     m.put("content", k.getContent());
                     m.put("images", k.getImages() != null && !k.getImages().isBlank()
                             ? com.alibaba.fastjson2.JSON.parseArray(k.getImages()) : List.of());
@@ -99,9 +100,13 @@ public class AiKnowledgeController {
         k.setContent(content);
         k.setDocId(docId != null && !docId.isBlank() ? docId : null);
         k.setContentHash(documentService.contentHash(title, content));
-        // 先入库，再生成向量（H1：失败降级仅关键词召回，不阻断）
+        // 先入库，再生成向量（M11 fail-loud：向量化失败要在响应中显式告知，不再静默"已创建"）
         knowledgeMapper.insert(k);
-        documentService.embedAndStore(k, k.getContent());
+        boolean embedded = documentService.embedAndStore(k, k.getContent());
+        if (!embedded) {
+            return ResultJson.ok(Map.of("id", k.getId(), "warn", "知识块已创建但向量化失败，仅可关键词检索（可重新编辑触发向量化）"),
+                    "知识块已创建（向量化失败，仅关键词可召回）");
+        }
         return ResultJson.ok(Map.of("id", k.getId()), "知识块已创建");
     }
 

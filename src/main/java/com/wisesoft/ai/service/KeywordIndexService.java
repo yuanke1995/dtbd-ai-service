@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 关键词索引服务（Meilisearch，裸 HTTP 调用，与 RerankService/VisionService 风格一致）
@@ -56,6 +57,9 @@ public class KeywordIndexService {
 
     /** 精确对账进行中标志（防 daemon 周期重叠） */
     private final AtomicBoolean reconciling = new AtomicBoolean(false);
+
+    /** 索引写失败累计计数（M12 fail-loud：/search-index/stats 暴露，运维可见漂移之外的写故障） */
+    private final AtomicLong writeFailCount = new AtomicLong();
 
     private volatile RestClient client;
     private volatile String clientBaseUrl = "";
@@ -303,7 +307,7 @@ public class KeywordIndexService {
                     .retrieve().body(String.class);
             log.debug("[Keyword] 索引写入 {} 块", docs.size());
         } catch (Exception e) {
-            markFailed("索引写入", e);
+            markWriteFailed("索引写入", e);
         }
     }
 
@@ -318,7 +322,7 @@ public class KeywordIndexService {
                     .retrieve().body(String.class);
             log.debug("[Keyword] 索引删除 {} 块", ids.size());
         } catch (Exception e) {
-            markFailed("索引删除", e);
+            markWriteFailed("索引删除", e);
         }
     }
 
@@ -334,7 +338,7 @@ public class KeywordIndexService {
                     .retrieve().body(String.class);
             log.debug("[Keyword] 索引删除文档 {} 的全部块", docId);
         } catch (Exception e) {
-            markFailed("按文档删除索引", e);
+            markWriteFailed("按文档删除索引", e);
         }
     }
 
@@ -346,7 +350,7 @@ public class KeywordIndexService {
             client().delete().uri("/indexes/" + index() + "/documents").retrieve().body(String.class);
             log.info("[Keyword] 索引已清空");
         } catch (Exception e) {
-            markFailed("清空索引", e);
+            markWriteFailed("清空索引", e);
         }
     }
 
@@ -509,7 +513,10 @@ public class KeywordIndexService {
                                 .queryParam("offset", off)
                                 .build())
                         .retrieve().body(String.class);
-                JSONArray docs = resp == null ? null : JSON.parseArray(resp);
+                // Meilisearch v1：GET /documents 返回 {"results":[...], "offset":.., "limit":.., "total":..}（对象包装），
+                // 旧版裸数组格式已废弃——按 results 字段解析，否则 JSON 解析必失败（illegal input）
+                JSONObject body = resp == null ? null : JSON.parseObject(resp);
+                JSONArray docs = body == null ? null : body.getJSONArray("results");
                 if (docs == null || docs.isEmpty()) break;
                 for (int i = 0; i < docs.size(); i++) {
                     JSONObject d = docs.getJSONObject(i);
@@ -555,5 +562,16 @@ public class KeywordIndexService {
         supportChecked.set(true);
         lastFailTs = System.currentTimeMillis();
         log.warn("[Keyword] Meilisearch {}失败（{}s 后自动重试）: {}", action, failCooldownMs() / 1000, e.getMessage());
+    }
+
+    /** 写操作失败：计数 + 冷却（M12 fail-loud：写失败可经 /search-index/stats 观察，不止日志告警） */
+    private void markWriteFailed(String action, Exception e) {
+        writeFailCount.incrementAndGet();
+        markFailed(action, e);
+    }
+
+    /** 写失败累计次数（stats 接口展示用） */
+    public long writeFailCount() {
+        return writeFailCount.get();
     }
 }

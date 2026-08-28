@@ -45,6 +45,23 @@
               <a-input-number v-model:value="form.chat.pipelineThreads" :min="2" :max="64" style="width:200px" />
               <span style="margin-left:12px;color:#999;font-size:12px">并发问答重活线程，保存即生效</span>
             </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.streamRetryCount" placement="top">流式中断重试 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chat.streamRetryCount" :min="0" :max="5" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">未输出内容时自动重试次数，0=关闭</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.sseTimeoutMs" placement="top">回答超时(ms) <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chat.sseTimeoutMs" :min="60000" :step="30000" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">SSE 超时截断并提示，默认 300000</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.showDebugDegradations" placement="top">调试级提示 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.chat.showDebugDegradations" />
+              <span style="margin-left:12px;color:#999;font-size:12px">
+                开启后回答下方显示内部降级信息（图片剔除/未标注引用/检索降级等），默认只显示用户级
+              </span>
+            </a-form-item>
             <a-form-item label="Base URL">
               <a-input :value="ro.chat.baseUrl" disabled />
             </a-form-item>
@@ -56,6 +73,13 @@
 
         <a-collapse-panel key="vision" :id="'cfg-anchor-vision'" header="视觉模型（图片识别）">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.visionEnabled" placement="top">启用图片描述 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.vision.enabled" />
+              <span v-if="!form.vision.enabled" style="margin-left:12px;color:#cf1322;font-size:12px">
+                ⚠ 关闭后文档图片/用户图片不生成描述：图片仅展示、内容不进入检索（RAG 对图片语义失效）
+              </span>
+            </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.visionModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input v-model:value="form.vision.model" placeholder="如 qwen3-vl:2b" />
@@ -107,6 +131,11 @@
             <a-form-item>
               <template #label><a-tooltip :title="tips.parseConcurrency" placement="top">解析并发数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.chunk.concurrency" :min="1" :max="8" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.embedRetryCount" placement="top">向量化重试 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.chunk.embedRetryCount" :min="0" :max="5" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">向量化批次失败自动重试次数，0=不重试</span>
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.ocrMinText" placement="top">PDF 扫描件阈值 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -185,6 +214,11 @@
               <template #label><a-tooltip :title="tips.retrievalTimeout" placement="top">检索超时(ms) <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.retrieval.searchTimeoutMs" :min="500" :step="500" style="width:200px" />
               <span style="margin-left:12px;color:#999;font-size:12px">关键词/总检索超时</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.rewriteTimeoutMs" placement="top">改写超时(ms) <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.rewriteTimeoutMs" :min="1000" :step="500" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">查询改写超时，本地模型慢可调大</span>
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.positionBonus" placement="top">位置奖励 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -403,7 +437,12 @@ const tips = {
   remainTokenFloor: '上下文预算保留下限（token）：扣除系统提示与问题后至少保留的量，低于则不再填充知识块。',
   truncateFallbackChars: '知识块超出预算时的截断兜底字符数（至少保留的字数）。',
   pipelineThreads: '问答流水线的并发线程数：图片识别、查询改写、检索、深度思考等"重活"在独立线程池执行，不占 Tomcat 请求线程（多用户并发问答时避免请求线程被打满）。调高可支撑更多并发用户，但占用更多 CPU/内存；队列满时新请求会快速返回"系统繁忙"。保存即生效。',
+  streamRetryCount: '主 LLM 流式生成在"未输出任何内容"时中断的自动重试次数（0=关闭）。已输出内容后中断不重试（避免重复内容）；重试仍失败会在回答下方给出警示。',
+  sseTimeoutMs: '问答 SSE 连接超时（毫秒）：超过后回答被截断，前端提示"回答超时已截断"。深度思考+长回答场景可调大，默认 300000（5 分钟）。',
+  showDebugDegradations: '回答提示中是否显示调试级降级信息（图片引用剔除/未标注引用/查询改写失败/检索降级等内部细节）。默认关：只显示对用户有意义的信息；调试排障时可开启，所有降级信息仍会写 [FAIL-LOUD] 日志。',
+  visionEnabled: '视觉模型总开关。关闭后：文档图片/用户图片都不生成描述——图片仅展示、内容不进检索与回答引用（RAG 对图片语义失效），一般不建议关闭。',
   parseConcurrency: '文档异步解析的并发数（同时解析几个文档）。调高多文档上传更快，但并发解析会同时占用 embedding/Ollama 资源；保存后对新任务生效。',
+  embedRetryCount: '向量化批次失败时的自动重试次数（0=不重试）。重试仍失败则整个文档解析失败并回退/提示（fail-loud，绝不静默丢块）。',
   ocrMinText: 'PDF 页文本少于该长度判定为扫描件/图片型，触发 OCR 识别（0=总是 OCR）。调高更激进触发 OCR，调低更依赖 PDF 自带文本。',
   chunkStructural: '按文档结构切分：标题层级开新块、达到边界阈值在段落边界断块（避免从句子中间硬切）、章节标题路径注入块上下文。docx 生效；存量文档需重解析后才会按新规则重建知识块。',
   chunkStructuralRatio: '结构切分边界阈值（maxSize×比例）：块达到该长度时优先在段落边界断块。调低块更小更贴近边界但块数更多；调高更接近原 800 字硬切。',
@@ -411,6 +450,7 @@ const tips = {
   vecThreshold: '向量相似度归一化基准：低于该分的向量命中归一化为 0 分，也是向量检索的相似度下限。调高更严格（召回更少但更相关）。',
   keywordLimit: '关键词检索最多返回的知识块数（SQL LIMIT）。调高召回更全但更慢、融合分计算更重。',
   retrievalTimeout: '混合检索超时（ms）：关键词子检索与总检索的超时上限，超时降级返回已收集结果。',
+  rewriteTimeoutMs: '查询改写超时（ms）：LLM 改写问题（多轮追问补全上下文）的等待上限，超时则用原问题检索并提示。本地模型响应慢时调大可减少改写降级，默认 5000。',
   positionBonus: '知识块位置奖励：位于文档首块/前段的内容额外加分。适合"文档开头是摘要"的结构；对顺序无关的文档可调低。',
   rerankMinHits: '触发重排的候选数区间（下限~上限）：候选太少（无意义）或太多（超时风险）时跳过重排，直接用融合分排序。',
   rerankFailCooldown: '重排服务失败后的冷却时间(ms)：冷却期内不再探测/调用（避免每个请求都撞一次），冷却结束后自动恢复。',
@@ -464,12 +504,12 @@ const onRerankEnabledChange = async checked => {
     rerankChecking.value = false
   }
 }
-const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8 },
-                    vision: { model: '', prompt: '', concurrency: 4, userImageConcurrency: 2 },
-                    chunk: { maxChunks: 3000, maxImages: 100, overlap: 100, concurrency: 2, ocrMinText: 20, structural: true, structuralRatio: 0.8 },
+const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8, streamRetryCount: 1, sseTimeoutMs: 300000, showDebugDegradations: false },
+                    vision: { enabled: true, model: '', prompt: '', concurrency: 4, userImageConcurrency: 2 },
+                    chunk: { maxChunks: 3000, maxImages: 100, overlap: 100, concurrency: 2, ocrMinText: 20, structural: true, structuralRatio: 0.8, embedRetryCount: 1 },
                     upload: { maxFileSizeMB: 200 },
                     retrieval: { vectorWeight: 0.6, keywordWeight: 0.4, titleBonus: 0.1,
-                                 vecThreshold: 0.3, keywordLimit: 20, keywordTimeoutMs: 800, searchTimeoutMs: 8000,
+                                 vecThreshold: 0.3, keywordLimit: 20, keywordTimeoutMs: 800, searchTimeoutMs: 8000, rewriteTimeoutMs: 5000,
                                  positionBonus: 0.03, sectionBonus: 0.01, keywordMaxTerms: 6, keywordMaxTotal: 12,
                                  rerank: { enabled: false, baseUrl: 'http://localhost:7997',
                                            model: 'BAAI/bge-reranker-v2-m3', timeoutMillis: 5000,
@@ -496,6 +536,10 @@ onMounted(async () => {
       form.value.chat.truncateFallbackChars = Number(d.chat?.truncateFallbackChars?.value ?? 200)
       form.value.chat.historyRounds = Number(d.chat?.historyRounds?.value ?? 5)
       form.value.chat.pipelineThreads = Number(d.chat?.pipelineThreads?.value ?? 8)
+      form.value.chat.streamRetryCount = Number(d.chat?.streamRetryCount?.value ?? 1)
+      form.value.chat.sseTimeoutMs = Number(d.chat?.sseTimeoutMs?.value ?? 300000)
+      form.value.chat.showDebugDegradations = d.chat?.showDebugDegradations?.value === 'true'
+      form.value.vision.enabled = d.vision?.enabled?.value !== 'false'
       form.value.vision.model = d.vision?.model?.value || ''
       form.value.vision.prompt = d.vision?.prompt?.value || ''
       form.value.vision.concurrency = Number(d.vision?.concurrency?.value ?? 4)
@@ -508,6 +552,7 @@ onMounted(async () => {
       form.value.chunk.ocrMinText = Number(ck.ocrMinText?.value ?? 20)
       form.value.chunk.structural = ck.structural?.value !== 'false'
       form.value.chunk.structuralRatio = Number(ck.structuralRatio?.value ?? 0.8)
+      form.value.chunk.embedRetryCount = Number(ck.embedRetryCount?.value ?? 1)
       const up = d.upload || {}
       form.value.upload.maxFileSizeMB = Math.round(Number(up.maxFileSize?.value ?? 209715200) / 1024 / 1024)
       form.value.retrieval.vectorWeight = Number(d.retrieval?.vectorWeight?.value ?? 0.6)
@@ -517,6 +562,7 @@ onMounted(async () => {
       form.value.retrieval.keywordLimit = Number(d.retrieval?.keywordLimit?.value ?? 20)
       form.value.retrieval.keywordTimeoutMs = Number(d.retrieval?.keywordTimeoutMs?.value ?? 800)
       form.value.retrieval.searchTimeoutMs = Number(d.retrieval?.searchTimeoutMs?.value ?? 8000)
+      form.value.retrieval.rewriteTimeoutMs = Number(d.retrieval?.rewriteTimeoutMs?.value ?? 5000)
       form.value.retrieval.positionBonus = Number(d.retrieval?.positionBonus?.value ?? 0.03)
       form.value.retrieval.sectionBonus = Number(d.retrieval?.sectionBonus?.value ?? 0.01)
       form.value.retrieval.keywordMaxTerms = Number(d.retrieval?.keywordMaxTerms?.value ?? 6)
@@ -587,15 +633,20 @@ const save = async () => {
               remainTokenFloor: String(form.value.chat.remainTokenFloor),
               truncateFallbackChars: String(form.value.chat.truncateFallbackChars),
               historyRounds: String(form.value.chat.historyRounds),
-              pipelineThreads: String(form.value.chat.pipelineThreads) },
-      vision: { model: form.value.vision.model?.trim(), prompt: form.value.vision.prompt?.trim(),
+              pipelineThreads: String(form.value.chat.pipelineThreads),
+              streamRetryCount: String(form.value.chat.streamRetryCount),
+              sseTimeoutMs: String(form.value.chat.sseTimeoutMs),
+              showDebugDegradations: String(form.value.chat.showDebugDegradations) },
+      vision: { enabled: String(form.value.vision.enabled),
+                model: form.value.vision.model?.trim(), prompt: form.value.vision.prompt?.trim(),
                 concurrency: String(form.value.vision.concurrency),
                 userImageConcurrency: String(form.value.vision.userImageConcurrency) },
       chunk: { maxChunks: String(form.value.chunk.maxChunks), maxImages: String(form.value.chunk.maxImages),
                overlap: String(form.value.chunk.overlap),
                concurrency: String(form.value.chunk.concurrency), ocrMinText: String(form.value.chunk.ocrMinText),
                structural: String(form.value.chunk.structural),
-               structuralRatio: String(form.value.chunk.structuralRatio) },
+               structuralRatio: String(form.value.chunk.structuralRatio),
+               embedRetryCount: String(form.value.chunk.embedRetryCount) },
       upload: { maxFileSize: String(form.value.upload.maxFileSizeMB * 1024 * 1024) },
       retrieval: { vectorWeight: String(form.value.retrieval.vectorWeight),
                    keywordWeight: String(form.value.retrieval.keywordWeight),
@@ -604,6 +655,7 @@ const save = async () => {
                    keywordLimit: String(form.value.retrieval.keywordLimit),
                    keywordTimeoutMs: String(form.value.retrieval.keywordTimeoutMs),
                    searchTimeoutMs: String(form.value.retrieval.searchTimeoutMs),
+                   rewriteTimeoutMs: String(form.value.retrieval.rewriteTimeoutMs),
                    positionBonus: String(form.value.retrieval.positionBonus),
                    sectionBonus: String(form.value.retrieval.sectionBonus),
                    keywordMaxTerms: String(form.value.retrieval.keywordMaxTerms),

@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.xwpf.usermodel.*;
 import org.springframework.stereotype.Component;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,6 +45,27 @@ public class DocxParser implements DocumentParser {
     private volatile Semaphore visionSemaphore;
     /** 上次生效的图片描述并发数（判断配置是否变化；不能用 availablePermits——运行期许可被占会误判触发重建） */
     private volatile int visionConcurrency;
+
+    /** 单次解析统计（fail-loud：截断/跳过/失败计数，供解析终态 desc 展示；docId -> [图片截断, 类型跳过, 落盘失败]） */
+    private final ConcurrentMap<String, int[]> parseStats = new ConcurrentHashMap<>();
+
+    /** 解析统计通道：计数数组 [0]=maxImages截断张数 [1]=类型跳过张数 [2]=落盘失败张数 */
+    private int[] statsFor(String docId) {
+        return parseStats.computeIfAbsent(docId, k -> new int[3]);
+    }
+
+    /** 解析结束后取统计（无则返回空统计），调用方展示完应 clearStats */
+    public Map<String, Integer> statsOf(String docId) {
+        int[] s = parseStats.get(docId);
+        if (s == null) return Map.of("truncated", 0, "typeSkipped", 0, "persistFailed", 0);
+        return Map.of("truncated", s[0], "typeSkipped", s[1], "persistFailed", s[2]);
+    }
+
+    /** 清理解析统计（解析结束后调用，防 docId 泄漏） */
+    public void clearStats(String docId) {
+        parseStats.remove(docId);
+    }
+
 
     public DocxParser(AiAppProperties properties, VisionService visionService, ConfigService configService) {
         this.properties = properties;
@@ -129,12 +151,15 @@ public class DocxParser implements DocumentParser {
         }
 
         try (XWPFDocument document = new XWPFDocument(new java.io.ByteArrayInputStream(bytes))) {
+            // 样式表 → 标题层级映射（WPS/Word 数字样式 ID 的标题正确识别 + 目录样式跳过）
+            Map<String, Integer> styleLevels = buildStyleLevels(bytes);
             for (IBodyElement element : document.getBodyElements()) {
                 if (element.getElementType() == BodyElementType.PARAGRAPH) {
                     XWPFParagraph p = (XWPFParagraph) element;
                     String text = p.getText().trim();
 
-                    int level = headingLevel(p);
+                    int level = headingLevel(p, styleLevels);
+                    if (level < 0) continue; // 目录段落（toc 样式，含页码）：跳过不进知识块
                     if (level > 0 && level <= 3) {
                         // 遇标题 flush 当前块（结构模式：按层级维护标题栈生成章节路径）
                         flushChunk(title, content, currentImages, chunks, titlePath);
@@ -268,6 +293,8 @@ public class DocxParser implements DocumentParser {
                                ImageProgress imageProgress) {
         String ext = data.suggestFileExtension().toLowerCase();
         if (!ALLOWED_EXTS.contains(ext)) {
+            // fail-loud：跳过的图不静默（计数入终态 desc；EMF/WMF/PICT 矢量图不支持，属设计内但需可见）
+            statsFor(docId)[1]++;
             log.debug("跳过不支持的图片类型: {}", ext);
             return;
         }
@@ -279,6 +306,7 @@ public class DocxParser implements DocumentParser {
                 log.warn("[{}] 图片数量达到上限 {}，后续图片不再提取描述", docId, maxImages);
                 imageCount[0]++;  // 只记一次 warn
             }
+            statsFor(docId)[0]++;  // 截断计数（终态 desc 展示"图片截断N张"）
             return;
         }
 
@@ -327,7 +355,9 @@ public class DocxParser implements DocumentParser {
                 log.warn("图片描述并发等待被中断: {}", e.getMessage());
                 return;
             } catch (IOException e) {
-                log.warn("图片保存失败: {}", e.getMessage());
+                // fail-loud：图片落盘失败 = 该图连展示都没有（比无描述更严重），计数入终态 desc
+                statsFor(docId)[2]++;
+                log.warn("[{}] 图片保存失败: {}", docId, e.getMessage());
                 return;
             }
         }
@@ -633,16 +663,93 @@ public class DocxParser implements DocumentParser {
         }
     }
 
+    /** 标题样式名匹配（"heading 1" / "标题 1" / "Heading1"） */
+    private static final Pattern HEADING_STYLE_NAME = Pattern.compile("(?i)(?:heading|标题)\\s*(\\d+)");
+
     /**
-     * 检测段落标题层级：样式名 → 大纲级别 → 0（正文）
+     * 解析文档样式表：styleId → 标题层级（1~9），目录样式（toc/目录）→ -1。
+     * WPS/Word 生成的中文文档常把内置标题样式 ID 定义成数字（2=标题1、3=标题2、4=标题3...），
+     * 直接按 ID 数字匹配（s.equals("2")）会整体错位/漏识别——必须按样式 name 或样式级 outlineLvl 建立映射。
+     * 直接从 docx zip 读 word/styles.xml（POI XWPFStyles 无遍历 API，且各版本不一致）。
      */
-    private int headingLevel(XWPFParagraph p) {
+    private Map<String, Integer> buildStyleLevels(byte[] docxBytes) {
+        Map<String, Integer> map = new HashMap<>();
+        try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(new ByteArrayInputStream(docxBytes))) {
+            java.util.zip.ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                if (!"word/styles.xml".equals(entry.getName())) continue;
+                byte[] xml = zis.readAllBytes();
+                org.w3c.dom.Document d = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+                        .newDocumentBuilder().parse(new ByteArrayInputStream(xml));
+                org.w3c.dom.NodeList styleNodes = d.getElementsByTagName("w:style");
+                for (int i = 0; i < styleNodes.getLength(); i++) {
+                    org.w3c.dom.Element se = (org.w3c.dom.Element) styleNodes.item(i);
+                    if (!"paragraph".equals(se.getAttribute("w:type"))) continue;
+                    String id = se.getAttribute("w:styleId");
+                    if (id == null || id.isEmpty()) continue;
+                    String name = childText(se, "w:name");
+                    if (name != null && !name.isBlank()) {
+                        String nm = name.trim();
+                        // 目录样式段落（含页码）→ 跳过，不混入知识块
+                        if (nm.toLowerCase().startsWith("toc") || nm.startsWith("目录")) {
+                            map.put(id, -1);
+                            continue;
+                        }
+                        Matcher m = HEADING_STYLE_NAME.matcher(nm);
+                        if (m.matches()) {
+                            map.put(id, Integer.parseInt(m.group(1)));
+                            continue;
+                        }
+                    }
+                    // 样式级 outlineLvl（WPS/Word 标题样式在样式定义里带大纲级别，段落内联通常没有）
+                    String lvlStr = childText(se, "w:pPr", "w:outlineLvl", "w:val");
+                    if (lvlStr != null) {
+                        try {
+                            int lvl = Integer.parseInt(lvlStr.trim());
+                            if (lvl >= 0 && lvl <= 8) map.put(id, lvl + 1);
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                }
+                break;
+            }
+        } catch (Exception e) {
+            log.debug("样式层级解析失败（回退启发式识别）: {}", e.getMessage());
+        }
+        return map;
+    }
+
+    /** 取直接子元素文本（逐级 path 查找：w:name 或 w:pPr/w:outlineLvl/w:val） */
+    private static String childText(org.w3c.dom.Element parent, String... path) {
+        org.w3c.dom.Element cur = parent;
+        for (String tag : path) {
+            org.w3c.dom.Element next = null;
+            for (org.w3c.dom.Node n = cur.getFirstChild(); n != null; n = n.getNextSibling()) {
+                if (n instanceof org.w3c.dom.Element e && tag.equals(e.getTagName())) {
+                    next = e;
+                    break;
+                }
+            }
+            if (next == null) return null;
+            cur = next;
+        }
+        return cur.getTextContent();
+    }
+
+    /**
+     * 检测段落标题层级：优先查样式映射（styleId → level，覆盖 WPS/Word 数字样式 ID）；
+     * 映射未命中回退：样式名关键词 + 段落内联大纲级别。返回 -1 表示目录段落（调用方跳过）。
+     */
+    private int headingLevel(XWPFParagraph p, Map<String, Integer> styleLevels) {
         String style = p.getStyle();
+        if (style != null && styleLevels.containsKey(style)) {
+            return styleLevels.get(style);
+        }
         if (style != null) {
             String s = style.toLowerCase();
-            if (s.contains("heading1") || s.contains("标题1") || s.equals("1")) return 1;
-            if (s.contains("heading2") || s.contains("标题2") || s.equals("2")) return 2;
-            if (s.contains("heading3") || s.contains("标题3") || s.equals("3")) return 3;
+            if (s.contains("heading1") || s.contains("标题1")) return 1;
+            if (s.contains("heading2") || s.contains("标题2")) return 2;
+            if (s.contains("heading3") || s.contains("标题3")) return 3;
         }
         try {
             var pPr = p.getCTP().getPPr();

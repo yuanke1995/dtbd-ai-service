@@ -180,9 +180,11 @@ public class SessionService {
 
     /**
      * 获取最近 N 轮对话（MySQL 直读最近 N 轮，Redis 兜底）
+     * 返回 null 表示"读取失败"（fail-loud：调用方需区分"无历史"与"历史读取失败"，不得静默当无历史）
      */
     public List<Map<String, Object>> getRecentHistory(String sessionId, int rounds) {
         List<Map<String, Object>> recent = readRecentFromMysql(sessionId, rounds);
+        if (recent == null) return null; // 读失败：显式失败信号，调用方 fail-loud
         if (!recent.isEmpty()) {
             return recent;
         }
@@ -211,8 +213,9 @@ public class SessionService {
             Collections.reverse(messages); // 恢复时间正序（最新在后）
             return messages.stream().map(this::toMessageMap).collect(Collectors.toList());
         } catch (Exception e) {
-            log.warn("MySQL 读取最近会话历史失败 (session={}): {}", sessionId, e.getMessage());
-            return Collections.emptyList();
+            // M6 fail-loud：读失败返回 null（区分"无历史"与"读取失败"），调用方上报而非静默跳过记忆
+            log.warn("[FAIL-LOUD] MySQL 读取最近会话历史失败 (session={}): {}", sessionId, e.getMessage());
+            return null;
         }
     }
 

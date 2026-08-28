@@ -56,19 +56,50 @@ public class HybridRetrievalService {
     }
 
     /**
-     * 混合检索：返回按融合分降序的结果（已过滤弃用文档）
+     * 检索诊断（fail-loud：单路失败/降级标记，随检索结果透传给调用方上报 degradations）。
+     * 只写不入日志，避免热路径日志噪音；由 RagService 统一转成回答级警示。
+     */
+    public static final class RetrievalDiag {
+        private boolean vectorFailed;
+        private boolean keywordFailed;   // Meili 不可用（探测失败/冷却/401）→ 本次降级 MySQL LIKE
+        private boolean keywordBusy;     // 关键词降级检索繁忙/超时 → 本次跳过关键词路
+        private boolean keywordFallback; // Meili 无命中回退 MySQL（仅调试面板展示，不扰用户）
+        private boolean multiTimeout;    // 多路检索超时/失败 → 降级首路/仅用已完成结果
+        private String lastError;
+
+        void vectorFailed(String err) { this.vectorFailed = true; this.lastError = err; }
+        void keywordFailed() { this.keywordFailed = true; }
+        void keywordBusy() { this.keywordBusy = true; }
+        void keywordFallback() { this.keywordFallback = true; }
+        void multiTimeout() { this.multiTimeout = true; }
+
+        public boolean isVectorFailed() { return vectorFailed; }
+        public boolean isKeywordFailed() { return keywordFailed; }
+        public boolean isKeywordBusy() { return keywordBusy; }
+        public boolean isKeywordFallback() { return keywordFallback; }
+        public boolean isMultiTimeout() { return multiTimeout; }
+        public String lastError() { return lastError; }
+    }
+
+    /**
+     * 混合检索：返回按融合分降序的结果（已过滤弃用文档）。旧签名委托，外部调用方不受影响。
      */
     public List<Hit> search(String query) {
+        return search(query, null);
+    }
+
+    /** 带诊断的混合检索（fail-loud：单路失败/降级写入 diag，由调用方转回答级警示） */
+    public List<Hit> search(String query, RetrievalDiag diag) {
         // 权重动态读取（DB 配置，保存即生效；缺失时兜底 yml 默认值 0.6/0.4/0.1）
         double vectorWeight = configService.getDouble("retrieval.vectorWeight");
         double keywordWeight = configService.getDouble("retrieval.keywordWeight");
         double titleBonus = configService.getDouble("retrieval.titleBonus");
 
         // 1. 向量召回（放大召回率）
-        List<Document> vectorDocs = vectorSearch(query);
+        List<Document> vectorDocs = vectorSearch(query, diag);
 
         // 2. 关键词召回（并行，超时兜底）
-        List<AiKnowledge> kwDocs = keywordSearch(query);
+        List<AiKnowledge> kwDocs = keywordSearch(query, diag);
 
         // 3. 批量加载向量命中的知识块元数据（一次 selectBatchIds 替代逐条 selectById）+ 不可召回文档集合
         Map<String, AiKnowledge> kidMap = loadKnowledgeBatch(vectorDocs);
@@ -89,6 +120,9 @@ public class HybridRetrievalService {
             }
             double vecScore = parseScore(doc.getScore());
             double vecNorm = Math.max(0, (vecScore - vt) / (1.0 - vt));
+            // L8（设计保留，不扰用户）：单路为空时分数为绝对加权和——向量单飞=vectorWeight×vecNorm，
+            // 关键词单飞=keywordWeight×hitRate，两者同体系（0~0.6 / 0~0.4）可直接比较排序，无虚高问题；
+            // 仅当关键词路 hitRate 本身归一化失真时才可能偏高（MySQL LIKE 路已按命中集归一化，属已知边界）
             double score = vectorWeight * vecNorm;
             merged.put(kid, buildHit(doc, k, kid, score));
         }
@@ -153,14 +187,19 @@ public class HybridRetrievalService {
      * 单 query 直接委托 search()；并行总超时 8s（超时用已完成结果）
      */
     public List<Hit> searchMulti(List<String> queries) {
+        return searchMulti(queries, null);
+    }
+
+    /** 带诊断的多路检索（fail-loud：超时/失败降级首路写入 diag） */
+    public List<Hit> searchMulti(List<String> queries, RetrievalDiag diag) {
         if (queries == null || queries.isEmpty()) return List.of();
         List<String> qs = queries.stream().map(String::trim).filter(q -> !q.isBlank()).distinct().toList();
         if (qs.size() <= 1) {
-            return qs.isEmpty() ? List.of() : search(qs.get(0));
+            return qs.isEmpty() ? List.of() : search(qs.get(0), diag);
         }
         try {
             List<CompletableFuture<List<Hit>>> futures = qs.stream()
-                    .map(q -> CompletableFuture.supplyAsync(() -> search(q), multiSearchPool))
+                    .map(q -> CompletableFuture.supplyAsync(() -> search(q, diag), multiSearchPool))
                     .toList();
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
                     .get(configService.getInt("retrieval.searchTimeoutMs", 8000), TimeUnit.MILLISECONDS);
@@ -176,8 +215,10 @@ public class HybridRetrievalService {
             result.sort((a, b) -> Double.compare(b.score(), a.score()));
             return result;
         } catch (Exception e) {
-            log.warn("多路检索失败，降级首路: {}", e.getMessage());
-            return search(qs.get(0));
+            // L1 fail-loud：多路检索超时/失败，降级首路（不再静默）
+            if (diag != null) diag.multiTimeout();
+            log.warn("[FAIL-LOUD] 多路检索超时/失败，降级首路: {}", e.getMessage());
+            return search(qs.get(0), diag);
         }
     }
 
@@ -185,6 +226,11 @@ public class HybridRetrievalService {
      * 向量召回（独立方法，供检索调试复用）
      */
     public List<Document> vectorSearch(String query) {
+        return vectorSearch(query, null);
+    }
+
+    /** 带诊断的向量召回（fail-loud：失败写入 diag） */
+    public List<Document> vectorSearch(String query, RetrievalDiag diag) {
         try {
             SearchRequest req = SearchRequest.builder()
                     .query(query)
@@ -194,7 +240,9 @@ public class HybridRetrievalService {
                     .build();
             return vectorStore.similaritySearch(req);
         } catch (Exception e) {
-            log.warn("向量检索失败: {}", e.getMessage());
+            // M4 fail-loud：向量路失败不再静默空
+            if (diag != null) diag.vectorFailed(e.getMessage());
+            log.warn("[FAIL-LOUD] 向量检索失败: {}", e.getMessage());
             return List.of();
         }
     }
@@ -205,6 +253,11 @@ public class HybridRetrievalService {
      * 两条实现返回同一契约：List&lt;AiKnowledge&gt; 且已填充 kwScore/titleHit/hitTerms/totalTerms。
      */
     public List<AiKnowledge> keywordSearch(String query) {
+        return keywordSearch(query, null);
+    }
+
+    /** 带诊断的关键词检索（fail-loud：Meili 不可用/降级 MySQL/繁忙跳过写入 diag） */
+    public List<AiKnowledge> keywordSearch(String query, RetrievalDiag diag) {
         List<String> terms = keywordExtractor.extract(query);
         if (terms.isEmpty()) return List.of();
         // LIMIT 必须在调用线程求值：supplyAsync 内跑在 commonPool 线程，ThreadLocal 参数覆盖（评估扫参）传不进去
@@ -213,9 +266,15 @@ public class HybridRetrievalService {
             List<AiKnowledge> hits = keywordSearchMeili(query, terms, limit);
             if (!hits.isEmpty()) return hits;
             // 索引空/未重建时不静默返回空，回退 MySQL 保证召回（首次切换引擎未 reindex 的常见场景）
+            // L2：仅调试展示，不扰用户
+            if (diag != null) diag.keywordFallback();
             log.debug("[Keyword] Meilisearch 无命中，回退 MySQL 关键词召回");
+        } else {
+            // M13 fail-loud：Meili 不可用（探测失败/401/冷却期）→ 降级 MySQL 要标记
+            if (diag != null) diag.keywordFailed();
+            log.warn("[FAIL-LOUD] Meilisearch 不可用，关键词降级 MySQL LIKE（{}）", keywordIndexService.debugUnavailableReason());
         }
-        return keywordSearchMysql(terms, limit);
+        return keywordSearchMysql(terms, limit, diag);
     }
 
     /**
@@ -272,6 +331,11 @@ public class HybridRetrievalService {
      * 注意：LIKE 无法走索引，知识块量大时依赖 keywordTimeoutMs 超时兜底。
      */
     private List<AiKnowledge> keywordSearchMysql(List<String> terms, int limit) {
+        return keywordSearchMysql(terms, limit, null);
+    }
+
+    /** 带诊断的 MySQL 关键词召回（fail-loud：繁忙/超时跳过整路写入 diag） */
+    private List<AiKnowledge> keywordSearchMysql(List<String> terms, int limit, RetrievalDiag diag) {
         Future<List<AiKnowledge>> future;
         try {
             future = keywordFallbackPool.submit(() -> {
@@ -292,8 +356,9 @@ public class HybridRetrievalService {
                 return scoreKeywordHits(hits, terms);
             });
         } catch (RejectedExecutionException e) {
-            // 队列已满（LIKE 查询积压）或已停机：跳过关键词路，向量路结果照常返回
-            log.warn("关键词降级检索繁忙，本次跳过关键词召回");
+            // 队列已满（LIKE 查询积压）或已停机：跳过关键词路，向量路结果照常返回（fail-loud 标记）
+            if (diag != null) diag.keywordBusy();
+            log.warn("[FAIL-LOUD] 关键词降级检索繁忙，本次跳过关键词召回");
             return List.of();
         }
         try {
@@ -301,7 +366,9 @@ public class HybridRetrievalService {
         } catch (Exception e) {
             // 取消：未开始的任务直接出队，避免超时后仍堆积无人取用的慢 LIKE 查询
             future.cancel(true);
-            log.warn("关键词检索失败/超时: {}", e.getMessage());
+            // M4 fail-loud：关键词路失败/超时不再静默空
+            if (diag != null) diag.keywordBusy();
+            log.warn("[FAIL-LOUD] 关键词检索失败/超时: {}", e.getMessage());
             return List.of();
         }
     }
@@ -437,8 +504,20 @@ public class HybridRetrievalService {
                             .eq("deleted", 0));
             return blocked.stream().map(d -> String.valueOf(d.getId())).collect(Collectors.toSet());
         } catch (Exception e) {
-            log.warn("查询非生效文档失败: {}", e.getMessage());
-            return Set.of();
+            // fail-loud：DB 过滤查询失败不能静默放行（弃用/解析中/失败文档的向量会进上下文）
+            log.error("[FAIL-LOUD] 查询非生效文档失败，回退内存全量过滤: {}", e.getMessage());
+            try {
+                // 降级方案：查全部候选 docId（id,status），内存过滤非生效（status!=0）
+                List<AiDocument> all = documentMapper.selectList(
+                        new QueryWrapper<AiDocument>().select("id", "status").in("id", docIds));
+                return all.stream().filter(d -> d.getStatus() != null && d.getStatus() != 0)
+                        .map(d -> String.valueOf(d.getId()))
+                        .collect(Collectors.toSet());
+            } catch (Exception ex) {
+                // 双重失败：放行但 error 级告警（不再静默；diag 透传见 M4）
+                log.error("[FAIL-LOUD] 内存过滤也失败，非生效文档可能进入上下文: {}", ex.getMessage());
+                return Set.of();
+            }
         }
     }
 

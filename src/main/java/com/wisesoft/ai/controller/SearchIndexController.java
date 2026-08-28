@@ -40,6 +40,7 @@ public class SearchIndexController {
         m.put("available", keywordIndexService.isAvailable());
         m.put("unavailableReason", keywordIndexService.debugUnavailableReason());
         m.put("indexedCount", keywordIndexService.indexedCount());
+        m.put("writeFailCount", keywordIndexService.writeFailCount()); // M12 fail-loud：写失败累计（>0 说明有过写故障）
         long mysqlCount;
         try {
             mysqlCount = knowledgeMapper.selectCount(new LambdaQueryWrapper<>());

@@ -63,12 +63,22 @@ public class ThreadPoolManager {
         pool.allowCoreThreadTimeOut(true);
     }
 
-    public static void execute(Runnable runnable) {
+    /**
+     * 提交 fire-and-forget 任务。
+     * L10 fail-loud：返回 boolean——队列满/已关闭返回 false，调用方（如补描述）可感知并落状态，不再无感知丢弃。
+     * 说明：返回 true 仅表示"本次提交成功"；极端并发下仍可能被 REJECT_HANDLER 兜底拒绝（有 error 日志）。
+     */
+    public static boolean execute(Runnable runnable) {
         if (isShutdown.get()) {
             log.error("线程池已关闭，无法提交任务");
-            return;
+            return false;
+        }
+        if (pool.getQueue().remainingCapacity() <= 0) {
+            log.error("[ThreadPool] 队列已满，任务被丢弃: {}，{}", runnable.getClass().getName(), getPoolStatus());
+            return false;
         }
         pool.execute(runnable);
+        return true;
     }
 
     // 提交Callable获取结果（更合理的返回值设计）

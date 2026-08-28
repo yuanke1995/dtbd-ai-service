@@ -32,15 +32,18 @@
     >
       <template #bodyCell="{ column, record, text }">
         <template v-if="column.key === 'status'">
-          <a-tag v-if="text === 0" color="green">生效</a-tag>
-          <a-tag v-else-if="text === 1" color="orange">已弃用</a-tag>
+          <!-- fail-loud：生效/弃用/失败状态也悬浮展示 parseDesc（含截断/跳图统计），不再只在解析中可见 -->
+          <a-tooltip v-if="text === 0 || text === 1 || text === 3" :title="record.parseDesc || ''" placement="top">
+            <a-tag v-if="text === 0" color="green">生效</a-tag>
+            <a-tag v-else-if="text === 1" color="orange">已弃用</a-tag>
+            <a-tag v-else color="red" style="cursor:pointer"
+                   @click="showFailReason(record)">解析失败</a-tag>
+          </a-tooltip>
           <div v-else-if="text === 2" style="display:flex;flex-direction:column;gap:2px">
             <a-progress :percent="record.parseProgress || 0" size="small" style="width:110px;margin:0" />
             <span style="font-size:12px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px"
                   :title="record.parseDesc || '解析中'">{{ record.parseDesc || '解析中' }}</span>
           </div>
-          <a-tag v-else color="red" style="cursor:pointer"
-                 @click="showFailReason(record)">解析失败</a-tag>
         </template>
         <template v-else-if="column.key === 'hitCount'">{{ text || 0 }}</template>
         <template v-else-if="column.key === 'fileSize'">{{ fmtSize(text) }}</template>
@@ -69,7 +72,13 @@
                  :custom-row="r => ({ onClick: () => openKbDetail(r) })"
                  style="cursor:pointer">
           <a-table-column title="#" dataIndex="chunkIndex" key="chunkIndex" width="50" />
-          <a-table-column title="标题" dataIndex="title" key="title" ellipsis />
+          <a-table-column title="标题" key="title" ellipsis>
+            <!-- M11 fail-loud：vectorId 为空 = 未向量化（仅关键词可召回），角标提示 -->
+            <template #default="{ record }">
+              <span>{{ record.title }}</span>
+              <a-tag v-if="!record.vectorId" color="orange" style="margin-left:6px;font-size:11px">未向量化</a-tag>
+            </template>
+          </a-table-column>
           <a-table-column title="内容摘要" key="snippet">
             <template #default="{ record }">{{ (record.content || '').replace(/\s+/g, ' ').slice(0, 80) }}</template>
           </a-table-column>

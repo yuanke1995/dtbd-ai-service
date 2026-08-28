@@ -50,7 +50,8 @@ public class QaLogService {
                 log.setElapsedMs((int) Math.min(elapsedMs, Integer.MAX_VALUE));
                 qaLogMapper.insert(log);
             } catch (Exception e) {
-                log.warn("问答日志写入失败: {}", e.getMessage());
+                // L6 fail-loud：问答日志是反馈看板/知识缺口的数据源，丢失升级为 error（含 sessionId 便于排查）
+                log.error("[FAIL-LOUD] 问答日志写入失败 session={}: {}", sessionId, e.getMessage());
             }
         });
     }

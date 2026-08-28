@@ -62,6 +62,13 @@
                 </div>
                 <div class="md" :data-msg-index="i" v-html="renderMd(m.content, m.images)"></div>
                 <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
+                <!-- fail-loud：本轮回答的降级事件警示（检索失败/改写失败/重排不可用/上下文截断等） -->
+                <div v-if="m.role === 'ai' && m.degradations && m.degradations.length" class="degradation-bar">
+                  <exclamation-circle-outlined style="margin-right:6px" />
+                  <span v-for="(d, di) in m.degradations" :key="di" class="degradation-item">{{ d.msg }}</span>
+                </div>
+                <!-- SSE warn 事件（如回答超时截断） -->
+                <div v-if="m.role === 'ai' && m.warnMsg" class="degradation-bar">{{ m.warnMsg }}</div>
                 <!-- 引用来源（回答中 [N] 角标点击查看原文片段） -->
                 <div v-if="m.role === 'ai' && m.sources && m.sources.length" class="src-chips">
                   <a-tag
@@ -475,9 +482,11 @@ const close = () => {
   dragState.value = null
 }
 
-// 灯箱：滚轮缩放（25% ~ 800%）
+// 灯箱：滚轮缩放（25% ~ 800%，等比步进 ±15%：放大缩小手感对称，
+// 避免绝对步进（±0.15）在小倍率下占比过大导致"缩小飞快、放大很慢"）
 const onWheel = e => {
-  zoom.value = Math.min(8, Math.max(0.25, zoom.value + (e.deltaY < 0 ? 0.15 : -0.15)))
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
+  zoom.value = Math.min(8, Math.max(0.25, zoom.value * factor))
 }
 
 // 灯箱：拖动平移（放大后查看超出窗口的边缘）
@@ -761,11 +770,13 @@ const send = () => {
 const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1, deepThink = false) => {
   const idx = replaceIdx ?? messages.value.length
   if (replaceIdx == null) {
-    messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], loading: true, thinking: '', thinkOpen: true, thinkLoading: false })
+    messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, thinking: '', thinkOpen: true, thinkLoading: false })
   } else {
-    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], loading: true, messageId: null, fb: null, thinking: '', thinkOpen: true, thinkLoading: false }
+    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, messageId: null, fb: null, thinking: '', thinkOpen: true, thinkLoading: false }
   }
   loading.value = true
+  // 发送后立即滚到底部：不等第一个 token（深度思考/图片处理时 AI 迟迟不出字，视角也要先到最下看到 loading 气泡）
+  scroll()
   abortController.value = new AbortController()
   let full = ''
   let gotToken = false
@@ -801,13 +812,14 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1,
       }
     },
     onDone: contentJson => {
-      // done 事件 content 为 {sources, related, messageId, thinking} JSON 字符串
-      let sources = [], related = [], messageId = null
+      // done 事件 content 为 {sources, related, messageId, thinking, degradations} JSON 字符串
+      let sources = [], related = [], messageId = null, degradations = []
       try {
         const p = JSON.parse(contentJson || '{}')
         sources = Array.isArray(p.sources) ? p.sources : []
         related = Array.isArray(p.related) ? p.related : []
         messageId = p.messageId || null
+        degradations = Array.isArray(p.degradations) ? p.degradations : []
         if (p.thinking) messages.value[idx].thinking = p.thinking
         messages.value[idx].thinkLoading = false
         // 后端图片相关性校验后下发的修正内容/图片（覆盖流式中间态，保证 [图片N] 编号与图一致）
@@ -823,11 +835,17 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1,
       messages.value[idx].sources = sources
       messages.value[idx].related = related
       messages.value[idx].messageId = messageId
+      messages.value[idx].degradations = degradations
       loading.value = false
       abortController.value = null
       scroll()
       // 首条消息后刷新会话列表（标题已由后端生成）
       if (isFirstMessage) loadSessions()
+    },
+    onWarn: w => {
+      // fail-loud：SSE warn 事件（如回答超时截断）在回答气泡下提示
+      messages.value[idx].warnMsg = w
+      scroll()
     },
     onError: e => {
       // 用户主动停止不走到这里（AbortError 在 api.js 按正常结束处理）
@@ -1239,6 +1257,13 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 /* 相关推荐 */
 .related { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .related-label { font-size: 12px; color: #888; margin-right: 4px; }
+/* fail-loud 警示条：回答降级事件（检索失败/改写失败/截断等） */
+.degradation-bar {
+  margin-top: 8px; padding: 6px 10px; border-radius: 4px;
+  background: #fffbe6; border: 1px solid #ffe58f; color: #ad6800;
+  font-size: 12px; line-height: 1.6; display: flex; flex-wrap: wrap; gap: 4px 12px;
+}
+.degradation-item { display: inline-block; }
 /* 回答反馈（默认隐藏，hover 消息块时悬浮显示；保留整行可 hover 避免移过去按钮消失） */
 .fb-row {
   margin-top: 10px;

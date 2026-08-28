@@ -77,7 +77,7 @@ function upload(path, formData, onProgress) {
  * signal 用于停止生成（AbortController.abort()）
  * deepThink=true 时后端先流式输出思考过程（thinking / thinking_done 事件）
  */
-export function sendQuestion(sessionId, question, images = [], { onToken, onImage, onDone, onError, onThinking, onThinkingDone, deepThink = false, signal }) {
+export function sendQuestion(sessionId, question, images = [], { onToken, onImage, onDone, onError, onThinking, onThinkingDone, onWarn, deepThink = false, signal }) {
   fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: authHeaders(),
@@ -107,7 +107,8 @@ export function sendQuestion(sessionId, question, images = [], { onToken, onImag
               else if (d.type === 'thinking') { onThinking && onThinking(d.content) }
               else if (d.type === 'thinking_done') { onThinkingDone && onThinkingDone(d.content) }
               else if (d.type === 'image') { console.log('[SSE] 收到 image 事件:', d.content); onImage(d.content) }
-              else if (d.type === 'done') { onDone(d.content); return } // content 为 {sources,related} JSON 字符串
+              else if (d.type === 'warn') { console.warn('[SSE] 收到 warn 事件:', d.content); onWarn && onWarn(d.content) }
+              else if (d.type === 'done') { onDone(d.content); return } // content 为 {sources,related,degradations} JSON 字符串
               else if (d.type === 'error') { onError(d.content); return }
               else { console.log('[SSE] 未知事件类型:', d.type, d) }
             } catch (e) { console.warn('[SSE] JSON 解析失败:', line, e) }

@@ -224,9 +224,10 @@ public class DocumentService {
         try {
             parseExecutor.submit(() -> processUpload(doc.getId(), fileName, source, fp));
         } catch (RejectedExecutionException e) {
-            // 队列满（≥50 待解析任务）：拒绝新任务，清理本次记录避免脏数据
+            // L9 fail-loud：队列满（≥50 待解析任务）：拒绝新任务并告知当前队列数，清理本次记录避免脏数据
+            int queued = parseExecutor == null ? 0 : parseExecutor.getQueue().size();
             documentMapper.deleteById(doc.getId());
-            throw new BizException("解析队列繁忙（已有 50 个待解析任务），请稍后再试");
+            throw new BizException("解析队列繁忙（当前排队 " + queued + " 个任务），请稍后再试");
         }
         return doc;
     }
@@ -288,6 +289,26 @@ public class DocumentService {
     /**
      * 解析进度上报（节流：progress 未变化且非终态时不写库；只更新进度两字段，避免整行 update）
      */
+    /**
+     * 向量化单批写入（M10 fail-loud）：失败自动重试 retryCount 次，仍失败抛异常 → 文档整体失败/回退，
+     * 绝不静默丢块（否则文档置成功但部分块仅关键词可召回）。
+     */
+    private void vectorAddWithRetry(String docId, List<Document> batch, int retryCount) {
+        Exception lastErr = null;
+        for (int attempt = 0; attempt <= retryCount; attempt++) {
+            try {
+                vectorStore.add(batch);
+                return;
+            } catch (Exception e) {
+                lastErr = e;
+                if (attempt < retryCount) {
+                    log.warn("[FAIL-LOUD] [{}] 向量化批次失败（第 {} 次重试）: {}", docId, attempt + 1, e.getMessage());
+                }
+            }
+        }
+        throw new RuntimeException("向量化批次失败: " + (lastErr == null ? "unknown" : lastErr.getMessage()), lastErr);
+    }
+
     private void updateProgress(String docId, int progress, String desc) {
         boolean terminal = "解析完成".equals(desc) || "解析失败".equals(desc);
         Integer last = progressGuard.get(docId);
@@ -323,8 +344,11 @@ public class DocumentService {
             int overlap = configService.getInt("chunk.overlap", properties.getChunk().getOverlap());
             // 截断保护：超大文档只保留前 maxChunks 块（防止 embedding 调用数万次/解析失控）
             int maxChunks = configService.getInt("chunk.maxChunks");
+            int truncatedChunks = 0;
             if (maxChunks > 0 && chunks.size() > maxChunks) {
-                log.warn("[{}] 文档过大，解析出 {} 块，按配置截断保留前 {} 块", docId, chunks.size(), maxChunks);
+                // fail-loud：截断不再静默——计数入终态 desc（"截断保留前N/共M块"）
+                truncatedChunks = chunks.size() - maxChunks;
+                log.warn("[{}] 文档过大，解析出 {} 块，按配置截断保留前 {} 块（丢弃 {} 块）", docId, chunks.size(), maxChunks, truncatedChunks);
                 chunks = new ArrayList<>(chunks.subList(0, maxChunks));
             }
             if (chunks.isEmpty()) {
@@ -421,9 +445,10 @@ public class DocumentService {
             // 删除感知：入库后、向量化前再查一次
             if (!isDocAlive(docId)) { cleanupPartial(docId, aiDocs); return; }
 
-            // 写入向量库（embedding 接口单次请求上限 10 条，需分批）
+            // 写入向量库（embedding 接口单次请求上限 10 条，需分批；M10：每批失败自动重试 embedRetry 次）
             if (!aiDocs.isEmpty()) {
                 int batchSize = 10;
+                int embedRetry = Math.max(0, configService.getInt("parse.embedRetryCount", 1));
                 int totalBatch = (aiDocs.size() + batchSize - 1) / batchSize;
                 int batchNo = 0;
                 for (int i = 0; i < aiDocs.size(); i += batchSize) {
@@ -433,7 +458,7 @@ public class DocumentService {
                         return;
                     }
                     int end = Math.min(i + batchSize, aiDocs.size());
-                    vectorStore.add(aiDocs.subList(i, end));
+                    vectorAddWithRetry(docId, aiDocs.subList(i, end), embedRetry);
                     batchNo++;
                     // 向量化进度：50 → 95（每批精确上报）
                     updateProgress(docId, 50 + Math.min(45, batchNo * 45 / totalBatch), "向量化 " + end + "/" + aiDocs.size());
@@ -474,9 +499,14 @@ public class DocumentService {
             }
 
             // 孤儿图片清扫：删除未被任何剩余知识块引用的图片文件（被删图/变更图的旧文件；未变图保留供复用块引用）
-            sweepOrphanImages(docId);
+            boolean swept = sweepOrphanImages(docId);
 
-            updateProgress(docId, 100, "解析完成(保留 " + reused + " 新增 " + added + " 清理 " + staleOld.size() + ")");
+            // fail-loud：截断/跳过统计聚合进终态 desc（chunk.maxChunks 截断 + DocxParser 图片统计），前端状态列可见
+            String doneDesc = "解析完成(保留 " + reused + " 新增 " + added + " 清理 " + staleOld.size() + ")";
+            String statsDesc = parseStatsDesc(docId, truncatedChunks, parser);
+            if (!statsDesc.isEmpty()) doneDesc += "；" + statsDesc;
+            if (!swept) doneDesc += "；孤儿清扫失败";
+            updateProgress(docId, 100, doneDesc);
 
             doc.setChunkCount(chunks.size());
             doc.setStatus(0);
@@ -1138,7 +1168,8 @@ public class DocumentService {
                 }
             });
         } catch (IOException e) {
-            log.warn("清理源文件目录失败: {}", e.getMessage());
+            // L11 fail-loud：清理失败升级 error（遗留磁盘文件属数据一致性风险）
+            log.error("[FAIL-LOUD] 清理源文件目录失败: {}", e.getMessage());
         }
     }
 
@@ -1153,17 +1184,19 @@ public class DocumentService {
                 }
             });
         } catch (IOException e) {
-            log.warn("清理图片目录失败: {}", e.getMessage());
+            log.error("[FAIL-LOUD] 清理图片目录失败: {}", e.getMessage());
         }
     }
 
     /**
      * 孤儿图片清扫：删除 data/images/{docId}/ 下未被任何剩余知识块 images 字段引用的文件
      * （内容寻址文件名下，被删图/变更图的旧文件在这里回收；未变图片保留供复用块引用，保证 URL 稳定）
+     *
+     * @return true=正常完成（含无孤儿）；false=清扫失败（L11 fail-loud：调用方把失败写进终态 desc）
      */
-    private void sweepOrphanImages(String docId) {
+    private boolean sweepOrphanImages(String docId) {
         Path dir = Paths.get(properties.getImages().getDir(), "images", docId);
-        if (!Files.exists(dir)) return;
+        if (!Files.exists(dir)) return true;
         try {
             List<AiKnowledge> blocks = knowledgeMapper.selectList(
                     new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
@@ -1188,8 +1221,10 @@ public class DocumentService {
                             }
                         });
             }
+            return true;
         } catch (IOException e) {
-            log.warn("[{}] 孤儿图片清扫失败: {}", docId, e.getMessage());
+            log.error("[FAIL-LOUD] [{}] 孤儿图片清扫失败: {}", docId, e.getMessage());
+            return false;
         }
     }
 
@@ -1250,6 +1285,26 @@ public class DocumentService {
     private static final Pattern IMG_PH = Pattern.compile("\\[图片(?:：[^\\]]*)?]");
 
     /**
+     * 解析统计 → 终态 desc 片段（fail-loud：chunk 截断 + docx 图片截断/类型跳过/落盘失败；全 0 返回空串）。
+     * 顺带清理 DocxParser 的 docId 级统计（防泄漏）。
+     */
+    private String parseStatsDesc(String docId, int truncatedChunks, DocumentParser parser) {
+        List<String> parts = new ArrayList<>();
+        if (truncatedChunks > 0) parts.add("块截断" + truncatedChunks + "块");
+        if (parser instanceof DocxParser dp) {
+            try {
+                Map<String, Integer> ps = dp.statsOf(docId);
+                if (ps.getOrDefault("truncated", 0) > 0) parts.add("图片截断" + ps.get("truncated") + "张");
+                if (ps.getOrDefault("typeSkipped", 0) > 0) parts.add("跳过不支持的图片" + ps.get("typeSkipped") + "张");
+                if (ps.getOrDefault("persistFailed", 0) > 0) parts.add("图片落盘失败" + ps.get("persistFailed") + "张");
+            } finally {
+                dp.clearStats(docId);
+            }
+        }
+        return String.join("，", parts);
+    }
+
+    /**
      * 补齐文档中"无描述"图片（解析时视觉调用失败/超限留下的裸 [图片] 占位）：
      * 后台逐图调视觉模型补描述，成功则回写知识块（[图片]→[图片：描述]）并重新向量化 + 关键词索引同步，
      * 保证图片语义最终全部进入 RAG。仍失败的图保留裸占位（下次触发/重解析再补），全程不阻断主流程。
@@ -1257,7 +1312,7 @@ public class DocumentService {
     public void backfillImageDescriptions(String docId) {
         if (docId == null || docId.isBlank()) return;
         if (descBackfillRunning.putIfAbsent(docId, Boolean.TRUE) != null) return; // 防重入
-        ThreadPoolManager.execute(() -> {
+        boolean submitted = ThreadPoolManager.execute(() -> {
             try {
                 List<AiKnowledge> blocks = knowledgeMapper.selectList(
                         new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId)
@@ -1290,12 +1345,35 @@ public class DocumentService {
                     }
                 }
                 log.info("[{}] 图片描述补齐完成：补 {}/{} 张，回写 {} 块", docId, descByUrl.size(), missing.size(), written);
+                // M8 fail-loud：补完仍缺的图必须留在解析状态可见（不能只记一条日志）
+                int remaining = countRemainingMissing(blocks, descByUrl);
+                if (remaining > 0) {
+                    log.warn("[FAIL-LOUD] [{}] 图片描述补齐后仍有 {} 张无描述（视觉模型不可用？可稍后重试补描述接口）", docId, remaining);
+                    try {
+                        AiDocument d = documentMapper.selectById(docId);
+                        String base = d == null || d.getParseDesc() == null ? "" : d.getParseDesc();
+                        updateProgress(docId, 100,
+                                (base.isEmpty() ? "" : base + "；") + "补描述后仍有 " + remaining + " 张图无描述");
+                    } catch (Exception ignored) {
+                    }
+                }
             } catch (Exception e) {
                 log.warn("[{}] 图片描述补齐任务异常: {}", docId, e.getMessage());
             } finally {
                 descBackfillRunning.remove(docId);
             }
         });
+        if (!submitted) {
+            // L10 fail-loud：任务被共享池丢弃（队列满）——必须落状态，不留无感知缺口
+            descBackfillRunning.remove(docId);
+            log.error("[FAIL-LOUD] [{}] 图片描述补齐任务被丢弃（后台队列满），请稍后重试", docId);
+            try {
+                AiDocument d = documentMapper.selectById(docId);
+                String base = d == null || d.getParseDesc() == null ? "" : d.getParseDesc();
+                updateProgress(docId, 100, (base.isEmpty() ? "" : base + "；") + "补描述未执行（后台队列满，可稍后重试）");
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     /** 收集块内"无描述图"URL：content 中裸 [图片]（后无冒号）按序对应 images 列表 */
@@ -1308,6 +1386,20 @@ public class DocumentService {
             idx++;
             if ("[图片]".equals(m.group()) && url != null && !url.isBlank()) missing.add(url);
         }
+    }
+
+    /** 补描述后仍无描述（本次未补上）的图片数（M8 fail-loud 统计用） */
+    private int countRemainingMissing(List<AiKnowledge> blocks, Map<String, String> descByUrl) {
+        Set<String> missing = new LinkedHashSet<>();
+        for (AiKnowledge k : blocks) {
+            collectMissingImages(k.getContent(), parseImages(k.getImages()), missing);
+        }
+        int remain = 0;
+        for (String url : missing) {
+            String desc = descByUrl.get(url);
+            if (desc == null || desc.isBlank()) remain++;
+        }
+        return remain;
     }
 
     /** 替换块内已补到描述的裸占位（[图片]→[图片：描述]）；无命中返回原 content */

@@ -56,7 +56,13 @@ public class VisionService {
      * 未命中调 VLM，成功写缓存。失败自动重试 retryCount 次（Ollama 偶发 500/超时）
      */
     public String describe(byte[] imageBytes, String ext, String prompt) {
-        if (!properties.getVision().isEnabled() || imageBytes == null || imageBytes.length == 0) {
+        // L12 fail-loud：vision.enabled 配置化（设置页可改，保存即生效；未配置时回退 yml/环境变量值）
+        String cfgEnabled = configService.get("vision.enabled");
+        boolean enabled = cfgEnabled == null ? properties.getVision().isEnabled() : Boolean.parseBoolean(cfgEnabled.trim());
+        if (!enabled || imageBytes == null || imageBytes.length == 0) {
+            if (!enabled && imageBytes != null && imageBytes.length > 0) {
+                log.debug("视觉模型已关闭（vision.enabled=false），跳过图片描述");
+            }
             return "";
         }
         String model = configService.get("vision.model");

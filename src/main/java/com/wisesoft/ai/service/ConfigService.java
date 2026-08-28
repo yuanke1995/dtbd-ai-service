@@ -37,6 +37,10 @@ public class ConfigService {
             Map.entry("chat.temperature", "回答温度(0~2)"),
             Map.entry("chat.systemPrompt", "AI助手系统提示词（角色与回答风格）"),
             Map.entry("chat.pipelineThreads", "问答流水线线程数(保存即生效)"),
+            Map.entry("chat.streamRetryCount", "主 LLM 流式中断自动重试次数(未输出token时,0=关闭)"),
+            Map.entry("chat.sseTimeoutMs", "问答 SSE 超时(毫秒,默认300000)"),
+            Map.entry("chat.showDebugDegradations", "回答提示显示调试级降级信息（默认关：只显示用户级）"),
+            Map.entry("vision.enabled", "视觉模型总开关（false 时图片不生成描述）"),
             Map.entry("vision.model", "视觉识别模型名"),
             Map.entry("vision.prompt", "视觉识别提示词"),
             Map.entry("vision.concurrency", "图片描述并发数（保存即生效）"),
@@ -47,10 +51,12 @@ public class ConfigService {
             Map.entry("chunk.overlap", "分块重叠字符数(0=关闭)"),
             Map.entry("chunk.structural", "结构感知切分(标题/段落边界+章节路径注入,需重解析)"),
             Map.entry("chunk.structuralRatio", "结构切分边界阈值比例(0~1,达到maxSize×比例优先段落断块)"),
+            Map.entry("parse.embedRetryCount", "向量化批次失败自动重试次数(0=不重试)"),
             Map.entry("upload.maxFileSize", "文档上传大小上限(字节,保存即生效)"),
             Map.entry("retrieval.vectorWeight", "混合检索：向量权重(0~1)"),
             Map.entry("retrieval.keywordWeight", "混合检索：关键词权重(0~1)"),
             Map.entry("retrieval.titleBonus", "混合检索：标题命中奖励(0~1)"),
+            Map.entry("retrieval.rewriteTimeoutMs", "查询改写超时(毫秒,默认5000；本地模型慢可调大)"),
             Map.entry("context.modelWindows", "上下文：模型窗口映射（模型名=token,逗号分隔）"),
             Map.entry("context.defaultWindowTokens", "上下文：模型默认窗口(token)"),
             Map.entry("context.safetyFactor", "上下文：窗口安全系数(0~1)"),
@@ -199,6 +205,7 @@ public class ConfigService {
         d.put("vision.prompt", properties.getVision().getPrompt());
         d.put("vision.baseUrl", properties.getVision().getBaseUrl());
         d.put("vision.apiKey", properties.getVision().getApiKey());
+        d.put("vision.enabled", String.valueOf(properties.getVision().isEnabled())); // L12：总开关（设置页可改）
         d.put("vision.concurrency", String.valueOf(properties.getVision().getConcurrency()));
         d.put("vision.descCacheVersion", "1");                 // 图片描述缓存版本（bump 后全量重新描述）
         d.put("vision.descCacheTtlDays", "180");               // 图片描述缓存有效期(天，0=不过期)
@@ -208,10 +215,12 @@ public class ConfigService {
         d.put("chunk.overlap", String.valueOf(properties.getChunk().getOverlap()));
         d.put("chunk.structural", String.valueOf(properties.getChunk().isStructural()));
         d.put("chunk.structuralRatio", String.valueOf(properties.getChunk().getStructuralRatio()));
+        d.put("parse.embedRetryCount", "1");                 // M10：向量化批次失败自动重试次数
         d.put("upload.maxFileSize", String.valueOf(200L * 1024 * 1024));  // 业务上传上限（字节），默认 200MB
         d.put("retrieval.vectorWeight", String.valueOf(properties.getRetrieval().getVectorWeight()));
         d.put("retrieval.keywordWeight", String.valueOf(properties.getRetrieval().getKeywordWeight()));
         d.put("retrieval.titleBonus", String.valueOf(properties.getRetrieval().getTitleBonus()));
+        d.put("retrieval.rewriteTimeoutMs", String.valueOf(properties.getQueryRewrite().getTimeoutMillis())); // 查询改写超时(ms)
         d.put("rerank.enabled", String.valueOf(properties.getRetrieval().getRerank().isEnabled()));
         d.put("rerank.baseUrl", properties.getRetrieval().getRerank().getBaseUrl());
         d.put("rerank.model", properties.getRetrieval().getRerank().getModel());
@@ -267,6 +276,9 @@ public class ConfigService {
         d.put("chat.truncateFallbackChars", "200");        // 超预算截断兜底字符数
         d.put("chat.historyRounds", "5");                  // 多轮记忆注入轮数
         d.put("chat.pipelineThreads", "8");                // 问答流水线线程数（重活不占 Tomcat 请求线程）
+        d.put("chat.streamRetryCount", "1");               // H2：主 LLM 流式中断（未输出token）自动重试次数
+        d.put("chat.sseTimeoutMs", "300000");              // H4：问答 SSE 超时(ms)
+        d.put("chat.showDebugDegradations", "false");      // 回答提示：调试级降级信息开关（默认只显示用户级）
         return d;
     }
 
@@ -499,6 +511,14 @@ public class ConfigService {
                 configMapper.updateById(c);
             }
         }
+        // 引擎切换检测：仅当 keyword.engine 值真正变化（如 mysql→meilisearch）才全量重建。
+        // 必须在刷新缓存前取旧值——前端保存总是提交当前 engine 值，若无条件重建，
+        // 每次"改任意配置保存"都会误触发全量灌库（资源浪费 + 日志误导）
+        boolean engineSwitchedToMeili = false;
+        if (updates.containsKey("keyword.engine") && "meilisearch".equalsIgnoreCase(updates.get("keyword.engine"))) {
+            String oldEngine = get("keyword.engine"); // 刷新前 cache 仍是旧值
+            engineSwitchedToMeili = oldEngine == null || !"meilisearch".equalsIgnoreCase(oldEngine);
+        }
         // 刷新缓存
         Map<String, String> newCache = new HashMap<>(cache);
         newCache.putAll(updates);
@@ -506,9 +526,8 @@ public class ConfigService {
         log.info("模型配置已更新: {}", updates.keySet());
         // 广播其他实例刷新（多副本部署配置同步）
         publishConfigChanged();
-        // 自动全量重建：本次保存把引擎设为 meilisearch → 无条件全量灌入（以 MySQL 为准覆盖，
-        // 索引是否已有数据不影响——旧数据可能漂移/残留；reindexAll 内部有防重入与可用性检查）
-        if (updates.containsKey("keyword.engine") && "meilisearch".equalsIgnoreCase(updates.get("keyword.engine"))) {
+        // 自动全量重建（仅真实切换 mysql→meilisearch 时；reindexAll 内部有防重入与可用性检查）
+        if (engineSwitchedToMeili) {
             try {
                 keywordIndexService.reindexAll();
                 log.info("[Config] 关键词引擎已切换至 Meilisearch，自动触发索引全量重建");

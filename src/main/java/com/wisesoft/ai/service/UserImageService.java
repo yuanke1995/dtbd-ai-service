@@ -81,7 +81,8 @@ public class UserImageService {
             String desc = visionService.describe(bytes, ext);
             return new UserImage(url, desc);
         } catch (Exception e) {
-            log.warn("用户图片处理失败: {}", e.getMessage());
+            // L3 fail-loud：用户上传图片处理失败（描述生成失败会在回答 prompt 显示"无法识别"，此处升级明确告警）
+            log.warn("[FAIL-LOUD] 用户图片处理失败: {}", e.getMessage());
             return null;
         }
     }

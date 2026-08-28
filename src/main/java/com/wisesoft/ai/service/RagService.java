@@ -22,6 +22,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -41,6 +44,40 @@ public class RagService {
     /** 重排触发区间（候选太少/太多无需重排）；rerank.minHits/maxHits 可调 */
     private int rerankMinHits() { return configService.getInt("rerank.minHits", 6); }
     private int rerankMaxHits() { return configService.getInt("rerank.maxHits", 15); }
+    /** 主 LLM 流式中断（未输出 token 时）自动重试次数（chat.streamRetryCount，默认 1；0=关闭） */
+    private int streamRetryCount() { return configService.getInt("chat.streamRetryCount", 1); }
+
+    /**
+     * user 级降级事件（默认随 done 展示给用户）：对用户有意义、看得懂、知道怎么办。
+     * 其余 code（图片剔除/未标注引用/改写失败/重排与检索降级等）为 debug 级，
+     * 仅当 chat.showDebugDegradations=true 时展示（默认只进 [FAIL-LOUD] 日志）。
+     */
+    private static final Set<String> USER_DEGRADATION_CODES = Set.of(
+            "noHit", "streamError", "deepThinkDegraded", "contextTruncated");
+
+    /** fail-loud：按 code 去重添加降级事件（user 级默认展示；debug 级由 chat.showDebugDegradations 开关控制） */
+    private void addDegradation(List<Map<String, String>> list, Set<String> codes, String code, String msg) {
+        if (!codes.add(code)) return;
+        boolean userLevel = USER_DEGRADATION_CODES.contains(code);
+        if (userLevel || configService.getBoolean("chat.showDebugDegradations")) {
+            list.add(Map.of("code", code, "msg", msg, "level", userLevel ? "user" : "debug"));
+        }
+    }
+
+    /** 重排（候选在区间内且服务可用才执行；不可用/不满足区间 → 保持融合分排序并 fail-loud 标记） */
+    private List<HybridRetrievalService.Hit> rerankIfNeeded(List<HybridRetrievalService.Hit> hits, String query,
+                                                             List<Map<String, String>> degradations, Set<String> degradedCodes) {
+        if (hits.size() > rerankMinHits() && hits.size() <= rerankMaxHits()) {
+            String reason = rerankService.debugUnavailableReason();
+            if (reason != null) {
+                addDegradation(degradations, degradedCodes, "rerankUnavailable",
+                        "重排不可用（" + reason + "），按融合分排序");
+            } else {
+                hits = rerankService.rank(hits, query);
+            }
+        }
+        return hits;
+    }
     /** 引用摘要截断长度 */
     private static final int SNIPPET_LEN = 80;
 
@@ -137,8 +174,10 @@ public class RagService {
         try {
             pipelineExecutor.execute(() -> runChat(sessionId, question, userImages, deepThink, emitter));
         } catch (RejectedExecutionException e) {
-            log.warn("[Chat] 问答流水线繁忙，拒绝请求: session={}", sessionId);
-            sendSseEvent(emitter, "error", "系统繁忙，请稍后重试", sessionId);
+            // L7 fail-loud：繁忙拒绝时告知当前队列长度（用户可感知拥堵程度）
+            int queued = pipelineExecutor == null ? 0 : pipelineExecutor.getQueue().size();
+            log.warn("[FAIL-LOUD] 问答流水线繁忙，拒绝请求（排队 {}）: session={}", queued, sessionId);
+            sendSseEvent(emitter, "error", "系统繁忙（当前排队 " + queued + " 个请求），请稍后重试", sessionId);
             completeEmitter(emitter);
         }
     }
@@ -150,6 +189,9 @@ public class RagService {
         long startTime = System.currentTimeMillis();
         // 深度思考全文（供 done 事件/持久化；lambda 中引用需 effectively final，用数组容器）
         final String[] thinkingHolder = {null};
+        // 本轮回答的全部降级/兜底事件（fail-loud：随 done 下发，前端渲染警示条；code 去重，同类只报一次）
+        List<Map<String, String>> degradations = new ArrayList<>();
+        Set<String> degradedCodes = new HashSet<>();
         try {
             // 0. 用户上传图片：并行保存+视觉描述（用于上下文与检索召回）
             List<UserImageService.UserImage> userImgs = userImageService.process(userImages);
@@ -157,11 +199,20 @@ public class RagService {
                     .map(i -> "- " + (i.desc().isBlank() ? "（图片内容无法识别）" : i.desc()))
                     .collect(Collectors.joining("\n"));
 
-            // 0. 查询改写（支持多轮历史上下文；失败静默降级为原始问题；M2：关闭时跳过历史查询）
+            // 0. 查询改写（支持多轮历史上下文；失败降级为原始问题并上报 fail-loud；M2：关闭时跳过历史查询）
             String retrievalQuery = question;
             if (properties.getQueryRewrite().isEnabled()) {
                 List<Map<String, Object>> recentHistory = sessionService.getRecentHistory(sessionId, properties.getQueryRewrite().getHistoryRounds());
-                retrievalQuery = rewriteQuery(question, recentHistory);
+                if (recentHistory == null) {
+                    // M6 fail-loud：历史读取失败 → 本次无多轮记忆
+                    addDegradation(degradations, degradedCodes, "historyFailed", "会话历史读取失败，本次无多轮记忆");
+                    recentHistory = List.of();
+                }
+                RewriteResult rr = rewriteQuery(question, recentHistory);
+                retrievalQuery = rr.query();
+                if (rr.degraded()) {
+                    addDegradation(degradations, degradedCodes, "rewriteFailed", "问题改写失败，使用原问题检索");
+                }
             }
             // 图片描述参与检索：识别界面时描述含组件名，能显著提升召回
             if (!userImgs.isEmpty()) {
@@ -176,8 +227,9 @@ public class RagService {
             final String queryForLog = retrievalQuery;
 
             // 1. 深度思考（可选）：思考流式 → 提取检索计划 → 多路检索。
-            //    失败/超时/提取失败 → 降级为原始 question 单路检索（thinkingHolder 保留已收集增量，可为空）
+            //    失败/超时/提取失败 → 降级为原始 question 单路检索并 fail-loud（thinkingHolder 保留已收集增量，可为空）
             List<HybridRetrievalService.Hit> hits = null;
+            HybridRetrievalService.RetrievalDiag retrievalDiag = new HybridRetrievalService.RetrievalDiag();
             if (deepThink && configService.getBoolean("deepReasoning.enabled")) {
                 DeepThinkResult dr = runDeepThinking(sessionId, question, imgDescText, emitter);
                 thinkingHolder[0] = dr.thinking();
@@ -188,27 +240,39 @@ public class RagService {
                         List<String> queries = new ArrayList<>();
                         queries.add(dr.refinedQuery());
                         queries.addAll(dr.subQueries());
-                        hits = hybridRetrievalService.searchMulti(queries);
+                        hits = hybridRetrievalService.searchMulti(queries, retrievalDiag);
                         rankQuery = dr.refinedQuery();
                     } else {
                         retrievalQuery = dr.refinedQuery();
-                        hits = hybridRetrievalService.search(retrievalQuery);
+                        hits = hybridRetrievalService.search(retrievalQuery, retrievalDiag);
                         rankQuery = retrievalQuery;
                     }
                     // 与普通路径一致：命中数在重排区间内时重排（多路合并后同样重排，保持两路行为一致）
-                    if (hits.size() > rerankMinHits() && hits.size() <= rerankMaxHits()) {
-                        hits = rerankService.rank(hits, rankQuery);
-                    }
+                    hits = rerankIfNeeded(hits, rankQuery, degradations, degradedCodes);
                     log.info("[DEEP-THINK] 检索计划: refined={}, subQueries={}, hits={}",
                             dr.refinedQuery(), dr.subQueries(), hits.size());
+                } else {
+                    // M2 fail-loud：深度思考降级（思考阶段失败/超时/未提取到检索计划）——用户可读措辞，技术原因留日志
+                    addDegradation(degradations, degradedCodes, "deepThinkDegraded", "深度思考未完成，已转为普通回答");
                 }
             }
             // 降级/未开启深度思考：走普通单路检索
             if (hits == null) {
-                hits = hybridRetrievalService.search(retrievalQuery);
-                if (hits.size() > rerankMinHits() && hits.size() <= rerankMaxHits()) {
-                    hits = rerankService.rank(hits, retrievalQuery);
-                }
+                hits = hybridRetrievalService.search(retrievalQuery, retrievalDiag);
+                hits = rerankIfNeeded(hits, retrievalQuery, degradations, degradedCodes);
+            }
+            // M4/M13/L1 fail-loud：检索单路失败/降级透传（keywordFallback 仅调试展示，不扰用户）
+            if (retrievalDiag.isVectorFailed()) {
+                addDegradation(degradations, degradedCodes, "vectorFailed", "向量检索失败，本次仅关键词召回");
+            }
+            if (retrievalDiag.isKeywordFailed()) {
+                addDegradation(degradations, degradedCodes, "keywordDegraded", "关键词引擎不可用，已降级 MySQL 检索");
+            }
+            if (retrievalDiag.isKeywordBusy()) {
+                addDegradation(degradations, degradedCodes, "keywordBusy", "关键词检索繁忙/超时，本次仅向量召回");
+            }
+            if (retrievalDiag.isMultiTimeout()) {
+                addDegradation(degradations, degradedCodes, "multiTimeout", "多路检索超时，仅用已完成结果");
             }
             log.info("[RAG] 检索命中 {} 块, query={}", hits.size(), retrievalQuery);
 
@@ -230,7 +294,13 @@ public class RagService {
                             + "若句末需要标点，放在标记之前的文字末尾，如\"布局组件[图片1]\"，不要写成\"布局组件[图片1]、\"。")
                     .append("\n参考资料中包含表格时（以 | 分隔的 Markdown 表格），若回答涉及表格内容，请用同样的 Markdown 表格格式呈现，不要改写成一长串用竖线连起来的文字。")
                     .append("\n回答末尾用 <related>问题1|问题2|问题3</related> 输出 3 个用户可能追问的相关问题（用 | 分隔），如无合适问题可不输出。");
-            String historyText = buildHistoryText(sessionService.getRecentHistory(sessionId, configService.getInt("chat.historyRounds", 5)));
+            List<Map<String, Object>> recentHistory = sessionService.getRecentHistory(sessionId, configService.getInt("chat.historyRounds", 5));
+            if (recentHistory == null) {
+                // M6 fail-loud：历史读取失败 → 本次对话无历史注入
+                addDegradation(degradations, degradedCodes, "historyFailed", "会话历史读取失败，本次无多轮记忆");
+                recentHistory = List.of();
+            }
+            String historyText = buildHistoryText(recentHistory);
             if (!historyText.isEmpty()) {
                 system.append("\n\n对话历史：\n").append(historyText);
             }
@@ -312,6 +382,9 @@ public class RagService {
                     break;
                 }
                 if (usedTokens + tokens > remainTokens) {
+                    // M5 fail-loud：首块超预算被硬截断（高相关块信息可能丢失），不再只记 debug
+                    addDegradation(degradations, degradedCodes, "contextTruncated",
+                            "资料内容较长，仅截取部分，细节可能缺失");
                     text = truncateChars(text, Math.max(configService.getInt("chat.truncateFallbackChars", 200), remainTokens - usedTokens));
                     tokens = TokenCounter.estimate(text);
                 }
@@ -349,130 +422,216 @@ public class RagService {
             String user = context.length() == 0
                     ? userQuestion.toString()
                     : userQuestion + "\n\n参考资料：\n" + context;
+            if (context.length() == 0) {
+                addDegradation(degradations, degradedCodes, "noHit", "未检索到相关资料，回答可能缺乏依据");
+            }
 
             // 5. 异步流式生成（缓冲过滤 <related> 块：跨 token 分割也能正确剥离，前端不会看到标签原文）
-            StringBuilder fullResponse = new StringBuilder();
-            StringBuilder relatedBlock = new StringBuilder();
-            StringBuilder emitBuf = new StringBuilder();   // 未发送缓冲（含尾部 19 字符滑动窗口，捕获跨 token 的标签片段）
-            Disposable disposable = chatClient.prompt()
-                    .system(system.toString())
-                    .user(user)
-                    // 模型配置界面：per-request 动态覆盖模型名与温度（保存即生效）；maxTokens 限制输出长度（防失控长文/成本）
-                    .options(OpenAiChatOptions.builder()
-                            .model(configService.get("chat.model"))
-                            .temperature(configService.getDouble("chat.temperature"))
-                            .maxTokens(configService.getInt("context.maxOutputTokens"))
-                            .build())
-                    .stream()
-                    .content()
-                    .doOnNext(token -> {
-                        emitBuf.append(token);
-                        String bufStr = emitBuf.toString();
-                        // 存在未完整闭合的 related 块（开始/闭合标签被跨 token 切分也覆盖）：继续缓冲不下发
-                        if (containsUnclosedRelated(bufStr)) {
-                            if (bufStr.length() > 3000) {
-                                // 异常兜底：模型未闭合标签，直接按原文发送（extractRelated 兜底清理）
-                                String raw = bufStr;
-                                emitBuf.setLength(0);
-                                fullResponse.append(raw);
-                                sendSseEvent(emitter, "token", raw, sessionId);
-                            }
-                            return;
-                        }
-                        // 剥离完整 related 块，收集推荐内容
-                        java.util.regex.Matcher rm = relatedPattern.matcher(bufStr);
-                        while (rm.find()) {
-                            relatedBlock.append(rm.group(1)).append("\n");
-                        }
-                        String clean = bufStr.replaceAll("<related>[\\s\\S]*?</related>", "");
-                        // 尾部保留 19 字符滑动窗口（可能是不完整标签片段），其余下发
-                        emitBuf.setLength(0);
-                        int keep = Math.min(19, clean.length());
-                        String sendPart = clean.substring(0, clean.length() - keep);
-                        String tailKeep = clean.substring(clean.length() - keep);
-                        emitBuf.append(tailKeep);
-                        if (!sendPart.isEmpty()) {
-                            fullResponse.append(sendPart);
-                            sendSseEvent(emitter, "token", sendPart, sessionId);
-                        }
-                    })
-                    .doOnError(error -> {
-                        Throwable root = error;
-                        while (root.getCause() != null) root = root.getCause();
-                        log.error("Stream error: {} -> {}", error.getClass().getSimpleName(), root.toString());
-                        String msg = (root instanceof java.net.ConnectException)
-                                ? "无法连接 AI 服务，请检查网络或 API 地址"
-                                : "AI 回复失败，请稍后重试";
-                        sendSseEvent(emitter, "error", msg, sessionId);
-                        completeEmitter(emitter);
-                    })
-                    .doOnComplete(() -> {
-                        // 下发缓冲尾部（可能残留滑动窗口），并剥离可能的不完整标签
-                        if (emitBuf.length() > 0) {
-                            String rest = emitBuf.toString().replaceAll("<related>[\\s\\S]*?</related>", "")
-                                    .replaceAll("<related[\\s\\S]*$", "");
-                            emitBuf.setLength(0);
-                            if (!rest.isEmpty()) {
-                                fullResponse.append(rest);
-                                sendSseEvent(emitter, "token", rest, sessionId);
-                            }
-                        }
-                        // 相关推荐：优先用流式收集的块内容；兜底再对完整回答剥离一次（防 </related> 缺失等异常）
-                        List<String> related = parseRelatedBlock(relatedBlock);
-                        if (related.isEmpty()) {
-                            related = extractRelated(fullResponse);
-                        }
-                        String answer = fullResponse.toString();
+            AnswerStreamState st = new AnswerStreamState(sessionId, question, emitter,
+                    imgIndex, imgDescIndex, sources, userImgs, startTime, queryForLog, thinkingHolder,
+                    degradations, degradedCodes);
+            st.disposableRef.set(buildAnswerStream(system.toString(), user, st));
 
-                        // 图片相关性校验兜底：剔除与描述不匹配的 [图片N] 标记并重建编号（LLM 偶发错配）
-                        List<String> finalImgs = new ArrayList<>(imgIndex.values());
-                        if (properties.getImages().getImageFilter().isEnabled() && !imgIndex.isEmpty()) {
-                            ImageFilterService.RebuildResult rr = imageFilterService.rebuild(answer, imgDescIndex, question,
-                                    properties.getImages().getImageFilter().getMinHits(),
-                                    properties.getImages().getImageFilter().getPreContextChars());
-                            if (!rr.dropped().isEmpty()) {
-                                log.info("[IMG-FILTER] 图片错配剔除 {} 个: {}", rr.dropped().size(), rr.dropped());
-                                answer = rr.text();
-                                finalImgs = rr.keptSeq().stream().map(imgIndex::get).toList();
-                            }
-                        }
-
-                        // 记录对话历史（含图片与引用来源），拿到消息ID供前端反馈
-                        String sourcesJson = sources.isEmpty() ? null : JSON.toJSONString(sources);
-                        List<String> userImgUrls = userImgs.stream().map(UserImageService.UserImage::url).toList();
-                        sessionService.appendMessage(sessionId, "user", question,
-                                userImgUrls.isEmpty() ? null : userImgUrls, null);
-                        String messageId = sessionService.appendMessage(sessionId, "assistant", answer,
-                                finalImgs, sourcesJson, thinkingHolder[0]);
-
-                        // 异步落问答日志（不阻塞 SSE 完成）
-                        List<String> hitDocIds = sources.stream().map(s -> String.valueOf(s.get("docId"))).toList();
-                        qaLogService.logAsync(sessionId, question, answer, hitDocIds,
-                                !sources.isEmpty(), System.currentTimeMillis() - startTime,
-                                queryForLog);
-
-                        // done 事件携带引用来源/相关推荐/消息ID（反馈关联）+ 校验修正后的内容/图片（前端覆盖，保证编号与图一致）+ 思考全文（历史恢复/兜底）
-                        Map<String, Object> donePayload = new LinkedHashMap<>();
-                        donePayload.put("sources", sources);
-                        donePayload.put("related", related);
-                        donePayload.put("messageId", messageId);
-                        donePayload.put("finalContent", answer);
-                        donePayload.put("finalImages", finalImgs);
-                        donePayload.put("thinking", thinkingHolder[0]);
-                        sendSseEvent(emitter, "done", JSON.toJSONString(donePayload), sessionId);
-                        completeEmitter(emitter);
-                    })
-                    .subscribe();
-
-            // 前端断开/超时时停止生成
-            emitter.onCompletion(() -> disposable.dispose());
-            emitter.onTimeout(() -> disposable.dispose());
-            emitter.onError(t -> disposable.dispose());
+            // 前端断开/超时时停止生成；超时先发 warn（fail-loud：回答被截断必须告知，不留静默半截）
+            emitter.onCompletion(() -> st.disposeSafe());
+            emitter.onTimeout(() -> {
+                log.warn("[FAIL-LOUD] SSE 超时，回答被截断: session={}", sessionId);
+                sendSseEvent(emitter, "warn", "回答超时已截断，请重试或缩短问题", sessionId);
+                st.disposeSafe();
+                completeEmitter(emitter);
+            });
+            emitter.onError(t -> st.disposeSafe());
 
         } catch (Exception e) {
             log.error("Chat error", e);
             sendSseEvent(emitter, "error", "系统处理异常，请稍后重试", sessionId);
             completeEmitter(emitter);
+        }
+    }
+
+    /**
+     * 构建并订阅主 LLM 流式回答（H2：未输出任何 token 时中断自动重试，次数 chat.streamRetryCount 可配）。
+     * 可变状态与 complete 回调依赖收敛在 AnswerStreamState；重试时重建全新流并丢弃旧缓冲。
+     */
+    private Disposable buildAnswerStream(String system, String user, AnswerStreamState st) {
+        SseEmitter emitter = st.emitter;
+        return chatClient.prompt()
+                .system(system)
+                .user(user)
+                // 模型配置界面：per-request 动态覆盖模型名与温度（保存即生效）；maxTokens 限制输出长度（防失控长文/成本）
+                .options(OpenAiChatOptions.builder()
+                        .model(configService.get("chat.model"))
+                        .temperature(configService.getDouble("chat.temperature"))
+                        .maxTokens(configService.getInt("context.maxOutputTokens"))
+                        .build())
+                .stream()
+                .content()
+                .doOnNext(token -> {
+                    st.emitBuf.append(token);
+                    String bufStr = st.emitBuf.toString();
+                    // 存在未完整闭合的 related 块（开始/闭合标签被跨 token 切分也覆盖）：继续缓冲不下发
+                    if (containsUnclosedRelated(bufStr)) {
+                        if (bufStr.length() > 3000) {
+                            // 异常兜底：模型未闭合标签，直接按原文发送（extractRelated 兜底清理）；fail-loud 标记
+                            addDegradation(st.degradations, st.degradedCodes, "relatedMalformed",
+                                    "模型输出格式异常（related 标签未闭合），已按原文清理");
+                            String raw = bufStr;
+                            st.emitBuf.setLength(0);
+                            st.fullResponse.append(raw);
+                            sendSseEvent(emitter, "token", raw, st.sessionId);
+                        }
+                        return;
+                    }
+                    // 剥离完整 related 块，收集推荐内容
+                    java.util.regex.Matcher rm = relatedPattern.matcher(bufStr);
+                    while (rm.find()) {
+                        st.relatedBlock.append(rm.group(1)).append("\n");
+                    }
+                    String clean = bufStr.replaceAll("<related>[\\s\\S]*?</related>", "");
+                    // 尾部保留 19 字符滑动窗口（可能是不完整标签片段），其余下发
+                    st.emitBuf.setLength(0);
+                    int keep = Math.min(19, clean.length());
+                    String sendPart = clean.substring(0, clean.length() - keep);
+                    String tailKeep = clean.substring(clean.length() - keep);
+                    st.emitBuf.append(tailKeep);
+                    if (!sendPart.isEmpty()) {
+                        st.fullResponse.append(sendPart);
+                        sendSseEvent(emitter, "token", sendPart, st.sessionId);
+                    }
+                })
+                .doOnError(error -> {
+                    Throwable root = error;
+                    while (root.getCause() != null) root = root.getCause();
+                    boolean noTokenYet = st.fullResponse.length() == 0 && st.emitBuf.length() == 0;
+                    if (noTokenYet && st.retried.getAndIncrement() < streamRetryCount()) {
+                        log.warn("[FAIL-LOUD] 主 LLM 流式中断且未输出 token，自动重试第 {} 次: {} -> {}",
+                                st.retried.get(), error.getClass().getSimpleName(), root);
+                        // 重建全新流，丢弃旧缓冲（避免重试拼接出重复内容）
+                        st.fullResponse.setLength(0);
+                        st.emitBuf.setLength(0);
+                        st.relatedBlock.setLength(0);
+                        st.disposableRef.set(buildAnswerStream(system, user, st));
+                        return;
+                    }
+                    log.error("Stream error: {} -> {}", error.getClass().getSimpleName(), root.toString());
+                    String msg = (root instanceof java.net.ConnectException)
+                            ? "无法连接 AI 服务，请检查网络或 API 地址"
+                            : "AI 回复失败，请稍后重试";
+                    st.degradations.add(Map.of("code", "streamError", "msg", "模型输出中断：" + msg));
+                    sendSseEvent(emitter, "error", msg, st.sessionId);
+                    completeEmitter(emitter);
+                })
+                .doOnComplete(() -> {
+                    // 下发缓冲尾部（可能残留滑动窗口），并剥离可能的不完整标签
+                    if (st.emitBuf.length() > 0) {
+                        String rest = st.emitBuf.toString().replaceAll("<related>[\\s\\S]*?</related>", "")
+                                .replaceAll("<related[\\s\\S]*$", "");
+                        st.emitBuf.setLength(0);
+                        if (!rest.isEmpty()) {
+                            st.fullResponse.append(rest);
+                            sendSseEvent(emitter, "token", rest, st.sessionId);
+                        }
+                    }
+                    // 相关推荐：优先用流式收集的块内容；兜底再对完整回答剥离一次（防 </related> 缺失等异常）
+                    List<String> related = parseRelatedBlock(st.relatedBlock);
+                    if (related.isEmpty()) {
+                        related = extractRelated(st.fullResponse);
+                    }
+                    String answer = st.fullResponse.toString();
+
+                    // 图片相关性校验兜底：剔除与描述不匹配的 [图片N] 标记并重建编号（LLM 偶发错配）
+                    List<String> finalImgs = new ArrayList<>(st.imgIndex.values());
+                    if (properties.getImages().getImageFilter().isEnabled() && !st.imgIndex.isEmpty()) {
+                        ImageFilterService.RebuildResult rr = imageFilterService.rebuild(answer, st.imgDescIndex, st.question,
+                                properties.getImages().getImageFilter().getMinHits(),
+                                properties.getImages().getImageFilter().getPreContextChars());
+                        if (!rr.dropped().isEmpty()) {
+                            // M7 fail-loud：图片被剔除后回答仍引用旧编号，需告知
+                            addDegradation(st.degradations, st.degradedCodes, "imgFilterDropped",
+                                    "已剔除 " + rr.dropped().size() + " 张与回答内容不匹配的图片引用");
+                            log.info("[IMG-FILTER] 图片错配剔除 {} 个: {}", rr.dropped().size(), rr.dropped());
+                            answer = rr.text();
+                            finalImgs = rr.keptSeq().stream().map(st.imgIndex::get).toList();
+                        }
+                    }
+                    // L4 fail-loud：有引用来源但回答未标注任何 [N]（溯源缺失）
+                    if (!st.sources.isEmpty() && !answer.matches(".*\\[\\d+\\].*")) {
+                        addDegradation(st.degradations, st.degradedCodes, "noCitation", "回答未标注引用来源");
+                    }
+
+                    // 记录对话历史（含图片与引用来源），拿到消息ID供前端反馈
+                    String sourcesJson = st.sources.isEmpty() ? null : JSON.toJSONString(st.sources);
+                    List<String> userImgUrls = st.userImgs.stream().map(UserImageService.UserImage::url).toList();
+                    sessionService.appendMessage(st.sessionId, "user", st.question,
+                            userImgUrls.isEmpty() ? null : userImgUrls, null);
+                    String messageId = sessionService.appendMessage(st.sessionId, "assistant", answer,
+                            finalImgs, sourcesJson, st.thinkingHolder[0]);
+
+                    // 异步落问答日志（不阻塞 SSE 完成）
+                    List<String> hitDocIds = st.sources.stream().map(s -> String.valueOf(s.get("docId"))).toList();
+                    qaLogService.logAsync(st.sessionId, st.question, answer, hitDocIds,
+                            !st.sources.isEmpty(), System.currentTimeMillis() - st.startTime,
+                            st.queryForLog);
+
+                    // done 事件：引用来源/相关推荐/消息ID + 校验修正后的内容/图片 + 思考全文 + 本轮全部降级事件（fail-loud）
+                    Map<String, Object> donePayload = new LinkedHashMap<>();
+                    donePayload.put("sources", st.sources);
+                    donePayload.put("related", related);
+                    donePayload.put("messageId", messageId);
+                    donePayload.put("finalContent", answer);
+                    donePayload.put("finalImages", finalImgs);
+                    donePayload.put("thinking", st.thinkingHolder[0]);
+                    donePayload.put("degradations", st.degradations);
+                    sendSseEvent(emitter, "done", JSON.toJSONString(donePayload), st.sessionId);
+                    completeEmitter(emitter);
+                })
+                .subscribe();
+    }
+
+    /**
+     * 单次回答的流式状态与 complete 回调依赖（H2 重试重建流时复用同一状态，旧缓冲被清空）。
+     */
+    private static final class AnswerStreamState {
+        final String sessionId;
+        final String question;
+        final SseEmitter emitter;
+        final Map<Integer, String> imgIndex;
+        final Map<Integer, String> imgDescIndex;
+        final List<Map<String, Object>> sources;
+        final List<UserImageService.UserImage> userImgs;
+        final long startTime;
+        final String queryForLog;
+        final String[] thinkingHolder;
+        final List<Map<String, String>> degradations;
+        final Set<String> degradedCodes;
+        final StringBuilder fullResponse = new StringBuilder();
+        final StringBuilder relatedBlock = new StringBuilder();
+        final StringBuilder emitBuf = new StringBuilder();
+        final AtomicInteger retried = new AtomicInteger();
+        final AtomicReference<Disposable> disposableRef = new AtomicReference<>();
+
+        AnswerStreamState(String sessionId, String question, SseEmitter emitter,
+                          Map<Integer, String> imgIndex, Map<Integer, String> imgDescIndex,
+                          List<Map<String, Object>> sources, List<UserImageService.UserImage> userImgs,
+                          long startTime, String queryForLog, String[] thinkingHolder,
+                          List<Map<String, String>> degradations, Set<String> degradedCodes) {
+            this.sessionId = sessionId;
+            this.question = question;
+            this.emitter = emitter;
+            this.imgIndex = imgIndex;
+            this.imgDescIndex = imgDescIndex;
+            this.sources = sources;
+            this.userImgs = userImgs;
+            this.startTime = startTime;
+            this.queryForLog = queryForLog;
+            this.thinkingHolder = thinkingHolder;
+            this.degradations = degradations;
+            this.degradedCodes = degradedCodes;
+        }
+
+        void disposeSafe() {
+            Disposable d = disposableRef.get();
+            if (d != null) d.dispose();
         }
     }
 
@@ -704,8 +863,8 @@ public class RagService {
 
     // ==================== 深度思考（生产级） ====================
 
-    /** 深度思考结果：ok=是否成功（失败降级时 refinedQuery 无意义），thinking=剥离 <search> 后的展示文本 */
-    private record DeepThinkResult(boolean ok, String thinking, String refinedQuery, List<String> subQueries) {
+    /** 深度思考结果：ok=是否成功（失败降级时 refinedQuery 无意义），thinking=剥离 <search> 后的展示文本，reason=失败原因（fail-loud） */
+    private record DeepThinkResult(boolean ok, String thinking, String refinedQuery, List<String> subQueries, String reason) {
     }
 
     /**
@@ -772,15 +931,15 @@ public class RagService {
             done.put("thinking", display);
             sendSseEvent(emitter, "thinking_done", JSON.toJSONString(done), sessionId);
             log.info("[DEEP-THINK] 思考完成 {} 字, refined={}, subs={}", display.length(), plan.refinedQuery(), plan.subQueries());
-            return new DeepThinkResult(true, display, plan.refinedQuery(), plan.subQueries());
+            return new DeepThinkResult(true, display, plan.refinedQuery(), plan.subQueries(), null);
         } catch (Exception e) {
-            log.warn("[DEEP-THINK] 思考失败/超时，降级普通检索: {}", e.getMessage());
+            log.warn("[FAIL-LOUD] 深度思考失败/超时，降级普通检索: {}", e.getMessage());
             String display = stripSearchBlock(thinking.toString(), "search");
             Map<String, Object> done = new LinkedHashMap<>();
             done.put("status", "degraded");
             done.put("thinking", display);
             sendSseEvent(emitter, "thinking_done", JSON.toJSONString(done), sessionId);
-            return new DeepThinkResult(false, display, question, List.of());
+            return new DeepThinkResult(false, display, question, List.of(), e.getMessage());
         }
     }
 
@@ -855,13 +1014,17 @@ public class RagService {
         }
     }
 
+    /** 查询改写结果：query + 是否降级（fail-loud：改写失败/空结果标记 degraded，调用方上报） */
+    public record RewriteResult(String query, boolean degraded) {
+    }
+
     /**
      * LLM 改写用户问题，优化检索精准度。支持多轮对话上下文（追问场景）。
-     * 失败/超时/空结果时静默降级为原始问题。
+     * 失败/超时/空结果时降级为原始问题并标记 degraded（不再静默）。
      */
-    private String rewriteQuery(String question, List<Map<String, Object>> history) {
+    private RewriteResult rewriteQuery(String question, List<Map<String, Object>> history) {
         if (!properties.getQueryRewrite().isEnabled()) {
-            return question;
+            return new RewriteResult(question, false);
         }
         try {
             // 构建 system prompt：根据是否有足够历史选择单轮或多轮改写
@@ -885,16 +1048,25 @@ public class RagService {
                                     .build())
                             .call()
                             .content(), rewriteExecutor)
-                    .get(properties.getQueryRewrite().getTimeoutMillis(), TimeUnit.MILLISECONDS);
+                    .get(configService.getInt("retrieval.rewriteTimeoutMs",
+                            properties.getQueryRewrite().getTimeoutMillis()), TimeUnit.MILLISECONDS);
             if (rewritten == null || rewritten.isBlank()) {
-                return question;
+                log.warn("[FAIL-LOUD] 查询改写返回空，使用原问题检索");
+                return new RewriteResult(question, true);
             }
             String trimmed = rewritten.trim();
             log.info("[rewrite] history={} {} -> {}", hasHistory, question, trimmed);
-            return trimmed;
+            return new RewriteResult(trimmed, false);
+        } catch (TimeoutException e) {
+            // TimeoutException.getMessage() 为 null → 明确报超时（本地模型响应慢的常见场景），排障不再看到裸 null
+            log.warn("[FAIL-LOUD] 查询改写超时（{}ms），使用原问题检索",
+                    configService.getInt("retrieval.rewriteTimeoutMs", properties.getQueryRewrite().getTimeoutMillis()));
+            return new RewriteResult(question, true);
         } catch (Exception e) {
-            log.debug("[rewrite] 改写失败，降级为原始问题: {}", e.getMessage());
-            return question;
+            log.warn("[FAIL-LOUD] 查询改写失败（{}），使用原问题检索: {}",
+                    e.getClass().getSimpleName(), e.getMessage() == null ? "无详情" : e.getMessage());
+            log.debug("[rewrite] 改写失败详情", e);
+            return new RewriteResult(question, true);
         }
     }
 
