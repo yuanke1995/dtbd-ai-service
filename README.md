@@ -1,6 +1,6 @@
 # AI 文档助手
 
-独立 AI 服务，基于 Spring AI 实现 RAG 知识库问答。支持 Word/PDF/Excel 文档解析（含扫描 PDF OCR）、混合检索 + 查询改写、价值驱动上下文控制、回答中位置级展示文档原图（识别用压缩图、展示用原图的双图策略）、解析进度实时展示（含图片识别逐张进度）、引用溯源、会话管理（搜索/置顶/收藏）、文档版本管理、数据看板与知识缺口闭环，是面向"操作手册问答"场景的完整智能助手。
+独立 AI 服务，基于 Spring AI 实现 RAG 知识库问答。支持 Word/PDF/Excel 文档解析（含扫描 PDF OCR）、混合检索 + 查询改写、**知识块关联检索（交叉引用 1-hop 扩散 + 父章节上下文带出）**、价值驱动上下文控制、回答中位置级展示文档原图（识别用压缩图、展示用原图的双图策略 + 相关性预筛防错配）、解析进度实时展示（含图片识别逐张进度）、引用溯源、会话管理（搜索/置顶/收藏）、文档版本管理、数据看板与知识缺口闭环，是面向"操作手册问答"场景的完整智能助手。
 
 ## 技术栈
 
@@ -24,7 +24,7 @@ ai-doc-assistant/
 │   ├── config/                      # AiAppProperties / SecurityConfig / ImageWebConfig / GlobalExceptionHandler / ImageAuthInterceptor
 │   ├── controller/                  # Chat(SSE) / Document / Qa(反馈+看板) / Config(模型配置) / AiKnowledge(缺口回流+编辑) / RetrievalDebug(检索调试)
 │   ├── service/                     # RagService / HybridRetrievalService / RerankService / KeywordExtractor / ImageFilterService
-│   │                                # DocumentService / VisionService / UserImageService / SessionService / QaLogService / ConfigService / DocumentMetaCache ...
+│   │                                # KnowledgeRefService（引用识别+关联扩散）/ DocumentService / VisionService / UserImageService / SessionService / QaLogService / ConfigService / DocumentMetaCache ...
 │   ├── parser/                      # DocumentParser 接口 + DocxParser / PdfParser(OCR) / ExcelParser
 │   ├── util/                        # TokenCounter（分语言 token 估算，上下文预算用）
 │   ├── model/ + mapper/ + dto/      # 实体（含 AiDocumentVersion）/ MyBatis-Plus Mapper / 传输对象
@@ -55,7 +55,7 @@ ollama pull qwen3-vl:2b
 ```
 > 建议设置环境变量 `OLLAMA_NUM_PARALLEL=4`（否则多图描述串行排队）；4GB 显存机器并发度建议 `vision.concurrency=2`。
 
-**数据库**：现有 OceanBase 库 `ai_doc_assistant`（库需预先存在，库名按实际环境配置）。表结构（`c_ai_document`/`c_ai_knowledge`/`c_ai_session`/`c_ai_message`/`c_ai_qa_log`/`c_ai_qa_feedback`/`c_ai_config`/`c_ai_document_version`）由应用启动自动执行 `schema.sql` 创建（全部 `CREATE TABLE IF NOT EXISTS`，重复启动安全）；也可手动执行：
+**数据库**：现有 OceanBase 库 `ai_doc_assistant`（库需预先存在，库名按实际环境配置）。表结构（`c_ai_document`/`c_ai_knowledge`/`c_ai_session`/`c_ai_message`/`c_ai_qa_log`/`c_ai_qa_feedback`/`c_ai_config`/`c_ai_document_version`/`c_ai_knowledge_ref`）由应用启动自动执行 `schema.sql` 创建（全部 `CREATE TABLE IF NOT EXISTS`，重复启动安全）；也可手动执行：
 ```bash
 mysql -h172.168.10.65 -P2881 -uroot -p ai_doc_assistant < src/main/resources/schema.sql
 ```
@@ -116,8 +116,8 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 
 ### 5. 使用流程
 
-1. **文档管理**：上传 `.docx` / `.pdf` / `.xlsx`（默认 ≤200MB，可多文件；上限在设置页调整，物理上限 1GB）→ 异步解析（解析中状态轮询，进度条实时展示：图片识别阶段逐张显示"识别图片 k/total"）→ 生效/弃用/重解析/批量操作/命中次数统计；**解析中删除文档立即中断**（线程中断 + 产物自动清理，无孤儿数据）；点击"知识块"可预览该文档的分块与图片（支持**编辑/删除单个知识块**，编辑后自动重新向量化）；**版本管理**（每次解析/重解析自动存快照，可查看历史版本并一键回滚）；**结构感知切分**（docx 默认开启：按标题层级开新块、段落边界断块、表格独立成块；**正文只存净内容**，章节路径 `【上下文】章节 > 小节` 独立存储，向量化与检索回答时再拼入上下文，需重解析生效）
-2. **智能问答**：提问（支持上传图片+问题）→ 混合检索 + 查询改写 → 流式回答，位置级插入文档原图、[N] 引用角标（点击弹窗看来源全文与图片）、末尾相关追问；回答下方操作区（检索调试/重新生成/复制 Markdown/导出 .md/👍👎 反馈，hover 显示）；断连自动重试（内联提示）
+1. **文档管理**：上传 `.docx` / `.pdf` / `.xlsx`（默认 ≤200MB，可多文件；上限在设置页调整，物理上限 1GB）→ 异步解析（解析中状态轮询，进度条实时展示：图片识别阶段逐张显示"识别图片 k/total"）→ 生效/弃用/重解析/批量操作/命中次数统计；**解析中删除文档立即中断**（线程中断 + 产物自动清理，无孤儿数据）；点击"知识块"可预览该文档的分块与图片（支持**编辑/删除单个知识块**，编辑后自动重新向量化）；**版本管理**（每次解析/重解析自动存快照，可查看历史版本并一键回滚）；**结构感知切分**（docx 默认开启：按标题层级开新块、段落边界断块、表格独立成块；**正文只存净内容**，章节路径 `【上下文】章节 > 小节` 独立存储，向量化与检索回答时再拼入上下文，需重解析生效）；**交叉引用识别**（解析时自动扫描块内"详见/参见/见 X 节/《章节名》/XX章节"等引用表达，建立块间引用关系 `c_ai_knowledge_ref`，需重解析生效）
+2. **智能问答**：提问（支持上传图片+问题）→ 混合检索 + 查询改写 + **知识块关联扩散**（命中块自动带出被引用/父章节关联块）→ 流式回答，位置级插入文档原图、[N] 引用角标（点击弹窗看来源全文与图片，扩散块标注"关联引用/父章节上下文"）、末尾相关追问；回答下方操作区（检索调试/重新生成/复制 Markdown/导出 .md/👍👎 反馈，hover 显示）；回答顶部可能展示降级提示（未命中/超时截断/深度思考降级/图片剔除等，调试级提示需设置页开启）；断连自动重试（内联提示）
 3. **会话管理**：侧边栏搜索（标题/内容模糊匹配）、**置顶/收藏**（置顶排最前，收藏 tab 筛选）、拖拽伸缩、删除/清空
 4. **数据看板**：统计卡片（问答量/满意率/引用率/无命中率）+ 热门问题/无命中 TOP10 + **知识库缺口管理**（无命中问题一键入库，含向量召回）
 5. **系统设置**：模型名/温度/System Prompt（角色段）/视觉模型/检索权重与行为参数/重排区间/解析并发与结构切分/上下文参数，**保存即生效**（DB 存储，折叠分组展示，顶部**锚点导航**快速定位 + 滚动高亮，参数带 `?` 说明）；问答输入框左侧深度思考开关（图标按钮，localStorage 记忆）
@@ -126,16 +126,17 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 ## 核心功能
 
 - **混合检索**：Redis 向量 Top-K + 关键词召回并行（**超时/阈值/召回数/位置奖励等行为参数设置页可调**，保存即生效）；**向量分归一化 + 双命中叠加**（语义+关键词命中 = 向量分+关键词分+标题奖励）；**关键词引擎可切换**（默认 `mysql` LIKE 零依赖；切到 `meilisearch` 用中文分词 + 相关度打分，服务不可用/超时自动降级回 MySQL，首次切换需 `POST /api/ai/search-index/reindex` 全量重建，写索引随解析/编辑/删除增量同步）；**jieba 中文分词**（搜索模式细粒度词元 + 长词 2-gram/4-gram 子词元补充召回宽度，启动预热词典）；**分块位置奖励**（文档首块加权）；Ollama 支持 rerank 时自动启用（候选数在可配置区间内触发），否则回退规则排序
+- **知识块关联检索**（`c_ai_knowledge_ref`）：解析时识别块内交叉引用（详见/参见/见 编号节/《章节名》/章节名+章节后缀等 7 类模式，排除图表引用与相对引用、提及类仅精确匹配防误报，单块最多 8 条）→ 建块间引用边；检索命中 A 时 **1-hop 扩散**自动带出 A 引用的块 B（入边 C 默认关）+ **结构上下文扩展**沿章节路径带出父章节摘要（默认 2 级、summary 200 字）；扩散块走独立配额（`refExpandMaxHits=3`/`refExpandMaxTokens=800` 双上限，超限可舍弃不阻断回答），引用来源带 `origin` 标注（REF_OUT/REF_IN/PARENT）；引用关系与块/文档同生命周期（重解析/编辑/删除/回滚自动重建），任一环节失败降级为不扩散
 - **查询改写**：LLM 将用户问题改写为检索关键词（默认开启）；支持多轮对话上下文改写（追问"那删除呢？"自动补全），改写结果入库可评估
-- **上下文与长度控制**：`预算 = min(模型窗口×安全系数 − 输出限制, 成本软上限)`，窗口按当前模型动态匹配；**价值驱动填充**（知识块按相关度分数累积填充，替代固定 8 块）；**块内命中片段截取**（±150 字窗口，边界对齐行/图片标记，长命令不被切断）；**历史裁剪**（单条 200 字 + 总量上限 + 剥离 `[图片N]`）；输出 maxTokens 限制；token 按中英文分语言估算（TokenCounter）
-- **图片链路**：docx 提取图片（去重 + **双图策略**：识别用压缩图 1280px 进视觉模型，**展示用原图**落盘）→ 视觉模型生成描述并随分块落库（Ollama `num_ctx=16384` 防 1280px 视觉 token 截断）→ 检索命中后全局编号 `[图片N：描述]` 供 LLM 选图 → **相关性校验兜底**（`[图片N]` 与描述/上下文不匹配自动剔除并重建编号，防错配）→ SSE `image` 事件 → 前端按标记渲染原图（灯箱：缩放/拖动/多图切换/ESC）；图片描述完成逐张上报进度（10→30 区间"识别图片 k/total"）
+- **上下文与长度控制**：`预算 = min(模型窗口×安全系数 − 输出限制, 成本软上限)`，窗口按当前模型动态匹配；**价值驱动填充**（知识块按相关度分数累积填充，替代固定 8 块）；**块内命中片段截取**（±150 字窗口，边界对齐行/图片标记，长命令不被切断；**被截掉的图片占位自动补到片段末尾**，保证 LLM 配图依据完整）；**关联扩散块独立配额**（原始命中块用 `max-context-hits`，扩散块用 `refExpandMaxHits/MaxTokens`，共享剩余预算）；**历史裁剪**（单条 200 字 + 总量上限 + 剥离 `[图片N]`）；输出 maxTokens 限制；token 按中英文分语言估算（TokenCounter）
+- **图片链路**：docx 提取图片（去重 + **双图策略**：识别用压缩图 1280px 进视觉模型，**展示用原图**落盘）→ 视觉模型生成描述并随分块落库（Ollama `num_ctx=16384` 防 1280px 视觉 token 截断）→ 检索命中后**相关性预筛**（与问题无关的图不分配编号，LLM 生成时即避开，避免"先输出后剔除"的图闪现）→ 全局编号 `[图片N：描述]` 供 LLM 选图 → **相关性校验兜底**（错配/编造编号自动剔除并重建，被剔除提示用户）→ SSE `image` 事件 → 前端按标记渲染原图（灯箱：滚轮按幅度平滑缩放/拖动/多图切换/ESC）；图片描述完成逐张上报进度（10→30 区间"识别图片 k/total"）
 - **引用溯源**：回答句末 `[N]` 角标 → 弹窗展示来源知识块全文（图文交错，还原原文结构）+ 关联截图；`done` 事件携带 sources/related/messageId
 - **文档解析**：docx（段落/标题大纲级别/**表格→Markdown 表格、单列表格→代码块**/内嵌图/单元格换行保留）/ xlsx（sheet 转文本）/ pdf（PDFBox 文本抽取）；**扫描件自动 OCR**（文本 <20 字符判定，逐页渲染 200DPI → 本地视觉模型识别，OCR 专用提示词）；**结构感知切分**（docx：标题层级开新块 + 章节路径独立存储、向量化/检索时拼入 `【上下文】章节 > 小节`、达到边界阈值在段落交界断块、表格独立成块；`chunk.structural` 可关，需重解析生效）；**分块重叠只进向量化文本**（不入库、不进指纹，邻块变动不连锁重嵌）；**解析删除感知**（内存删除标志 + 线程中断，删除立即停止并清理本次产物）
 - **数据闭环**：问答日志（含改写后问题/命中文档/耗时）+ 回答 👍👎 反馈 + 看板聚合；**无命中问题汇总 → 一键创建知识块（自动生成向量）**，形成"发现缺口→补充→验证"闭环
 - **检索调试**：`POST /api/ai/debug/retrieval` 分步展示检索词元（分词结果）/关键词/向量/合并/重排/最终结果与命中率，前端问答页"检索调试"按钮可视化排查召回问题
 - **检索评估**：`POST /api/ai/eval/generate` 从历史问答引用（`c_ai_message.sources`）回放生成评估集（问题→期望知识块，失效期望块自动剔除并计数）→ `POST /api/ai/eval/run` 批量参数组对比 **recall@k / MRR / 命中率** + 弃用文档召回断言；参数覆盖走线程局部 override，**不写 DB 不污染生产配置**（multi 模式为确定性拆分近似，衡量多路合并机制而非 LLM 深度思考质量）
 - **会话**：MySQL + Redis 双层存储，历史恢复（含图片/引用来源/messageId）、删除/清空、**搜索/置顶/收藏**、侧边栏拖拽伸缩（宽度记忆）
-- **前端体验**：markdown-it + DOMPurify + highlight.js 安全渲染（代码块复制按钮、**长行自动折行 + 限高滚动**）、重新生成/编辑重问（编辑图标悬浮气泡下方）、图片灯箱、问答 👍👎 反馈、断连自动重试内联提示、全局错误边界（渲染异常友好提示防白屏、401 统一提示）、图片加载失败占位图、上传进度条
+- **前端体验**：markdown-it + DOMPurify + highlight.js 安全渲染（代码块复制按钮、**长行自动折行 + 限高滚动**、**表格渲染容错**：LLM 在标题/列表后未留空行的表格自动补空行独立渲染、结尾孤立竖线清理）、重新生成/编辑重问（编辑图标悬浮气泡下方）、图片灯箱（**滚轮按幅度平滑缩放**：每 100 单位滚轮量 8%、单次 clamp ±30% 防惯性跳变）、发送后自动滚动到底部（不等首个 token）、问答 👍👎 反馈、断连自动重试内联提示、全局错误边界（渲染异常友好提示防白屏、401 统一提示）、图片加载失败占位图、上传进度条
 
 ## API 一览
 
@@ -220,13 +221,14 @@ curl http://localhost:8090/api/ai/search-index/stats             # indexedCount 
 2. 解析中删除文档 → 后端日志出现"解析已被删除中断"，无孤儿知识块
 3. 问答提问 → 深度思考开关（可选）→ 流式回答带引用 `[N]` 角标 → 点击看来源全文与图片 → 👍/👎 反馈
 4. 设置页修改任意行为参数（如向量阈值）→ 保存 → 检索调试对比前后召回差异
+5. 知识块关联检索：上传含"详见/参见《章节名》"的文档 → 查库 `SELECT * FROM c_ai_knowledge_ref WHERE doc_id=...` 有引用边 → 问命中章节的问题 → 回答引用弹窗出现"关联引用块/父章节上下文"（origin=REF_OUT/PARENT）；设置页关闭"关联扩散"后行为回到只检索直接命中块
 
 ## 产品化特性
 
 - **安全**：关键密钥零默认值（`DB_PASSWORD`/`AI_TRUSTED_TOKEN` 缺失 fail-fast，模型密钥允许空默认仅功能不可用）、token 恒定时间比较、图片访问 HMAC 签名 URL（`AI_IMAGES_AUTH_ENABLED=true`）、统一异常+参数校验（`@Valid`）、错误信息不泄露内部细节
 - **可靠性**：上传失败自动补偿清理（删向量+MySQL+图片）、脏解析记录清理、解析异步化（不阻塞上传）、**解析中删除文档立即中断**（内存标志 + 线程 interrupt + 阶段检查点，清理本次产物）、SSE 异步订阅支持停止生成、查询改写专用线程池（超时隔离 + daemon + PreDestroy 回收）
-- **可配置**：模型名/温度/System Prompt 角色段/视觉提示词/检索权重与行为参数/重排区间/解析并发/上下文参数 **数据库存储、保存即生效**（`c_ai_config`，存量升级自动补默认项）；prompt 调整无需重启；检索/重排/解析/问答 4 组共 18 项行为参数收口配置化（原硬编码移除）
-- **可观测性**：`/actuator/health` 健康检查、日志级别环境变量化、MyBatis 日志走 slf4j、检索调试 API、Swagger UI 接口文档（springdoc 自动生成，随代码实时更新）
+- **可配置**：模型名/温度/System Prompt 角色段/视觉提示词/检索权重与行为参数/重排区间/解析并发/上下文参数/关联扩散参数 **数据库存储、保存即生效**（`c_ai_config`，存量升级自动补默认项）；prompt 调整无需重启；检索/重排/解析/问答/关联扩散 5 组 30+ 项行为参数收口配置化（原硬编码移除）
+- **可观测性**：`/actuator/health` 健康检查、日志级别环境变量化、MyBatis 日志走 slf4j、检索调试 API、Swagger UI 接口文档（springdoc 自动生成，随代码实时更新）；**降级提示分级**（fail-loud：回答降级事件分 user 级默认展示/调试级由 `chat.showDebugDegradations` 开关控制，全部仍写 `[FAIL-LOUD]` 日志）
 - **部署**：multi-stage Dockerfile、docker-compose（含 redis-stack）、nginx 参考配置（`deploy/nginx.conf`，SPA fallback + SSE 关缓冲 + 图片缓存）
 
 ## 配置说明
@@ -242,6 +244,19 @@ ai-app:
     vector-weight: 0.6                     # 混合检索：向量权重（DB c_ai_config 可覆盖，设置页保存即生效）
     keyword-weight: 0.4                    # 混合检索：关键词权重
     title-bonus: 0.1                       # 混合检索：标题命中奖励
+    rewrite-timeout-ms: 5000               # 查询改写超时（DB 可覆盖：retrieval.rewriteTimeoutMs，设置页可调）
+    # ---- 知识块关联检索（DB c_ai_config 可覆盖，设置页"知识块关联检索"小节） ----
+    # ref-detect-enabled: true             # 解析时引用识别（改后需重解析）
+    # ref-detect-mention: true             # 无动词章节提及识别（如 4.1.2 所述/《数据字典》/XX章节，仅精确匹配）
+    # ref-expand-enabled: true             # 检索时关联扩散+父章节带出总开关（保存即生效）
+    # ref-expand-max-hits: 3               # 扩散块数量上限
+    # ref-expand-max-tokens: 800           # 扩散块 token 汇总上限
+    # ref-expand-include-incoming: false   # 是否扩散入边（引用本块的块，默认关）
+    # ref-expand-parent-enabled: true      # 命中子章节时带出父章节上下文
+    # ref-expand-parent-mode: summary      # 父章节内容模式 title_only/summary/full
+    # ref-expand-parent-max-levels: 2      # 父章节向上带出级数
+    # ref-expand-parent-summary-chars: 200 # summary 模式截取字符数
+    # ref-expand-fuzzy-name: true          # 章节名弱匹配（contains）开关
   context:                                 # 上下文与长度控制（设置页可调，保存即生效）
     model-windows: "qwen-plus=131072,qwen3=131072,deepseek=65536,..."  # 模型窗口映射（按 chat.model 子串匹配）
     default-window-tokens: 32768
@@ -299,6 +314,8 @@ spring:
 
 - **聊天模型**：当前使用 `qwen3.7-flash-2026-07-15`。该 MaaS 网关对部分模型（如 `qwen-max`）返回 DashScope 原生格式（`{"text":...}`），Spring AI 无法解析（表现为 0 token 无回答）；需使用返回标准 OpenAI 格式的模型（`qwen-plus`、`qwen3.7-flash` 已实测兼容）
 - **结构切分/分词升级需重解析**：jieba 分词（关键词路即时生效）与结构感知切分（docx）需对存量文档**重解析**才重建知识块；切分后 `c_ai_message.sources` 的 knowledgeId 失效，**评估集需重新生成**（检索评估页"从历史问答重新生成"）
+- **引用识别需重解析**：交叉引用/提及识别在解析时建立 `c_ai_knowledge_ref`，修改 `refDetectEnabled/refDetectMention` 后需重解析；引用扩散/父章节带出（`refExpand*`）保存即生效
+- **无编号标题文档的编号引用**：正文标题不带编号（WPS 自动编号只在目录）的文档，"见 4.1.2 节"这类编号引用匹配不到正文标题，走章节名匹配或丢弃（V1 边界）；标题文本自带编号（如"4.1.2 数值Api类型"）的文档编号引用可精确命中
 - **base-url 不含 `/v1`**：Spring AI 与 VisionService 都会自动补 `/v1`；视觉 base-url 以 `/v1` 结尾时也不会重复拼接
 - **Spring AI 版本**：1.1.8 起 starter 更名（`spring-ai-starter-model-openai` / `spring-ai-starter-vector-store-redis`），由 `spring-ai-bom` 统一管理；RedisVectorStore 配置属性 `index` → `index-name`，`initialize-schema` 默认 false 需显式开启。**升级 1.1 后旧向量数据建议重新上传/重解析文档**（序列化结构可能变化）
 - **图片访问路径**：后端返回 `/ai/images/...`（含 context-path），前端经 `/proxy` 代理时需去掉 `/ai` 前缀（vite 代理 target 已含 context-path），否则双重 `/ai` 404
