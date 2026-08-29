@@ -72,6 +72,7 @@ public class DocumentController {
     public ResultJson uploadBatch(
             @Parameter(description = "文档文件列表") @RequestParam("file") MultipartFile[] files,
             @Parameter(description = "批量分类（可选，应用到所有文件）") @RequestParam(value = "category", required = false) String category,
+            @Parameter(description = "批量描述（可选，应用到所有文件）") @RequestParam(value = "description", required = false) String description,
             HttpServletRequest httpRequest) {
         rateLimitService.checkRateLimit("upload", rateIdentity(httpRequest));
         List<Map<String, Object>> results = new ArrayList<>();
@@ -80,7 +81,7 @@ public class DocumentController {
             item.put("fileName", file.getOriginalFilename());
             try {
                 checkUploadSize(file);
-                var doc = documentService.upload(file, null, category);
+                var doc = documentService.upload(file, (description == null || description.isBlank()) ? null : description, category);
                 item.put("docId", doc.getId());
                 item.put("success", true);
                 item.put("msg", "已提交解析");
@@ -163,6 +164,32 @@ public class DocumentController {
         documentService.batchDelete(ids);
         log.info("[AUDIT] 批量删除文档 operator={} count={} ids={}", UserContext.resolve(httpRequest), ids.size(), ids);
         return ResultJson.ok("删除成功");
+    }
+
+    @Operation(summary = "批量重解析", description = "批量复用源文件重新解析+向量化，逐个返回结果（解析中的文档跳过并提示）")
+    @PostMapping("/batch/reparse")
+    public ResultJson batchReparse(
+            @Parameter(description = "{\"ids\": [\"docId1\", \"docId2\"]}")
+            @RequestBody Map<String, List<String>> body,
+            HttpServletRequest httpRequest) {
+        List<String> ids = body.getOrDefault("ids", List.of());
+        List<Map<String, Object>> results = new ArrayList<>();
+        for (String id : ids) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", id);
+            try {
+                documentService.reparse(id);
+                item.put("success", true);
+                item.put("msg", "已提交解析");
+            } catch (Exception e) {
+                item.put("success", false);
+                item.put("msg", e.getMessage());
+            }
+            results.add(item);
+        }
+        long ok = results.stream().filter(r -> Boolean.TRUE.equals(r.get("success"))).count();
+        log.info("[AUDIT] 批量重解析 operator={} total={} ok={}", UserContext.resolve(httpRequest), ids.size(), ok);
+        return ResultJson.ok(results, "已提交 " + ok + "/" + ids.size() + " 个重解析");
     }
 
     @Operation(summary = "批量启停用", description = "批量设置多个文档的启用/弃用状态")

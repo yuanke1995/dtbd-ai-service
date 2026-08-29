@@ -30,12 +30,13 @@ public class ExcelParser implements DocumentParser {
 
     @Override
     public boolean supports(String ext) {
-        return "xlsx".equalsIgnoreCase(ext) || "xls".equalsIgnoreCase(ext);
+        // 仅 xlsx：XSSFWorkbook 读不了旧版 .xls（声明支持会导致必然解析失败）
+        return "xlsx".equalsIgnoreCase(ext);
     }
 
     @Override
     public java.util.Set<String> supportedExts() {
-        return java.util.Set.of("xlsx", "xls");
+        return java.util.Set.of("xlsx");
     }
 
     @Override

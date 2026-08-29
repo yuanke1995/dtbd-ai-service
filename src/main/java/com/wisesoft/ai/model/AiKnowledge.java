@@ -22,6 +22,9 @@ public class AiKnowledge {
     @TableId(type = IdType.ASSIGN_UUID)
     private String id;
 
+    /** 启停用: 0=生效, 1=停用（停用块不参与召回，用于块级诊断屏蔽坏块） */
+    private Integer status;
+
     /** 所属文档ID */
     private String docId;
 

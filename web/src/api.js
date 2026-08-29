@@ -182,12 +182,25 @@ export function uploadDocument(file, description, onProgress) {
   return upload('/document/upload', fd, onProgress)
 }
 
-/** 批量上传（onProgress 接收 0-100 百分比） */
-export function uploadDocumentsBatch(files, onProgress) {
+/** 批量上传（onProgress 接收 0-100 百分比；description 可选，应用到所有文件） */
+export function uploadDocumentsBatch(files, onProgress, description) {
   const fd = new FormData()
   files.forEach(f => fd.append('file', f))
+  if (description) fd.append('description', description)
   return upload('/document/upload/batch', fd, onProgress)
 }
+
+/** 批量重解析 */
+export const batchReparseDocuments = ids =>
+  request('/document/batch/reparse', { method: 'POST', body: JSON.stringify({ ids }) })
+
+/** 知识块级启停用（status: 0=生效 1=停用，停用后不参与召回） */
+export const updateKnowledgeStatus = (id, status) =>
+  request(`/knowledge/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) })
+
+/** 跨文档全局搜索知识块（含已停用，管理端排查用） */
+export const searchKnowledge = keyword =>
+  request('/knowledge/search?keyword=' + encodeURIComponent(keyword))
 
 /** 文档启停用：status 0 生效 / 1 弃用 */
 export const updateDocumentStatus = (id, status) =>

@@ -240,6 +240,11 @@ public class DocumentService {
      * 单知识块向量化并入库（供手动新增知识块复用；embedding 失败降级返回 false，不阻断入库）
      * 成功后回写 vector_id = knowledgeId（与文档解析链路一致）
      */
+    /** 供外部（知识块状态切换等）触发答案缓存整体失效 */
+    public void invalidateAnswerCache() {
+        answerCacheService.clearAll();
+    }
+
     public boolean embedAndStore(AiKnowledge k, String content) {
         try {
             answerCacheService.clearAll();

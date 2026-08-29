@@ -1,0 +1,158 @@
+package com.wisesoft.ai.parser;
+
+import com.wisesoft.ai.config.AiAppProperties;
+import com.wisesoft.ai.model.Chunk;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * 纯文本类解析器（txt / md / markdown / csv）
+ * <p>
+ * - md：按 1~3 级 Markdown 标题行开新块（跟踪 ``` 围栏状态，代码块内 # 不切），标题作块 title；图片语法 ![](...) 跳过
+ * - txt：段落聚合，按 chunk.maxSize/overlap 切分
+ * - csv：首行作表头说明，行转 "a | b | c" 后按行聚合切分
+ * 均不提取图片（纯文本类无内嵌资源）
+ *
+ * @author yuanke
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class TextParser implements DocumentParser {
+
+    private final AiAppProperties properties;
+
+    @Override
+    public boolean supports(String ext) {
+        return "txt".equalsIgnoreCase(ext) || "md".equalsIgnoreCase(ext) || "markdown".equalsIgnoreCase(ext)
+                || "csv".equalsIgnoreCase(ext);
+    }
+
+    @Override
+    public Set<String> supportedExts() {
+        return Set.of("txt", "md", "markdown", "csv");
+    }
+
+    @Override
+    public List<Chunk> parse(byte[] bytes, String fileName, String docId) {
+        String content = new String(bytes, StandardCharsets.UTF_8);
+        String ext = extOf(fileName);
+        List<Chunk> chunks;
+        if ("csv".equalsIgnoreCase(ext)) {
+            chunks = parseCsv(content);
+        } else if ("md".equalsIgnoreCase(ext) || "markdown".equalsIgnoreCase(ext)) {
+            chunks = parseMarkdown(content);
+        } else {
+            chunks = parsePlain(content);
+        }
+        log.info("[TextParser] {} 解析完成: {} chunks", fileName, chunks.size());
+        return chunks;
+    }
+
+    /** md：按 1~3 级标题行分块（``` 围栏内的 # 不算标题） */
+    private List<Chunk> parseMarkdown(String content) {
+        List<Chunk> chunks = new ArrayList<>();
+        StringBuilder buf = new StringBuilder();
+        String title = null;
+        boolean inFence = false;
+
+        for (String line : content.split("\n", -1)) {
+            String t = line.trim();
+            if (t.startsWith("```")) inFence = !inFence;
+
+            boolean heading = !inFence && t.matches("^#{1,3}\\s+.+");
+            if (heading) {
+                flush(chunks, buf, title);
+                title = t.replaceAll("^#+\\s+", "");
+                continue; // 标题行本身不进正文（作为块标题存在）
+            }
+            buf.append(line).append('\n');
+            // 超长兜底：无标题的超长文档在段落边界硬切
+            if (buf.length() >= properties.getChunk().getMaxSize()) {
+                flush(chunks, buf, title);
+            }
+        }
+        flush(chunks, buf, title);
+        return chunks;
+    }
+
+    /** txt：段落聚合切分 */
+    private List<Chunk> parsePlain(String content) {
+        List<Chunk> chunks = new ArrayList<>();
+        StringBuilder buf = new StringBuilder();
+        for (String para : content.split("\\n\\s*\\n")) {
+            String t = para.trim();
+            if (t.isEmpty()) continue;
+            if (buf.length() + t.length() > properties.getChunk().getMaxSize() && buf.length() > 0) {
+                flush(chunks, buf, null);
+            }
+            buf.append(t).append('\n');
+        }
+        flush(chunks, buf, null);
+        return chunks;
+    }
+
+    /** csv：首行作表头，行转 "a | b | c" 后按行聚合 */
+    private List<Chunk> parseCsv(String content) {
+        List<Chunk> chunks = new ArrayList<>();
+        StringBuilder buf = new StringBuilder();
+        String header = null;
+        String[] lines = content.split("\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            String row = lines[i].trim();
+            if (row.isEmpty()) continue;
+            String cells = String.join(" | ", row.split(","));
+            if (i == 0) {
+                header = "表头: " + cells;
+                buf.append(header).append('\n');
+                continue;
+            }
+            buf.append(cells).append('\n');
+            if (buf.length() >= properties.getChunk().getMaxSize()) {
+                flush(chunks, buf, header);
+                if (header != null) buf.append(header).append('\n'); // 重复表头保语义
+            }
+        }
+        flush(chunks, buf, header);
+        return chunks;
+    }
+
+    /** 聚合缓冲 → Chunk（带 overlap 尾巴进向量化语义由增量链路处理，此处纯文本简单切） */
+    private void flush(List<Chunk> chunks, StringBuilder buf, String title) {
+        String body = buf.toString().trim();
+        buf.setLength(0);
+        if (body.isEmpty()) return;
+        int maxSize = properties.getChunk().getMaxSize();
+        if (body.length() <= maxSize) {
+            chunks.add(new Chunk(title == null ? "" : title, body, List.of()));
+            return;
+        }
+        // 硬切（按行边界优先）
+        int start = 0;
+        int seq = 1;
+        while (start < body.length()) {
+            int end = Math.min(start + maxSize, body.length());
+            if (end < body.length()) {
+                int nl = body.lastIndexOf('\n', end);
+                if (nl > start) end = nl;
+            }
+            String part = body.substring(start, end).trim();
+            if (!part.isEmpty()) {
+                chunks.add(new Chunk(title == null ? "" : title + (seq > 1 ? " (" + seq + ")" : ""), part, List.of()));
+                seq++;
+            }
+            start = end;
+        }
+    }
+
+    private String extOf(String fileName) {
+        int idx = fileName.lastIndexOf('.');
+        return idx < 0 ? "" : fileName.substring(idx + 1);
+    }
+}

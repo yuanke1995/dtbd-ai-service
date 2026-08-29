@@ -1,9 +1,15 @@
 <template>
-  <a-card title="文档管理">
+  <div class="doc-page" @dragover.prevent @dragenter.prevent="dragDepth++" @dragleave.prevent="dragDepth = Math.max(0, dragDepth - 1)" @drop.prevent="onDrop">
+    <!-- 拖拽遮罩：拖入文件时全页提示 -->
+    <div v-if="dragDepth > 0" class="drag-mask">
+      <div class="drag-mask-tip"><upload-outlined style="font-size:40px" /><div>松开鼠标上传到知识库</div></div>
+    </div>
+    <a-card title="文档管理">
     <!-- 工具栏：右侧上传操作 -->
     <div class="toolbar">
       <div class="toolbar-upload">
         <a-input v-model:value="desc" placeholder="文档描述（可选）" style="width:170px" allow-clear />
+        <a-button @click="openGlobalSearch"><search-outlined /> 全局搜索</a-button>
         <a-upload :before-upload="beforeUpload" :show-upload-list="false" :accept="'.' + uploadCfg.allowedExts.join(',.')" multiple :disabled="uploading">
           <a-button type="primary" :loading="uploading">
             <upload-outlined /> {{ uploading ? '上传中...' : '上传文档' }}
@@ -20,6 +26,9 @@
       <a-button size="small" @click="batchStatus(1)">批量弃用</a-button>
       <a-popconfirm title="确定删除选中的文档？知识库将同步移除" @confirm="batchDelete">
         <a-button size="small" danger>批量删除</a-button>
+      </a-popconfirm>
+      <a-popconfirm title="对选中文档重新解析+向量化？" @confirm="batchReparse">
+        <a-button size="small">批量重解析</a-button>
       </a-popconfirm>
       <a-button size="small" type="text" @click="selectedKeys = []">取消选择</a-button>
     </div>
@@ -66,12 +75,21 @@
 
     <!-- 知识块预览：列表（点击行查看详情；编辑/删除操作） -->
     <a-modal v-model:open="kbVisible" :title="'知识块预览 · ' + kbDocName" :footer="null" width="820">
+      <div style="margin-bottom:10px">
+        <a-input-search v-model:value="kbSearch" placeholder="按标题/内容过滤知识块" allow-clear />
+      </div>
       <a-spin :spinning="kbLoading">
-        <a-table :data-source="kbList" size="small" row-key="id" :pagination="{ pageSize: 20 }"
+        <a-table :data-source="kbFilteredList" size="small" row-key="id" :pagination="{ pageSize: 20 }"
                  :locale="{ emptyText: '暂无知识块' }"
                  :custom-row="r => ({ onClick: () => openKbDetail(r) })"
                  style="cursor:pointer">
           <a-table-column title="#" dataIndex="chunkIndex" key="chunkIndex" width="50" />
+          <a-table-column title="状态" key="status" width="70">
+            <template #default="{ record }">
+              <a-tag v-if="(record.status ?? 0) === 0" color="green">生效</a-tag>
+              <a-tag v-else color="orange">已停用</a-tag>
+            </template>
+          </a-table-column>
           <a-table-column title="标题" key="title" ellipsis>
             <!-- M11 fail-loud：vectorId 为空 = 未向量化（仅关键词可召回），角标提示 -->
             <template #default="{ record }">
@@ -85,6 +103,8 @@
           <a-table-column title="操作" key="action" width="120">
             <template #default="{ record }">
               <a-button type="link" size="small" @click.stop="openKbEdit(record)">编辑</a-button>
+              <a-button v-if="(record.status ?? 0) === 0" type="link" size="small" @click.stop="toggleKbStatus(record, 1)">停用</a-button>
+              <a-button v-else type="link" size="small" @click.stop="toggleKbStatus(record, 0)">启用</a-button>
               <a-popconfirm title="确定删除该知识块？向量将同步移除" ok-text="删除" cancel-text="取消"
                             @confirm.stop="delKnowledge(record.id)">
                 <a-button type="link" danger size="small" @click.stop>删除</a-button>
@@ -93,6 +113,29 @@
           </a-table-column>
         </a-table>
       </a-spin>
+    </a-modal>
+
+    <!-- 跨文档全局搜索知识块 -->
+    <a-modal v-model:open="gSearchVisible" title="知识块全局搜索" :footer="null" width="820">
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <a-input-search v-model:value="gSearchKw" placeholder="输入关键词，跨全部文档搜索知识块（含已停用）"
+                        enter-button="搜索" :loading="gSearchLoading" @search="doGlobalSearch" />
+      </div>
+      <a-table :data-source="gResults" size="small" row-key="id"
+               :pagination="gResults.length > 20 ? { pageSize: 20 } : false"
+               :locale="{ emptyText: '输入关键词后搜索' }"
+               :custom-row="r => ({ onClick: () => openGlobalDetail(r) })" style="cursor:pointer">
+        <a-table-column title="文档" dataIndex="docName" key="docName" width="160" ellipsis />
+        <a-table-column title="标题" key="title" width="150" ellipsis>
+          <template #default="{ record }">
+            <span>{{ record.title || '（无标题）' }}</span>
+            <a-tag v-if="(record.status ?? 0) === 1" color="orange" style="margin-left:4px;font-size:11px">已停用</a-tag>
+          </template>
+        </a-table-column>
+        <a-table-column title="内容摘要" key="snippet" ellipsis>
+          <template #default="{ record }">{{ record.snippet }}</template>
+        </a-table-column>
+      </a-table>
     </a-modal>
 
     <!-- 知识块编辑弹窗（title/content；图片保留；编辑/预览切换） -->
@@ -143,16 +186,17 @@
       <div class="md" style="max-height:60vh;overflow-y:auto;font-size:14px;line-height:1.7;color:#333;padding-right:6px" v-html="kbDetailHtml"></div>
     </a-modal>
   </a-card>
+  </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { UploadOutlined, DeleteOutlined } from '@ant-design/icons-vue'
+import { UploadOutlined, DeleteOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocument, deleteDocument,
          batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats, listKnowledgeByDoc, getKnowledgeDetail,
          updateKnowledge, deleteKnowledge, listDocumentVersions, rollbackDocument,
-         getRuntimeConfig } from '../api'
+         getRuntimeConfig, batchReparseDocuments, updateKnowledgeStatus, searchKnowledge } from '../api'
 import { renderMd } from '../utils/markdown'
 
 // 知识块预览状态
@@ -303,11 +347,62 @@ const uploadPercent = ref(0)
 const deletingId = ref('')
 const reparsingId = ref('')
 const desc = ref('')
+// 拖拽上传：dragenter/dragleave 嵌套计数，>0 显示遮罩
+const dragDepth = ref(0)
+// 知识块预览搜索（前端过滤）
+const kbSearch = ref('')
+const kbFilteredList = computed(() => {
+  const kw = kbSearch.value.trim().toLowerCase()
+  if (!kw) return kbList.value
+  return kbList.value.filter(k =>
+    (k.title || '').toLowerCase().includes(kw) || (k.content || '').toLowerCase().includes(kw))
+})
+
+// 知识块级启停用：切换后刷新预览列表（状态列即时反映）
+const toggleKbStatus = async (record, status) => {
+  try {
+    const r = await updateKnowledgeStatus(record.id, status)
+    if (r.success) {
+      message.success(status === 1 ? '已停用，该知识块不再参与召回' : '已启用，恢复召回')
+      kbSearch.value = ''
+      const res = await listKnowledgeByDoc(record.docId)
+      if (res.success) kbList.value = res.data || []
+    } else message.error(r.msg || '操作失败')
+  } catch (e) { message.error(e.message || '操作失败') }
+}
+
+// 跨文档全局搜索
+const gSearchVisible = ref(false)
+const gSearchKw = ref('')
+const gSearchLoading = ref(false)
+const gResults = ref([])
+const openGlobalSearch = () => { gSearchVisible.value = true; gSearchKw.value = ''; gResults.value = [] }
+const doGlobalSearch = async () => {
+  const kw = gSearchKw.value.trim()
+  if (!kw) { message.warning('请输入关键词'); return }
+  gSearchLoading.value = true
+  try {
+    const r = await searchKnowledge(kw)
+    if (r.success) gResults.value = r.data || []
+    else message.error(r.msg || '搜索失败')
+  } catch (e) { message.error(e.message || '搜索失败') }
+  finally { gSearchLoading.value = false }
+}
+// 点结果行 → 打开既有知识块详情弹窗（复用渲染管线）
+const openGlobalDetail = async row => {
+  kbDetail.value = null
+  kbDetailVisible.value = true
+  try {
+    const r = await getKnowledgeDetail(row.id)
+    if (r.success) kbDetail.value = r.data
+    else message.error(r.msg || '加载详情失败')
+  } catch (e) { message.error(e.message || '加载详情失败') }
+}
 const selectedKeys = ref([])
 let pollTimer = null
 
-onMounted(() => { fetchList(); loadUploadCfg() })
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
+onMounted(() => { fetchList(); loadUploadCfg(); window.addEventListener('paste', onPaste) })
+onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); window.removeEventListener('paste', onPaste) })
 
 async function fetchList() {
   loading.value = true
@@ -354,7 +449,7 @@ async function beforeUpload(fileList) {
   uploading.value = true
   uploadPercent.value = 0
   try {
-    const r = await uploadDocumentsBatch(files, pct => { uploadPercent.value = pct })
+    const r = await uploadDocumentsBatch(files, pct => { uploadPercent.value = pct }, desc.value?.trim() || undefined)
     if (r.success) {
       const failed = (r.data || []).filter(x => !x.success)
       if (failed.length) {
@@ -370,6 +465,39 @@ async function beforeUpload(fileList) {
   } catch (e) { message.error(e.message || '上传失败') }
   finally { uploading.value = false }
   return false
+}
+
+// 拖拽上传：drop 落下的文件走与手动选择相同的校验+上传路径
+const onDrop = e => {
+  dragDepth.value = 0
+  const files = Array.from(e.dataTransfer?.files || [])
+  if (!files.length) return
+  // 先过滤掉不支持的类型，给出明确提示
+  const ok = files.filter(f => uploadCfg.value.allowedExts.includes((f.name.split('.').pop() || '').toLowerCase()))
+  const skipped = files.length - ok.length
+  if (skipped > 0) message.warning(`跳过 ${skipped} 个不支持的文件`)
+  if (ok.length) beforeUpload(ok)
+}
+// 粘贴上传：仅接受文档类型文件（截图/图片在文档库无意义，忽略）
+const onPaste = e => {
+  const files = Array.from(e.clipboardData?.files || [])
+    .filter(f => uploadCfg.value.allowedExts.includes((f.name.split('.').pop() || '').toLowerCase()))
+  if (files.length) beforeUpload(files)
+}
+
+// 批量重解析：逐个提交，返回明细提示
+const batchReparse = async () => {
+  try {
+    const r = await batchReparseDocuments(selectedKeys.value)
+    if (r.success) {
+      const failed = (r.data || []).filter(x => !x.success)
+      if (failed.length) message.warning(`已提交 ${r.data.length - failed.length} 个，${failed.length} 个失败: ${failed[0].msg || ''}`)
+      else message.success(`已提交 ${r.data.length} 个重解析`)
+      selectedKeys.value = []
+      fetchList()
+      startPolling()
+    } else message.error(r.msg || '批量重解析失败')
+  } catch (e) { message.error(e.message || '批量重解析失败') }
 }
 
 async function toggleStatus(record, status) {
@@ -458,5 +586,17 @@ const fmtTime = t => {
   padding: 8px 12px; margin-bottom: 10px;
   background: #e6f4ff; border: 1px solid #91caff; border-radius: 6px;
   font-size: 13px; color: #0958d9;
+}
+/* 拖拽上传遮罩：全页半透明提示 */
+.drag-mask {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(22,119,255,.08); backdrop-filter: blur(1px);
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;   /* 不拦截拖拽事件，保证 drop 落到容器 */
+}
+.drag-mask-tip {
+  text-align: center; color: #1677ff; font-size: 16px;
+  background: #fff; border: 2px dashed #1677ff; border-radius: 12px;
+  padding: 24px 40px; display: flex; flex-direction: column; gap: 8px; align-items: center;
 }
 </style>

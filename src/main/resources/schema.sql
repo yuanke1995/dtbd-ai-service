@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS `c_ai_knowledge` (
     `content`      TEXT         DEFAULT NULL COMMENT '片段正文（净内容：不含章节路径前缀与分块重叠）',
     `images`       VARCHAR(2000) DEFAULT NULL COMMENT '关联图片URL(JSON数组)',
     `chunk_index`  INT          DEFAULT 0 COMMENT '片段序号',
+    `status`       INT          DEFAULT 0 COMMENT '启停用: 0=生效, 1=停用（停用块不参与召回，块级诊断用）',
     `vector_id`    VARCHAR(50)  DEFAULT NULL COMMENT 'Redis向量库中的文档ID',
     `content_hash` VARCHAR(64)  DEFAULT NULL COMMENT '内容指纹(SHA-256: title+title_path+净content+images)，重解析增量对比用',
     `title_path`   VARCHAR(500) DEFAULT NULL COMMENT '章节路径(如 一级/二级/三级)，检索与向量化时拼装上下文，正文不含前缀',

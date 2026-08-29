@@ -118,6 +118,10 @@ public class HybridRetrievalService {
                 log.debug("[RAG] 跳过非生效文档命中: docId={} kid={}", docId, kid);
                 continue;
             }
+            if (k != null && k.getStatus() != null && k.getStatus() == 1) {
+                log.debug("[RAG] 跳过已停用知识块: kid={}", kid);
+                continue;
+            }
             double vecScore = parseScore(doc.getScore());
             double vecNorm = Math.max(0, (vecScore - vt) / (1.0 - vt));
             // L8（设计保留，不扰用户）：单路为空时分数为绝对加权和——向量单飞=vectorWeight×vecNorm，
@@ -305,6 +309,7 @@ public class HybridRetrievalService {
             if (result.size() >= limit) break;
             AiKnowledge k = byId.get(e.getKey());
             if (k == null) continue; // 索引有、库已删（漂移）：跳过，reindex 可修正
+            if (k.getStatus() != null && k.getStatus() == 1) continue; // 块级停用
             String docId = k.getDocId() == null ? null : String.valueOf(k.getDocId());
             if (docId != null && !docId.isBlank() && blockedDocIds.contains(docId)) continue;
             k.setKwScore(e.getValue());   // Meilisearch _rankingScore 已是 0~1 绝对分，直接进融合
@@ -342,7 +347,9 @@ public class HybridRetrievalService {
                 // WHERE doc_id IN (生效文档) AND ((content LIKE ? OR title LIKE ?) OR ...)
                 QueryWrapper<AiKnowledge> wrapper = new QueryWrapper<AiKnowledge>()
                         .and(w -> w.inSql("doc_id", "SELECT id FROM c_ai_document WHERE status=0 AND deleted=0")
-                                .or().isNull("doc_id"));
+                                .or().isNull("doc_id"))
+                        // 块级停用过滤（status 默认 0；NULL 兼容存量行）
+                        .and(w -> w.eq("status", 0).or().isNull("status"));
                 wrapper.and(w -> {
                     for (int i = 0; i < terms.size(); i++) {
                         if (i > 0) w.or();

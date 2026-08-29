@@ -299,7 +299,7 @@ public class KnowledgeRefService {
             for (AiKnowledgeRef r : outRefs) {
                 if (seen.add(r.getToKnowledgeId())) {
                     AiKnowledge b = knowledgeMapper.selectById(r.getToKnowledgeId());
-                    if (b != null) {
+                    if (b != null && !(b.getStatus() != null && b.getStatus() == 1)) {
                         extra.add(toHit(b, "REF_OUT"));
                         origins.put(b.getId(), "REF_OUT");
                     }
@@ -311,7 +311,7 @@ public class KnowledgeRefService {
                 for (AiKnowledgeRef r : inRefs) {
                     if (seen.add(r.getFromKnowledgeId())) {
                         AiKnowledge c = knowledgeMapper.selectById(r.getFromKnowledgeId());
-                        if (c != null) {
+                        if (c != null && !(c.getStatus() != null && c.getStatus() == 1)) {
                             extra.add(toHit(c, "REF_IN"));
                             origins.put(c.getId(), "REF_IN");
                         }
@@ -329,6 +329,7 @@ public class KnowledgeRefService {
                             .in(AiKnowledge::getDocId, docIds));
                     for (HybridRetrievalService.Hit h : hits) {
                         for (AiKnowledge p : findParentBlocks(h, all)) {
+                            if (p.getStatus() != null && p.getStatus() == 1) continue; // 块级停用
                             if (seen.add(p.getId())) {
                                 extra.add(toHit(p, "PARENT"));
                                 origins.put(p.getId(), "PARENT");
