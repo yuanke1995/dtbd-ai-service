@@ -482,10 +482,12 @@ const close = () => {
   dragState.value = null
 }
 
-// 灯箱：滚轮缩放（25% ~ 800%，等比步进 ±15%：放大缩小手感对称，
-// 避免绝对步进（±0.15）在小倍率下占比过大导致"缩小飞快、放大很慢"）
+// 灯箱：滚轮缩放（25% ~ 800%）。按滚轮幅度平滑缩放：每 100 单位滚轮量 = 8% 倍率变化（等比，
+// 正反手感对称）；单次事件 clamp ±30%，避免触控板惯性/快速滚动导致跳变过大
 const onWheel = e => {
-  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
+  let factor = Math.pow(1.08, -e.deltaY / 100)
+  if (factor > 1.3) factor = 1.3
+  if (factor < 1 / 1.3) factor = 1 / 1.3
   zoom.value = Math.min(8, Math.max(0.25, zoom.value * factor))
 }
 
