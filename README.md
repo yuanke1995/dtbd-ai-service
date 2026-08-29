@@ -101,6 +101,7 @@ docker compose up -d
 
 后端监听 `http://localhost:8090/ai`（context-path `/ai`），API 前缀 `/api/ai/*`，
 健康检查：`GET http://localhost:8090/ai/actuator/health`。
+接口文档（Swagger UI）：`http://localhost:8090/ai/swagger-ui/index.html`（springdoc 自动生成；Try-it-out 在线调试需在请求头携带 `X-Trusted-Token`）。
 
 ### 4. 启动前端
 
@@ -134,9 +135,11 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 - **检索调试**：`POST /api/ai/debug/retrieval` 分步展示检索词元（分词结果）/关键词/向量/合并/重排/最终结果与命中率，前端问答页"检索调试"按钮可视化排查召回问题
 - **检索评估**：`POST /api/ai/eval/generate` 从历史问答引用（`c_ai_message.sources`）回放生成评估集（问题→期望知识块，失效期望块自动剔除并计数）→ `POST /api/ai/eval/run` 批量参数组对比 **recall@k / MRR / 命中率** + 弃用文档召回断言；参数覆盖走线程局部 override，**不写 DB 不污染生产配置**（multi 模式为确定性拆分近似，衡量多路合并机制而非 LLM 深度思考质量）
 - **会话**：MySQL + Redis 双层存储，历史恢复（含图片/引用来源/messageId）、删除/清空、**搜索/置顶/收藏**、侧边栏拖拽伸缩（宽度记忆）
-- **前端体验**：markdown-it + DOMPurify + highlight.js 安全渲染（代码块复制按钮、**长行自动折行 + 限高滚动**）、重新生成/编辑重问（编辑图标悬浮气泡下方）、图片灯箱、问答 👍👎 反馈、断连自动重试内联提示、上传进度条
+- **前端体验**：markdown-it + DOMPurify + highlight.js 安全渲染（代码块复制按钮、**长行自动折行 + 限高滚动**）、重新生成/编辑重问（编辑图标悬浮气泡下方）、图片灯箱、问答 👍👎 反馈、断连自动重试内联提示、全局错误边界（渲染异常友好提示防白屏、401 统一提示）、图片加载失败占位图、上传进度条
 
 ## API 一览
+
+> 完整接口文档见 **Swagger UI**（启动后访问 `/ai/swagger-ui/index.html`，随代码自动更新；接口按"智能问答/文档管理/知识库/反馈与看板/系统配置/检索调试/检索评估/关键词索引/图片描述缓存"分组，Try-it-out 需携带 `X-Trusted-Token`）。下表为核心端点速查：
 
 | 端点 | 说明 |
 |------|------|
@@ -223,7 +226,7 @@ curl http://localhost:8090/api/ai/search-index/stats             # indexedCount 
 - **安全**：关键密钥零默认值（`DB_PASSWORD`/`AI_TRUSTED_TOKEN` 缺失 fail-fast，模型密钥允许空默认仅功能不可用）、token 恒定时间比较、图片访问 HMAC 签名 URL（`AI_IMAGES_AUTH_ENABLED=true`）、统一异常+参数校验（`@Valid`）、错误信息不泄露内部细节
 - **可靠性**：上传失败自动补偿清理（删向量+MySQL+图片）、脏解析记录清理、解析异步化（不阻塞上传）、**解析中删除文档立即中断**（内存标志 + 线程 interrupt + 阶段检查点，清理本次产物）、SSE 异步订阅支持停止生成、查询改写专用线程池（超时隔离 + daemon + PreDestroy 回收）
 - **可配置**：模型名/温度/System Prompt 角色段/视觉提示词/检索权重与行为参数/重排区间/解析并发/上下文参数 **数据库存储、保存即生效**（`c_ai_config`，存量升级自动补默认项）；prompt 调整无需重启；检索/重排/解析/问答 4 组共 18 项行为参数收口配置化（原硬编码移除）
-- **可观测性**：`/actuator/health` 健康检查、日志级别环境变量化、MyBatis 日志走 slf4j、检索调试 API
+- **可观测性**：`/actuator/health` 健康检查、日志级别环境变量化、MyBatis 日志走 slf4j、检索调试 API、Swagger UI 接口文档（springdoc 自动生成，随代码实时更新）
 - **部署**：multi-stage Dockerfile、docker-compose（含 redis-stack）、nginx 参考配置（`deploy/nginx.conf`，SPA fallback + SSE 关缓冲 + 图片缓存）
 
 ## 配置说明
