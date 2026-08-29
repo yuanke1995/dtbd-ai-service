@@ -384,8 +384,15 @@ const formatTime = (t) => {
   margin-top: 2px;
   display: flex;
   gap: 8px;
+  align-items: center;
+  /* 侧边栏拖窄时禁止逐字折行（"3 条消息"会竖排）：时间保持完整，条数超宽时省略号 */
+  white-space: nowrap;
+  overflow: hidden;
 }
+.session-meta > span:first-child { flex-shrink: 0; }
 .msg-count {
   color: #bbb;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

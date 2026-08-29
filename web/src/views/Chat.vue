@@ -40,6 +40,10 @@
             </div>
           </div>
           <div v-for="(m,i) in messages" :key="i" class="row" :class="m.role">
+            <!-- 多选删除模式：勾选框（勾选按轮联动，勾回答自动带上同组问题） -->
+            <a-checkbox v-if="selectMode" class="msg-select-box"
+                        :checked="selected.includes(roundStart(i))"
+                        @click.stop @change="toggleSelect(i)" />
             <a-avatar :style="{ background: m.role==='user'?'#87d068':'#1677ff', flexShrink:0 }">{{ m.role==='user'?'我':'AI' }}</a-avatar>
             <div class="msg-block" :class="m.role">
               <div class="bubble" :class="m.role">
@@ -90,37 +94,41 @@
                          style="cursor:pointer;margin:2px" @click="ask(q)">{{ q }}</a-tag>
                 </div>
               </div>
-              <!-- ===== 操作区（气泡外部：重试按钮 + 操作按钮行 + 重试提示 + 编辑图标） ===== -->
+              <!-- ===== 操作区（气泡外部，豆包样式：图标一行排开 + 不常用收进「更多」 + 行尾时间） ===== -->
               <!-- 流式中断/失败：重试入口（保留已生成内容，重新生成完整回答） -->
               <div v-if="m.role === 'ai' && m.failed && !m.loading" class="retry-row">
                 <a-button size="small" type="primary" ghost :disabled="loading" @click="regenerate(i)">
                   <sync-outlined /> 重试
                 </a-button>
               </div>
-              <!-- 回答操作：检索调试 + 重新生成 + 复制/导出 + 反馈 -->
-              <div v-if="m.role === 'ai' && m.messageId" class="fb-row">
-                <a-button size="small" type="text" :disabled="loading"
-                          @click="openDebug(i)">
-                  <bug-outlined /> 检索调试
-                </a-button>
-                <a-button size="small" type="text" :disabled="loading"
-                          @click="regenerate(i)">
-                  <reload-outlined /> 重新生成
-                </a-button>
-                <a-button size="small" type="text" @click="copyAnswer(i)">
-                  <copy-outlined /> 复制
-                </a-button>
-                <a-button size="small" type="text" @click="exportAnswer(i)">
-                  <download-outlined /> 导出
-                </a-button>
-                <a-button size="small" type="text"
-                          :class="{ 'fb-active': m.fb === 1 }" @click="openFeedback(m, 1)">
-                  <like-outlined /> 有帮助
-                </a-button>
-                <a-button size="small" type="text"
-                          :class="{ 'fb-active': m.fb === 0 }" @click="openFeedback(m, 0)">
-                  <dislike-outlined /> 没帮助
-                </a-button>
+              <!-- 回答操作（纯图标 + tooltip）：复制 / 有帮助 / 没帮助 / 重新生成 / 更多（检索调试、导出）+ 行尾时间 -->
+              <div v-if="!selectMode && m.role === 'ai' && !m.loading && (m.messageId || m.time)" class="fb-row">
+                <template v-if="m.messageId">
+                  <a-tooltip title="复制" placement="top">
+                    <button class="act-icon-btn" @click="copyAnswer(i)"><copy-outlined /></button>
+                  </a-tooltip>
+                  <a-tooltip title="有帮助" placement="top">
+                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 1 }" @click="openFeedback(m, 1)"><like-outlined /></button>
+                  </a-tooltip>
+                  <a-tooltip title="没帮助" placement="top">
+                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 0 }" @click="openFeedback(m, 0)"><dislike-outlined /></button>
+                  </a-tooltip>
+                  <a-tooltip title="重新生成" placement="top">
+                    <button class="act-icon-btn" :disabled="loading" @click="regenerate(i)"><reload-outlined /></button>
+                  </a-tooltip>
+                  <a-dropdown :trigger="['hover']">
+                    <button class="act-icon-btn" title="更多"><more-outlined /></button>
+                    <template #overlay>
+                      <a-menu @click="({ key }) => onMoreAction(key, i)">
+                        <a-menu-item v-if="debugEntryVisible" key="debug"><bug-outlined style="margin-right:8px" />检索调试</a-menu-item>
+                        <a-menu-item key="export"><download-outlined style="margin-right:8px" />导出 Markdown</a-menu-item>
+                        <a-menu-divider />
+                        <a-menu-item key="deleteRound" style="color:#cf1322"><delete-outlined style="margin-right:8px" />删除对话</a-menu-item>
+                      </a-menu>
+                    </template>
+                  </a-dropdown>
+                </template>
+                <span v-if="m.time" class="msg-time-inline">{{ fmtMsgTime(m.time) }}</span>
               </div>
               <!-- 断连自动重试中：内联提示（位于 AI 回答气泡整体下方，替代全局弹窗） -->
               <div v-if="m.retrying" class="retry-tip">
@@ -128,10 +136,14 @@
                 <span>连接中断，正在自动重试…</span>
               </div>
               <!-- 用户消息编辑：悬浮在问题气泡整体下方（hover 显示） -->
-              <div v-if="m.role === 'user'" class="msg-edit-row">
+              <div v-if="!selectMode && m.role === 'user'" class="msg-edit-row">
                 <a-tooltip title="编辑此问题重新发送" placement="top">
-                  <edit-outlined class="msg-edit-btn" @click="editMessage(i)" />
+                  <edit-outlined class="act-icon-btn" @click="editMessage(i)" />
                 </a-tooltip>
+                <a-tooltip title="删除本轮对话（含回答）" placement="top">
+                  <delete-outlined class="act-icon-btn act-danger" @click="enterSelectMode(i)" />
+                </a-tooltip>
+                <span v-if="m.time" class="msg-time-inline">{{ fmtMsgTime(m.time) }}</span>
               </div>
             </div>
           </div>
@@ -212,7 +224,15 @@
           <span class="lightbox-tip">滚轮缩放 · 拖动平移 · 双击重置 · ESC 关闭<span v-if="previewList.length > 1"> · ← → 切换</span></span>
         </div>
 
-        <div class="input">
+        <!-- 多选删除底栏（替换输入框区，内容居中） -->
+        <div v-if="selectMode" class="select-bar">
+          <a-button size="small" @click="exitSelectMode">取消</a-button>
+          <span class="select-count">已选 {{ selected.length }} 轮对话</span>
+          <a-button size="small" danger type="primary" :disabled="!selected.length" :loading="deletingRounds" @click="deleteSelected">
+            删除
+          </a-button>
+        </div>
+        <div v-if="!selectMode" class="input">
           <!-- 深度思考图标按钮：输入框左侧（点击切换，开启高亮；localStorage 记忆） -->
           <div class="input-side">
             <a-tooltip :title="deepThinkOn ? '深度思考：已开启（点击关闭）' : '深度思考：已关闭（点击开启，AI 先展示思维链再回答）'">
@@ -231,7 +251,7 @@
               ref="textareaRef"
               v-model:value="text"
               placeholder="请输入问题，Enter 发送，Shift+Enter 换行"
-              :disabled="loading"
+              :disabled="loading || selectMode"
               :auto-size="{ minRows: 1, maxRows: 6 }"
               class="input-area"
               @keydown.enter.exact.prevent="onEnterKey"
@@ -254,10 +274,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined, LoadingOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval, getSuggested } from '../api'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch, h } from 'vue'
+import { message, notification } from 'ant-design-vue'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined, LoadingOutlined, MoreOutlined, DeleteOutlined } from '@ant-design/icons-vue'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval, getSuggested, deleteMessageGroup, undoDeleteMessageGroup, getConfig } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 import { renderMd, resolveImg, onImgError, copyCode, prepKnowledgeContent } from '../utils/markdown'
 
@@ -333,6 +353,9 @@ function onSidebarDrag(e) {
   window.addEventListener('mousemove', onMove)
   window.addEventListener('mouseup', onUp)
 }
+
+// 检索调试入口开关（内部排障用，chat.retrievalDebugEnabled，默认隐藏）
+const debugEntryVisible = ref(false)
 
 // 推荐问题池：DB 配置（chat.suggestedQuestions，设置页/看板可管理）；加载失败回退内置默认
 const FALLBACK_TIPS = ['系统有哪些功能？', '如何创建一个新表单？', '字段验证怎么设置？', '什么是填报周期？']
@@ -553,6 +576,10 @@ onMounted(async () => {
   getSuggested().then(r => {
     if (r.success && Array.isArray(r.data) && r.data.length) tips.value = r.data
   }).catch(() => {})
+  // 检索调试入口开关（保存即生效，进页面时读取）
+  getConfig().then(r => {
+    if (r.success) debugEntryVisible.value = r.data?.chat?.retrievalDebugEnabled?.value === 'true'
+  }).catch(() => {})
 })
 
 // 加载会话列表（支持关键词搜索）
@@ -596,7 +623,8 @@ async function switchSession(sid) {
           sources: Array.isArray(m.sources) ? m.sources : [],
           related: [],
           thinking: m.thinking || '',
-          thinkOpen: false
+          thinkOpen: false,
+          time: m.createTime ? new Date(m.createTime).getTime() : null
         }))
       scroll()
     } else {
@@ -773,7 +801,7 @@ const send = () => {
   text.value = ''
   pendingImages.value = []
   const deep = deepThinkOn.value
-  messages.value.push({ role: 'user', content: q, images: imgs, deepThink: deep })
+  messages.value.push({ role: 'user', content: q, images: imgs, deepThink: deep, time: Date.now() })
   streamAnswer(q, imgs, null, messages.value.length === 1, 1, deep)
 }
 
@@ -785,15 +813,31 @@ const onEnterKey = e => {
   send()
 }
 
+watch(currentSessionId, () => exitSelectMode())
+
+// 消息时间格式化（豆包样式）：当天只显示时分，昨天带前缀，更早带日期
+const fmtMsgTime = ts => {
+  if (!ts) return ''
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return ''
+  const now = new Date()
+  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+  if (d.toDateString() === now.toDateString()) return '今天 ' + hm
+  const yest = new Date(now)
+  yest.setDate(now.getDate() - 1)
+  if (d.toDateString() === yest.toDateString()) return '昨天 ' + hm
+  return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + hm
+}
+
 // 统一流式回答：replaceIdx 为 null 追加新 AI 消息；否则替换该条（重新生成）
 // autoRetry：剩余自动重试次数（仅"未收到任何 token"的瞬时断连才自动重试，避免清空已生成内容）
 // deepThink：是否深度思考（开启后后端先流式下发 thinking 事件）
 const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1, deepThink = false) => {
   const idx = replaceIdx ?? messages.value.length
   if (replaceIdx == null) {
-    messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, thinking: '', thinkOpen: true, thinkLoading: false, stage: '正在思考中…' })
+    messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, thinking: '', thinkOpen: true, thinkLoading: false, stage: '正在思考中…', time: Date.now() })
   } else {
-    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, messageId: null, fb: null, thinking: '', thinkOpen: true, thinkLoading: false, stage: '正在思考中…' }
+    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, messageId: null, fb: null, thinking: '', thinkOpen: true, thinkLoading: false, stage: '正在思考中…', time: Date.now() }
   }
   loading.value = true
   // 发送后立即滚到底部：不等第一个 token（深度思考/图片处理时 AI 迟迟不出字，视角也要先到最下看到 loading 气泡）
@@ -977,6 +1021,94 @@ const exportAnswer = mi => {
 }
 
 // 检索调试：打开弹窗（默认该轮问题）并执行
+// 操作区「更多」菜单：不常用动作收口（豆包样式）
+const onMoreAction = (key, mi) => {
+  if (key === 'debug') openDebug(mi)
+  else if (key === 'export') exportAnswer(mi)
+  else if (key === 'deleteRound') enterSelectMode(mi)
+}
+
+// ==================== 多选删除（豆包式：进入选择模式 → 勾选轮次 → 底栏批量删除，支持撤销） ====================
+const selectMode = ref(false)
+const selected = ref([])   // 选中的"轮次起始索引"（用户消息）
+const deletingRounds = ref(false)
+
+// 消息所属轮次的起始索引（用户消息=自身；回答=其前面的用户消息；孤条=自身）
+const roundStart = i => {
+  const m = messages.value[i]
+  if (!m) return -1
+  if (m.role === 'user') return i
+  if (i > 0 && messages.value[i - 1]?.role === 'user') return i - 1
+  return i
+}
+const toggleSelect = i => {
+  const s = roundStart(i)
+  if (s < 0) return
+  const at = selected.value.indexOf(s)
+  if (at >= 0) selected.value.splice(at, 1)
+  else selected.value.push(s)
+}
+// 进入多选模式：从触发消息所在轮次开始勾选（从回答进入时默认勾上同组问题）
+const enterSelectMode = mi => {
+  selectMode.value = true
+  selected.value = []
+  const s = roundStart(mi)
+  if (s >= 0) selected.value.push(s)
+}
+const exitSelectMode = () => { selectMode.value = false; selected.value = [] }
+
+// 底栏「删除」：批量删除选中轮次，完成后可撤销（逐轮恢复）
+const deleteSelected = async () => {
+  const rounds = selected.value.slice().sort((a, b) => a - b).map(s => {
+    const aiIdx = messages.value[s + 1]?.role === 'ai' ? s + 1 : s
+    const mid = messages.value[aiIdx]?.messageId || null
+    return { from: s, aiIdx, mid, items: messages.value.slice(s, aiIdx + 1) }
+  }).filter(r => r.mid)
+  if (!rounds.length) { message.warning('选中内容无可删除'); return }
+  const sessionIdAtDelete = currentSessionId.value
+  deletingRounds.value = true
+  let ok = 0
+  for (const r of rounds) {
+    try {
+      const res = await deleteMessageGroup(r.mid)
+      if (res.success) ok++
+    } catch (e) { /* 单轮失败继续其余 */ }
+  }
+  deletingRounds.value = false
+  if (ok === 0) { message.error('删除失败'); return }
+  // 本地移除（从后往前，索引不漂移）
+  [...rounds].sort((a, b) => b.from - a.from).forEach(r => messages.value.splice(r.from, r.items.length))
+  exitSelectMode()
+  loadSessions()
+  // 撤销 toast（5 秒，批量恢复全部选中轮次）
+  const nkey = 'undo_' + Date.now()
+  notification.open({
+    key: nkey,
+    message: '已删除 ' + ok + ' 轮对话',
+    placement: 'bottom',
+    duration: 5,
+    btn: h('button', {
+      class: 'undo-toast-btn',
+      onClick: async () => {
+        notification.close(nkey)
+        try {
+          for (const r of rounds) await undoDeleteMessageGroup(r.mid)
+          if (currentSessionId.value === sessionIdAtDelete) {
+            rounds.slice().sort((a, b) => a.from - b.from)
+              .forEach((r, k) => messages.value.splice(r.from + k, 0, ...r.items))
+          } else {
+            loadSessions()
+          }
+          message.success('已恢复 ' + ok + ' 轮对话')
+          loadSessions()
+        } catch (e) { message.error(e.message || '恢复失败') }
+      }
+    }, '撤销')
+  })
+}
+
+
+
 const openDebug = mi => {
   for (let i = mi - 1; i >= 0; i--) {
     if (messages.value[i].role === 'user') { debugQuestion.value = messages.value[i].content; break }
@@ -1207,21 +1339,9 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
   z-index: 1;
   display: flex;
   align-items: center;
+  gap: 8px;
   justify-content: flex-end;   /* 用户消息在右侧，图标靠右 */
-  opacity: 0;
-  transition: opacity .15s;
 }
-.msg-block.user:hover .msg-edit-row,
-.msg-edit-row:hover { opacity: 1; }
-.msg-edit-btn {
-  width: 20px; height: 20px;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(22,119,255,.15);   /* 浅蓝底，贴合气泡色调 */
-  border-radius: 50%;
-  color: #1677ff; font-size: 12px; cursor: pointer;
-  transition: background .15s;
-}
-.msg-edit-btn:hover { background: rgba(22,119,255,.28); }
 /* 多行自适应输入框：随内容增高（1~6 行），右侧留出发送/停止按钮位 */
 .input-area {
   resize: none;
@@ -1286,19 +1406,38 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
   font-size: 12px; line-height: 1.6; display: flex; flex-wrap: wrap; gap: 4px 12px;
 }
 .degradation-item { display: inline-block; }
+/* 多选删除：勾选框与底部选择栏 */
+.msg-select-box { align-self: center; margin-right: 2px; }
+.select-bar {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  padding: 14px 16px; border-top: 1px solid #f0f0f0; background: #fff;
+}
+.select-count { font-size: 14px; color: #333; }
+/* 消息时间（豆包样式：操作行行尾小字） */
+.msg-time-inline { font-size: 11px; color: #c0c4cc; margin-left: 10px; white-space: nowrap; user-select: none; }
+/* 操作区图标按钮（纯图标紧凑排布） */
+.act-icon-btn {
+  border: none; background: transparent; cursor: pointer;
+  width: 24px; height: 24px; padding: 0; margin: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px; color: #8c8c8c; font-size: 14px;
+  transition: color .15s, background .15s;
+}
+.act-icon-btn:hover:not(:disabled) { color: #1677ff; background: rgba(22,119,255,.08); }
+.act-icon-btn.act-danger:hover:not(:disabled) { color: #ff4d4f; background: rgba(255,77,79,.08); }
+.act-icon-btn:disabled { cursor: not-allowed; opacity: .4; }
+.act-icon-btn.fb-active { color: #1677ff; }
 /* 检索进度提示（首 token 前的阶段状态：理解问题/检索资料/生成回答） */
+.stage-hint
 .stage-hint { margin-top: 6px; font-size: 13px; color: #1677ff; display: flex; align-items: center; gap: 6px; }
 /* 回答反馈（默认隐藏，hover 消息块时悬浮显示；保留整行可 hover 避免移过去按钮消失） */
 .fb-row {
   margin-top: 10px;
   display: flex;
+  align-items: center;
   gap: 4px;
   flex-wrap: wrap;
-  opacity: 0;
-  transition: opacity .2s;
-  pointer-events: none;
 }
-.msg-block:hover .fb-row, .fb-row:hover { opacity: 1; pointer-events: auto; }
 .fb-row :deep(.fb-active) { color: #1677ff; font-weight: 600; }
 /* 流式中断重试 */
 .retry-row { margin-top: 10px; }
@@ -1349,4 +1488,15 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .lightbox-count { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%);
   color: rgba(255,255,255,.75); font-size: 13px;
   background: rgba(0,0,0,.45); padding: 2px 12px; border-radius: 12px; user-select: none; }
+</style>
+
+<style>
+/* 撤销删除 toast（notification 挂在 body 下，scoped 样式覆盖不到，用全局块） */
+.undo-toast .ant-notification-notice-message { color: #fff; }
+.undo-toast .ant-notification-notice { background: rgba(0,0,0,.82); border-radius: 8px; }
+.undo-toast-btn {
+  border: none; background: transparent; cursor: pointer;
+  color: #4d9bff; font-size: 14px; padding: 4px 8px;
+}
+.undo-toast-btn:hover { color: #78b3ff; }
 </style>

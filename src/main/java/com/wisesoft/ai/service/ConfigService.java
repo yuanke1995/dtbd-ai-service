@@ -41,6 +41,7 @@ public class ConfigService {
             Map.entry("chat.sseTimeoutMs", "问答 SSE 超时(毫秒,默认300000)"),
             Map.entry("chat.showDebugDegradations", "回答提示显示调试级降级信息（默认关：只显示用户级）"),
             Map.entry("chat.suggestedQuestions", "推荐问题池（每行一个，欢迎页展示，最多8条；看板热门问题可一键加入）"),
+            Map.entry("chat.retrievalDebugEnabled", "检索调试入口（内部排障用，默认隐藏；开启后回答操作菜单显示「检索调试」）"),
             Map.entry("vision.enabled", "视觉模型总开关（false 时图片不生成描述）"),
             Map.entry("vision.model", "视觉识别模型名"),
             Map.entry("vision.prompt", "视觉识别提示词"),
@@ -309,6 +310,7 @@ public class ConfigService {
         d.put("chat.sseTimeoutMs", "300000");              // H4：问答 SSE 超时(ms)
         d.put("chat.showDebugDegradations", "false");      // 回答提示：调试级降级信息开关（默认只显示用户级）
         d.put("chat.suggestedQuestions", "系统有哪些功能？\n如何创建一个新表单？\n字段验证怎么设置？\n什么是填报周期？");  // 欢迎页推荐问题（每行一个）
+        d.put("chat.retrievalDebugEnabled", "false");      // 检索调试入口（内部排障，默认关）
         // 接口限流（按用户/IP 固定窗口）
         d.put("ratelimit.enabled", String.valueOf(properties.getRatelimit().isEnabled()));
         d.put("ratelimit.chatPerMinute", String.valueOf(properties.getRatelimit().getChatPerMinute()));

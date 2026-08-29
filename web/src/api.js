@@ -252,6 +252,14 @@ export const getSuggested = () => request('/suggested')
 export const addSuggested = question =>
   request('/suggested', { method: 'POST', body: JSON.stringify({ question }) })
 
+/** 删除一轮对话（按对话组：回答 ID + 其前面的用户问题一起软删除） */
+export const deleteMessageGroup = assistantMessageId =>
+  request(`/message-group/${assistantMessageId}`, { method: 'DELETE' })
+
+/** 撤销删除一轮对话（撤销期内恢复软删消息） */
+export const undoDeleteMessageGroup = assistantMessageId =>
+  request('/message-group/undo', { method: 'POST', body: JSON.stringify({ messageId: assistantMessageId }) })
+
 /** 答案缓存统计（条数/阈值/开关） */
 export const getAnswerCacheStats = () => request('/answer-cache')
 

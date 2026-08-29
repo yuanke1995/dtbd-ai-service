@@ -47,6 +47,7 @@ public class ChatController {
     private final SessionService sessionService;
     private final ImageUrlSigner imageUrlSigner;
     private final AiKnowledgeMapper knowledgeMapper;
+    private final com.wisesoft.ai.mapper.AiMessageMapper messageMapper;
     private final ConfigService configService;
     private final RateLimitService rateLimitService;
 
@@ -183,6 +184,36 @@ public class ChatController {
 
     /** 推荐问题池单条上限（与欢迎页展示数量一致，配置里超出的行忽略） */
     private static final int SUGGESTED_MAX = 8;
+
+    @Operation(summary = "删除一轮对话", description = "按对话组删除：指定该轮回答（assistant 消息）ID，连同其前面的用户问题一起软删除，并清理 Redis 兜底缓存。立即生效，前端 5 秒内可调撤销接口恢复")
+    @DeleteMapping("/message-group/{assistantMessageId}")
+    public ResultJson deleteMessageGroup(
+            @Parameter(description = "该轮回答（assistant 消息）ID") @PathVariable("assistantMessageId") String assistantMessageId,
+            HttpServletRequest httpRequest) {
+        com.wisesoft.ai.model.AiMessage assistant = messageMapper.selectById(assistantMessageId);
+        if (assistant == null) throw new BizException(404, "消息不存在");
+        sessionService.assertOwned(assistant.getSessionId(), UserContext.resolve(httpRequest));
+        int deleted = sessionService.deleteRound(assistant.getSessionId(), assistantMessageId);
+        if (deleted == 0) throw new BizException(404, "消息不存在或已删除");
+        return ResultJson.ok("已删除该轮对话");
+    }
+
+    @Operation(summary = "撤销删除一轮对话", description = "恢复最近一次按组删除的对话（回答 + 同组用户问题），撤销期内有效")
+    @PostMapping("/message-group/undo")
+    public ResultJson undoDeleteMessageGroup(
+            @Parameter(description = "{\"messageId\": \"该轮回答（assistant 消息）ID\"}")
+            @RequestBody Map<String, String> body,
+            HttpServletRequest httpRequest) {
+        String messageId = body.get("messageId");
+        if (messageId == null || messageId.isBlank()) throw new BizException("缺少 messageId");
+        // 已软删消息的归属校验：忽略删除标记取回，会话本身仍须存在且属于当前用户
+        com.wisesoft.ai.model.AiMessage assistant = messageMapper.selectByIdIgnoreDeleted(messageId);
+        if (assistant == null) throw new BizException(404, "消息不存在或已过撤销期");
+        sessionService.assertOwned(assistant.getSessionId(), UserContext.resolve(httpRequest));
+        int restored = sessionService.undoDeleteRound(assistant.getSessionId(), messageId);
+        if (restored == 0) throw new BizException(410, "已过撤销期，无法恢复");
+        return ResultJson.ok(Map.of("restored", restored), "已恢复该轮对话");
+    }
 
     @Operation(summary = "推荐问题列表", description = "获取欢迎页展示的推荐问题（DB 配置 chat.suggestedQuestions，每行一条，最多 8 条）")
     @GetMapping("/suggested")

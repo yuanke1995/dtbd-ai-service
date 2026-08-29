@@ -387,6 +387,76 @@ public class SessionService {
         }
     }
 
+    /**
+     * 删除一轮对话（对话组）：指定回答（assistant）消息 ID，连同其前面的用户问题一起软删除。
+     * 序号约定：同轮用户问题 seq=k、回答 seq=k+1 连续；按 seq-1+role=user 精确配对防误删。
+     * 同步：会话消息计数递减（best-effort）+ Redis 兜底缓存失效（下次读回退 MySQL）。
+     *
+     * @return 实际删除条数
+     */
+    public int deleteRound(String sessionId, String assistantMessageId) {
+        AiMessage assistant = messageMapper.selectById(assistantMessageId);
+        if (assistant == null || !sessionId.equals(assistant.getSessionId())) return 0;
+        List<String> ids = new ArrayList<>();
+        ids.add(assistant.getId());
+        AiMessage userMsg = messageMapper.selectOne(new LambdaQueryWrapper<AiMessage>()
+                .eq(AiMessage::getSessionId, sessionId)
+                .eq(AiMessage::getSequence, assistant.getSequence() - 1)
+                .eq(AiMessage::getRole, "user")
+                .last("LIMIT 1"));
+        if (userMsg != null) ids.add(userMsg.getId());
+        int deleted = 0;
+        for (String id : ids) {
+            deleted += messageMapper.deleteById(id); // @TableLogic 软删除
+        }
+        // 会话消息计数递减（best-effort，仅影响侧边栏展示）
+        try {
+            AiSession session = sessionMapper.selectById(sessionId);
+            if (session != null && session.getMessageCount() != null) {
+                AiSession upd = new AiSession();
+                upd.setId(sessionId);
+                upd.setMessageCount(Math.max(0, session.getMessageCount() - ids.size()));
+                sessionMapper.updateById(upd);
+            }
+        } catch (Exception ignored) {
+        }
+        clearSession(sessionId);
+        return deleted;
+    }
+
+    /**
+     * 撤销删除一轮对话：按回答消息 ID 恢复该轮（回答 + 同组用户问题）。
+     * 自定义 SQL 绕过 @TableLogic 定位/恢复已软删消息；同步计数加回 + Redis 失效。
+     *
+     * @return 实际恢复条数（消息可能已被物理清理，恢复 0 条时前端提示已过撤销期）
+     */
+    public int undoDeleteRound(String sessionId, String assistantMessageId) {
+        AiMessage assistant = messageMapper.selectByIdIgnoreDeleted(assistantMessageId);
+        if (assistant == null || !sessionId.equals(assistant.getSessionId())) return 0;
+        // 已处于未删除状态 = 撤销已被执行过（重复撤销防御，防计数重复加回）
+        if (assistant.getDeleted() == null || assistant.getDeleted() == 0) return 0;
+        int restored = messageMapper.restoreById(assistant.getId());
+        AiMessage userMsg = messageMapper.selectBySeqIgnoreDeleted(sessionId,
+                assistant.getSequence() - 1, "user");
+        if (userMsg != null) {
+            restored += messageMapper.restoreById(userMsg.getId());
+        }
+        // 计数加回（best-effort）
+        try {
+            AiSession session = sessionMapper.selectById(sessionId);
+            if (session != null) {
+                AiSession upd = new AiSession();
+                upd.setId(sessionId);
+                int base = session.getMessageCount() == null ? 0 : session.getMessageCount();
+                upd.setMessageCount(base + (userMsg != null ? 2 : 1));
+                sessionMapper.updateById(upd);
+            }
+        } catch (Exception ignored) {
+        }
+        clearSession(sessionId);
+        return restored;
+    }
+
     // ==================== 私有方法 ====================
 
     /**
@@ -415,6 +485,7 @@ public class SessionService {
         map.put("role", m.getRole());
         map.put("content", m.getContent());
         map.put("messageId", m.getId()); // 与 SSE done 事件字段名一致，供前端反馈/导出等操作
+        map.put("createTime", m.getCreateTime()); // 气泡下方时间展示（豆包样式）
         if (m.getThinking() != null && !m.getThinking().isBlank()) {
             map.put("thinking", m.getThinking());
         }

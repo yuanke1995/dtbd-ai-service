@@ -34,6 +34,10 @@
                           placeholder="每行一个问题，欢迎页展示前 8 条（数据看板热门问题也可一键加入）" />
             </a-form-item>
             <a-form-item>
+              <template #label><a-tooltip :title="tips.retrievalDebugEnabled" placement="top">检索调试入口 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.chat.retrievalDebugEnabled" />
+            </a-form-item>
+            <a-form-item>
               <template #label><a-tooltip :title="tips.historyRounds" placement="top">多轮记忆轮数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.chat.historyRounds" :min="0" :max="20" style="width:200px" />
             </a-form-item>
@@ -519,6 +523,7 @@ const tips = {
   pipelineThreads: '问答流水线的并发线程数：图片识别、查询改写、检索、深度思考等"重活"在独立线程池执行，不占 Tomcat 请求线程（多用户并发问答时避免请求线程被打满）。调高可支撑更多并发用户，但占用更多 CPU/内存；队列满时新请求会快速返回"系统繁忙"。保存即生效。',
   streamRetryCount: '主 LLM 流式生成在"未输出任何内容"时中断的自动重试次数（0=关闭）。已输出内容后中断不重试（避免重复内容）；重试仍失败会在回答下方给出警示。',
   sseTimeoutMs: '问答 SSE 连接超时（毫秒）：超过后回答被截断，前端提示"回答超时已截断"。深度思考+长回答场景可调大，默认 300000（5 分钟）。',
+  retrievalDebugEnabled: '检索调试入口开关（内部排障用）：开启后回答操作菜单显示「检索调试」，可分步查看关键词/向量/重排召回结果；面向用户的部署建议保持关闭。',
   suggestedQuestions: '欢迎页展示的推荐问题（新用户引导）。每行一条、最多 8 条；数据看板的热门问题可一键加入。改动保存后，用户下次进入问答页生效。',
   showDebugDegradations: '回答提示中是否显示调试级降级信息（图片引用剔除/未标注引用/查询改写失败/检索降级等内部细节）。默认关：只显示对用户有意义的信息；调试排障时可开启，所有降级信息仍会写 [FAIL-LOUD] 日志。',
   visionEnabled: '视觉模型总开关。关闭后：文档图片/用户图片都不生成描述——图片仅展示、内容不进检索与回答引用（RAG 对图片语义失效），一般不建议关闭。',
@@ -608,7 +613,7 @@ const onRerankEnabledChange = async checked => {
     rerankChecking.value = false
   }
 }
-const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', suggestedQuestions: '', remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8, streamRetryCount: 1, sseTimeoutMs: 300000, showDebugDegradations: false },
+const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', suggestedQuestions: '', retrievalDebugEnabled: false, remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8, streamRetryCount: 1, sseTimeoutMs: 300000, showDebugDegradations: false },
                     vision: { enabled: true, model: '', prompt: '', concurrency: 4, userImageConcurrency: 2 },
                     chunk: { maxChunks: 3000, maxImages: 100, overlap: 100, concurrency: 2, ocrMinText: 20, structural: true, structuralRatio: 0.8, embedRetryCount: 1 },
                     upload: { maxFileSizeMB: 200 },
@@ -641,6 +646,7 @@ onMounted(async () => {
       form.value.chat.temperature = Number(d.chat?.temperature?.value ?? 0.3)
       form.value.chat.systemPrompt = d.chat?.systemPrompt?.value || ''
       form.value.chat.suggestedQuestions = d.chat?.suggestedQuestions?.value || ''
+      form.value.chat.retrievalDebugEnabled = d.chat?.retrievalDebugEnabled?.value === 'true'
       form.value.chat.remainTokenFloor = Number(d.chat?.remainTokenFloor?.value ?? 800)
       form.value.chat.truncateFallbackChars = Number(d.chat?.truncateFallbackChars?.value ?? 200)
       form.value.chat.historyRounds = Number(d.chat?.historyRounds?.value ?? 5)
@@ -756,6 +762,7 @@ const save = async () => {
       chat: { model: form.value.chat.model?.trim(), temperature: String(form.value.chat.temperature),
               systemPrompt: form.value.chat.systemPrompt?.trim(),
               suggestedQuestions: form.value.chat.suggestedQuestions?.trim(),
+              retrievalDebugEnabled: String(form.value.chat.retrievalDebugEnabled),
               remainTokenFloor: String(form.value.chat.remainTokenFloor),
               truncateFallbackChars: String(form.value.chat.truncateFallbackChars),
               historyRounds: String(form.value.chat.historyRounds),
