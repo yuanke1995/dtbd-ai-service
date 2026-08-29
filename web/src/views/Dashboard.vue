@@ -36,6 +36,27 @@
       </a-col>
     </a-row>
 
+    <!-- 差评样本 · 反馈回流闭环 -->
+    <a-card size="small" style="margin-top:16px">
+      <template #title>差评样本（反馈回流）</template>
+      <template #extra>
+        <a-button size="small" @click="loadBadCases">刷新</a-button>
+      </template>
+      <a-table :data-source="badCases" :columns="badCols" size="small" row-key="messageId"
+               :pagination="badCases.length > 10 ? { pageSize: 10 } : false"
+               :locale="{ emptyText: '暂无差评样本（👍 微笑曲线良好）' }">
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'action'">
+            <a-tooltip :title="record.knowledgeIds?.length ? '加入评估集（问题→引用过的知识块），防止后续调参丢召回' : '该轮回答无引用块，无法加入评估集'">
+              <a-button type="link" size="small" :disabled="!record.knowledgeIds?.length"
+                        :loading="evalAdding === record.messageId" @click="addToEval(record)">加入评估集</a-button>
+            </a-tooltip>
+            <a-button type="link" size="small" @click="openBadCaseAdd(record)">补知识块</a-button>
+          </template>
+        </template>
+      </a-table>
+    </a-card>
+
     <a-card title="知识库缺口管理（无命中问题汇总）" size="small" style="margin-top:16px">
       <template #extra>
         <a-button size="small" @click="loadUnmatched">刷新</a-button>
@@ -74,7 +95,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
-import { getAnalytics, getUnmatchedQuestions, createKnowledge, addSuggested } from '../api'
+import { getAnalytics, getUnmatchedQuestions, createKnowledge, addSuggested, getBadCases, addEvalCase } from '../api'
 
 const qCols = [
   { title: '问题', dataIndex: 'question', key: 'question', ellipsis: true },
@@ -120,8 +141,43 @@ const addVisible = ref(false)
 const addLoading = ref(false)
 const addForm = ref({ title: '', content: '', docId: '' })
 
+// ==================== 差评样本 · 反馈回流 ====================
+const badCases = ref([])
+const evalAdding = ref('')
+const badCols = [
+  { title: '问题', dataIndex: 'question', key: 'question', ellipsis: true },
+  { title: '回答摘要', dataIndex: 'answer', key: 'answer', ellipsis: true },
+  { title: '反馈说明', dataIndex: 'feedbackText', key: 'feedbackText', ellipsis: true,
+    customRender: ({ text }) => text || '—' },
+  { title: '时间', dataIndex: 'time', key: 'time', width: 160,
+    customRender: ({ text }) => text ? String(text).replace('T', ' ').slice(0, 16) : '—' },
+  { title: '操作', key: 'action', width: 170 }
+]
+const loadBadCases = async () => {
+  try {
+    const r = await getBadCases()
+    if (r.success) badCases.value = r.data || []
+  } catch (e) { /* 静默，看板不因差评卡片失败整体报错 */ }
+}
+// 差评回流①：加入评估集（问题 → 当轮引用过的知识块），防后续调参丢召回
+const addToEval = async record => {
+  evalAdding.value = record.messageId
+  try {
+    const r = await addEvalCase(record.question, record.knowledgeIds || [])
+    if (r.success) {
+      if (r.data?.added) message.success('已加入评估集，可在「检索评估」页验证调参不丢召回')
+      else message.info(r.data?.reason || '评估集已存在相同问题')
+    } else message.error(r.msg || '加入失败')
+  } catch (e) { message.error(e.message || '加入失败') }
+  finally { evalAdding.value = '' }
+}
+// 差评回流②：补知识块（预填问题为标题、回答摘要为初稿，管理员修改后入库）
+const openBadCaseAdd = record => {
+  openAdd({ question: record.question, answer: record.answer, docId: '' })
+}
+
 const openAdd = record => {
-  addForm.value = { title: record.question, content: '', docId: '' }
+  addForm.value = { title: record.question, content: record.answer || '', docId: record.docId || '' }
   addVisible.value = true
 }
 
@@ -158,6 +214,7 @@ const loadUnmatched = async () => {
 }
 
 onMounted(async () => {
+  loadBadCases()
   try {
     const r = await getAnalytics()
     if (r.success) {

@@ -535,6 +535,12 @@ public class RagService {
             }
             log.info("[CTX] 上下文填充 {} 块（含扩散 {}）, 总用 {} / 预算 {} token", docNo - 1, extraUsed, usedTokens + fixedTokens, budget);
 
+            // 3.5 检索状态行（豆包式，回答上方常驻）：搜索 N 个关键词，参考 M 段资料
+            List<String> searchTerms = keywordExtractor.extract(retrievalQuery);
+            String retrievedJson = JSON.toJSONString(Map.of(
+                    "keywords", searchTerms.size(), "refs", docNo - 1, "terms", searchTerms));
+            sendSseEvent(emitter, "retrieved", retrievedJson, sessionId);
+
             // 4. SSE 先发图片 URL 列表（编号顺序，生产开启鉴权时动态签名）
             if (!imgIndex.isEmpty()) {
                 List<String> signedUrls = imgIndex.values().stream().map(imageUrlSigner::signUrl).toList();
@@ -552,7 +558,7 @@ public class RagService {
             sendSseEvent(emitter, "stage", "正在生成回答…", sessionId);
             AnswerStreamState st = new AnswerStreamState(sessionId, question, emitter,
                     imgIndex, imgDescIndex, sources, userImgs, startTime, queryForLog, thinkingHolder,
-                    degradations, degradedCodes);
+                    degradations, degradedCodes, retrievedJson);
             st.disposableRef.set(buildAnswerStream(system.toString(), user, st));
 
             // 前端断开/超时时停止生成；超时先发 warn（fail-loud：回答被截断必须告知，不留静默半截）
@@ -711,7 +717,7 @@ public class RagService {
                     sessionService.appendMessage(st.sessionId, "user", st.question,
                             userImgUrls.isEmpty() ? null : userImgUrls, null);
                     String messageId = sessionService.appendMessage(st.sessionId, "assistant", answer,
-                            finalImgs, sourcesJson, st.thinkingHolder[0]);
+                            finalImgs, sourcesJson, st.thinkingHolder[0], st.retrievedJson);
 
                     // 异步落问答日志（不阻塞 SSE 完成）
                     List<String> hitDocIds = st.sources.stream().map(s -> String.valueOf(s.get("docId"))).toList();
@@ -755,6 +761,7 @@ public class RagService {
         final String[] thinkingHolder;
         final List<Map<String, String>> degradations;
         final Set<String> degradedCodes;
+        final String retrievedJson;
         final StringBuilder fullResponse = new StringBuilder();
         final StringBuilder relatedBlock = new StringBuilder();
         final StringBuilder emitBuf = new StringBuilder();
@@ -765,7 +772,7 @@ public class RagService {
                           Map<Integer, String> imgIndex, Map<Integer, String> imgDescIndex,
                           List<Map<String, Object>> sources, List<UserImageService.UserImage> userImgs,
                           long startTime, String queryForLog, String[] thinkingHolder,
-                          List<Map<String, String>> degradations, Set<String> degradedCodes) {
+                          List<Map<String, String>> degradations, Set<String> degradedCodes, String retrievedJson) {
             this.sessionId = sessionId;
             this.question = question;
             this.emitter = emitter;
@@ -778,6 +785,7 @@ public class RagService {
             this.thinkingHolder = thinkingHolder;
             this.degradations = degradations;
             this.degradedCodes = degradedCodes;
+            this.retrievedJson = retrievedJson;
         }
 
         void disposeSafe() {

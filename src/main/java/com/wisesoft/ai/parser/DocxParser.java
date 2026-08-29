@@ -116,12 +116,12 @@ public class DocxParser implements DocumentParser {
     }
 
     @Override
-    public List<Chunk> parse(byte[] bytes, String fileName, String docId) throws IOException {
-        return parse(bytes, fileName, docId, null);
+    public List<Chunk> parse(java.nio.file.Path file, String fileName, String docId) throws IOException {
+        return parse(file, fileName, docId, null);
     }
 
     @Override
-    public List<Chunk> parse(byte[] bytes, String fileName, String docId, ParseProgress progress) throws IOException {
+    public List<Chunk> parse(java.nio.file.Path file, String fileName, String docId, ParseProgress progress) throws IOException {
         List<Chunk> chunks = new ArrayList<>();
         int maxSize = properties.getChunk().getMaxSize();
         // 结构感知切分（chunk.structural 可配，默认开）：标题栈 → 章节路径；边界优先阈值 = maxSize × ratio
@@ -142,7 +142,7 @@ public class DocxParser implements DocumentParser {
         ImageProgress imageProgress = null;
         if (progress != null) {
             int total = 0;
-            try (XWPFDocument scan = new XWPFDocument(new java.io.ByteArrayInputStream(bytes))) {
+            try (XWPFDocument scan = new XWPFDocument(java.nio.file.Files.newInputStream(file))) {
                 total = countImages(scan);
             } catch (Exception e) {
                 log.warn("图片预扫描失败，跳过图片进度上报: {}", e.getMessage());
@@ -150,9 +150,9 @@ public class DocxParser implements DocumentParser {
             imageProgress = new ImageProgress(total, progress);
         }
 
-        try (XWPFDocument document = new XWPFDocument(new java.io.ByteArrayInputStream(bytes))) {
+        try (XWPFDocument document = new XWPFDocument(java.nio.file.Files.newInputStream(file))) {
             // 样式表 → 标题层级映射（WPS/Word 数字样式 ID 的标题正确识别 + 目录样式跳过）
-            Map<String, Integer> styleLevels = buildStyleLevels(bytes);
+            Map<String, Integer> styleLevels = buildStyleLevels(file);
             for (IBodyElement element : document.getBodyElements()) {
                 if (element.getElementType() == BodyElementType.PARAGRAPH) {
                     XWPFParagraph p = (XWPFParagraph) element;
@@ -672,9 +672,9 @@ public class DocxParser implements DocumentParser {
      * 直接按 ID 数字匹配（s.equals("2")）会整体错位/漏识别——必须按样式 name 或样式级 outlineLvl 建立映射。
      * 直接从 docx zip 读 word/styles.xml（POI XWPFStyles 无遍历 API，且各版本不一致）。
      */
-    private Map<String, Integer> buildStyleLevels(byte[] docxBytes) {
+    private Map<String, Integer> buildStyleLevels(java.nio.file.Path docxFile) {
         Map<String, Integer> map = new HashMap<>();
-        try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(new ByteArrayInputStream(docxBytes))) {
+        try (java.util.zip.ZipInputStream zis = new java.util.zip.ZipInputStream(java.nio.file.Files.newInputStream(docxFile))) {
             java.util.zip.ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
                 if (!"word/styles.xml".equals(entry.getName())) continue;

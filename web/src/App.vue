@@ -49,6 +49,12 @@ const onMenu = ({ key }) => {
 
 <style>
 html, body { margin: 0; overflow-x: hidden; }
+/* 全局纤细滚动条：轨道透明（消除页面/容器滚动条轨道的竖向分界线），滑块圆角 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,.18); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,.28); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+* { scrollbar-width: thin; scrollbar-color: rgba(0,0,0,.18) transparent; }
 .header { display:flex;align-items:center }
 .logo { color:#fff;font-size:16px;font-weight:600;display:flex;align-items:center;margin-right:40px }
 .menu { flex:1;min-width:0 }

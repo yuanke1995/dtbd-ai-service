@@ -35,6 +35,14 @@ public class QaController {
         return ResultJson.ok("感谢反馈");
     }
 
+    @Operation(summary = "差评样本列表", description = "👎 样本按时间倒序（含问题/回答摘要/反馈说明/引用块），供看板反馈回流：加入评估集或补知识块")
+    @GetMapping("/analytics/badcases")
+    public ResultJson badCases(
+            @Parameter(description = "返回上限（默认 50，最大 100）")
+            @RequestParam(value = "limit", required = false, defaultValue = "50") Integer limit) {
+        return ResultJson.ok(qaLogService.listBadCases(limit));
+    }
+
     @Operation(summary = "看板统计", description = "获取数据看板聚合统计：问答量、满意率、引用率、无命中率、热门问题 TOP10、无命中问题 TOP10")
     @GetMapping("/analytics/summary")
     public ResultJson analytics() {

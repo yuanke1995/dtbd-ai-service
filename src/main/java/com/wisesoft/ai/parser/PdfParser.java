@@ -50,13 +50,14 @@ public class PdfParser implements DocumentParser {
     }
 
     @Override
-    public List<Chunk> parse(byte[] bytes, String fileName, String docId) throws Exception {
+    public List<Chunk> parse(java.nio.file.Path file, String fileName, String docId) throws Exception {
         int maxSize = properties.getChunk().getMaxSize();
         List<Chunk> chunks = new ArrayList<>();
         StringBuilder pageBuffer = new StringBuilder();
         String pageTitle = "第 1 页";
 
-        try (PDDocument doc = Loader.loadPDF(bytes)) {
+        // File 模式随机访问加载：内存从 O(文件大小) 降为准 O(页数)，大 PDF 不再全量驻留堆
+        try (PDDocument doc = Loader.loadPDF(file.toFile())) {
             PDFTextStripper stripper = new PDFTextStripper();
             int total = doc.getNumberOfPages();
             for (int page = 1; page <= total; page++) {

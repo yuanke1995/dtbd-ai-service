@@ -1,8 +1,10 @@
 package com.wisesoft.ai.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.wisesoft.ai.mapper.AiMessageMapper;
 import com.wisesoft.ai.mapper.AiQaFeedbackMapper;
 import com.wisesoft.ai.mapper.AiQaLogMapper;
+import com.wisesoft.ai.model.AiMessage;
 import com.wisesoft.ai.model.AiQaFeedback;
 import com.wisesoft.ai.model.AiQaLog;
 import com.wisesoft.ai.thread.ThreadPoolManager;
@@ -29,6 +31,7 @@ public class QaLogService {
 
     private final AiQaLogMapper qaLogMapper;
     private final AiQaFeedbackMapper feedbackMapper;
+    private final AiMessageMapper messageMapper;
 
     /**
      * 异步落问答日志（不阻塞主流程）
@@ -79,6 +82,75 @@ public class QaLogService {
             f.setFeedbackText(feedbackText);
             feedbackMapper.insert(f);
         }
+    }
+
+    /**
+     * 差评样本列表（反馈回流闭环）：
+     * 👎 样本按时间倒序，联气回答消息还原「问题 + 回答摘要 + 引用块」，供看板一键加评估集 / 补知识块。
+     * 消息已被对话组删除的样本跳过（feedback 行保留，不阻塞其余）。
+     */
+    public List<Map<String, Object>> listBadCases(int limit) {
+        int n = Math.min(Math.max(1, limit), 100);
+        List<AiQaFeedback> dislikes = feedbackMapper.selectList(new LambdaQueryWrapper<AiQaFeedback>()
+                .eq(AiQaFeedback::getRating, 0)
+                .orderByDesc(AiQaFeedback::getCreatedAt)
+                .last("LIMIT " + n));
+        if (dislikes.isEmpty()) return List.of();
+
+        List<String> mids = dislikes.stream().map(AiQaFeedback::getMessageId).toList();
+        Map<String, AiMessage> msgById = new HashMap<>();
+        messageMapper.selectBatchIds(mids).forEach(m -> msgById.put(m.getId(), m));
+
+        // 按 session 预取 user 消息，还原每轮问题（sequence 配对，与评估生成同法）
+        Set<String> sids = msgById.values().stream()
+                .map(AiMessage::getSessionId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<String, List<AiMessage>> userMsgsBySession = new HashMap<>();
+        if (!sids.isEmpty()) {
+            messageMapper.selectList(new LambdaQueryWrapper<AiMessage>()
+                            .eq(AiMessage::getRole, "user").in(AiMessage::getSessionId, sids))
+                    .forEach(u -> userMsgsBySession.computeIfAbsent(u.getSessionId(), k -> new ArrayList<>()).add(u));
+        }
+
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (AiQaFeedback f : dislikes) {
+            AiMessage answer = msgById.get(f.getMessageId());
+            if (answer == null) continue; // 消息已随对话组删除
+            AiMessage user = userMsgsBySession.getOrDefault(answer.getSessionId(), List.of()).stream()
+                    .filter(u -> u.getSequence() < answer.getSequence())
+                    .max(Comparator.comparingInt(AiMessage::getSequence)).orElse(null);
+
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("messageId", f.getMessageId());
+            row.put("sessionId", answer.getSessionId());
+            row.put("question", trim(user == null ? "" : user.getContent(), 100));
+            row.put("answer", trim(answer.getContent(), 150));
+            row.put("feedbackText", f.getFeedbackText());
+            row.put("time", f.getCreatedAt());
+            row.put("knowledgeIds", extractKnowledgeIds(answer.getSources()));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /** 从消息 sources JSON 提取引用的知识块 ID（与评估生成同语义） */
+    private List<String> extractKnowledgeIds(String sourcesJson) {
+        List<String> ids = new ArrayList<>();
+        try {
+            com.alibaba.fastjson2.JSONArray arr = com.alibaba.fastjson2.JSON.parseArray(sourcesJson);
+            if (arr == null) return ids;
+            for (int i = 0; i < arr.size(); i++) {
+                com.alibaba.fastjson2.JSONObject o = arr.getJSONObject(i);
+                if (o != null && o.getString("knowledgeId") != null) ids.add(o.getString("knowledgeId"));
+            }
+        } catch (Exception ignored) {
+        }
+        return ids;
+    }
+
+    private String trim(String s, int n) {
+        if (s == null) return "";
+        String t = s.replaceAll("\\s+", " ").trim();
+        return t.length() > n ? t.substring(0, n) + "…" : t;
     }
 
     /**

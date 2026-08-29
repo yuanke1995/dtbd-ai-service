@@ -40,16 +40,21 @@ public class TextParser implements DocumentParser {
     }
 
     @Override
-    public List<Chunk> parse(byte[] bytes, String fileName, String docId) {
-        String content = new String(bytes, StandardCharsets.UTF_8);
+    public List<Chunk> parse(java.nio.file.Path file, String fileName, String docId) throws java.io.IOException {
         String ext = extOf(fileName);
+        // 逐行流式读取：任意大小文件内存恒定
+        List<String> lines = new ArrayList<>();
+        try (var reader = java.nio.file.Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) lines.add(line);
+        }
         List<Chunk> chunks;
         if ("csv".equalsIgnoreCase(ext)) {
-            chunks = parseCsv(content);
+            chunks = parseCsv(String.join("\n", lines));
         } else if ("md".equalsIgnoreCase(ext) || "markdown".equalsIgnoreCase(ext)) {
-            chunks = parseMarkdown(content);
+            chunks = parseMarkdown(String.join("\n", lines));
         } else {
-            chunks = parsePlain(content);
+            chunks = parsePlain(String.join("\n", lines));
         }
         log.info("[TextParser] {} 解析完成: {} chunks", fileName, chunks.size());
         return chunks;

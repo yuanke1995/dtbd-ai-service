@@ -40,11 +40,11 @@ public class ExcelParser implements DocumentParser {
     }
 
     @Override
-    public List<Chunk> parse(byte[] bytes, String fileName, String docId) throws Exception {
+    public List<Chunk> parse(java.nio.file.Path file, String fileName, String docId) throws Exception {
         int maxSize = properties.getChunk().getMaxSize();
         List<Chunk> chunks = new ArrayList<>();
 
-        try (Workbook workbook = new XSSFWorkbook(new ByteArrayInputStream(bytes))) {
+        try (Workbook workbook = new XSSFWorkbook(java.nio.file.Files.newInputStream(file))) {
             for (int s = 0; s < workbook.getNumberOfSheets(); s++) {
                 Sheet sheet = workbook.getSheetAt(s);
                 if (sheet == null) continue;

@@ -242,6 +242,42 @@ public class RetrievalEvaluationService {
         return new EvalSet(1, "", List.of(), 0);
     }
 
+    /**
+     * 追加单条评估 case（差评回流：问题 → 引用过的知识块）。
+     * synchronized：与 generate 串行化避免写盘互踩；按 question 去重；失效期望块自动剔除。
+     *
+     * @return added=false 表示已存在相同问题（幂等）
+     */
+    public synchronized Map<String, Object> addCase(String question, List<String> knowledgeIds) {
+        String q0 = question == null ? "" : question.trim();
+        if (q0.isEmpty()) throw new com.wisesoft.ai.common.BizException("问题不能为空");
+        final String q = q0.length() > 200 ? q0.substring(0, 200) : q0;
+
+        EvalSet set = load();
+        if (set.cases().stream().anyMatch(c -> q.equals(c.question()))) {
+            return Map.of("added", false, "reason", "评估集已存在相同问题");
+        }
+        List<String> expected = knowledgeIds == null ? List.of()
+                : knowledgeIds.stream().filter(loadExistingKnowledgeIds(new HashSet<>(knowledgeIds))::contains).distinct().toList();
+        int maxSeq = set.cases().stream()
+                .mapToInt(c -> {
+                    try { return Integer.parseInt(c.id().replaceFirst("^c", "")); }
+                    catch (Exception e) { return 0; }
+                }).max().orElse(0);
+        List<EvalCase> cases = new ArrayList<>(set.cases());
+        cases.add(new EvalCase("c" + (maxSeq + 1), q, expected, "差评回流"));
+        try {
+            Files.createDirectories(evalDir());
+            Files.writeString(evalFile(), JSON.toJSONString(
+                    new EvalSet(set.version(), now(), cases, set.staleExpected()),
+                    JSONWriter.Feature.PrettyFormat), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new com.wisesoft.ai.common.BizException("评估集写盘失败: " + e.getMessage());
+        }
+        log.info("[Eval] 差评回流追加 case：question=[{}] expected={}（失效剔除 {}）", q, expected.size(), knowledgeIds == null ? 0 : knowledgeIds.size() - expected.size());
+        return Map.of("added", true, "expected", expected.size());
+    }
+
     // ==================== 运行评估 ====================
 
     /**

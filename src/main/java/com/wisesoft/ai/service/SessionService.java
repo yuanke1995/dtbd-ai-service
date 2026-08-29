@@ -280,7 +280,7 @@ public class SessionService {
      * @param sources  引用来源 JSON 数组字符串（可为空），如 [{"ref":1,"knowledgeId":..,"docId":..,"fileName":..,"title":..,"snippet":..}]
      */
     public String appendMessage(String sessionId, String role, String content, List<String> images, String sources) {
-        return appendMessage(sessionId, role, content, images, sources, null);
+        return appendMessage(sessionId, role, content, images, sources, null, null);
     }
 
     /**
@@ -290,6 +290,13 @@ public class SessionService {
      * @param thinking 思考过程全文（深度思考，可为空）
      */
     public String appendMessage(String sessionId, String role, String content, List<String> images, String sources, String thinking) {
+        return appendMessage(sessionId, role, content, images, sources, thinking, null);
+    }
+
+    /**
+     * 追加消息（含检索状态行数据）：retrieved 为 JSON（keywords/refs/terms），随消息持久化使状态行刷新后仍在
+     */
+    public String appendMessage(String sessionId, String role, String content, List<String> images, String sources, String thinking, String retrieved) {
         // 1. MySQL 持久化
         try {
             // 获取下一序号
@@ -303,6 +310,7 @@ public class SessionService {
             msg.setThinking(thinking);
             msg.setImages(images != null && !images.isEmpty() ? JSON.toJSONString(images) : null);
             msg.setSources(sources);
+            msg.setRetrieved(retrieved);
             msg.setSequence(nextSeq);
             messageMapper.insert(msg);
 
@@ -502,6 +510,9 @@ public class SessionService {
             } catch (Exception e) {
                 // sources 解析失败忽略
             }
+        }
+        if (m.getRetrieved() != null && !m.getRetrieved().isBlank()) {
+            map.put("retrieved", m.getRetrieved()); // 检索状态行（前端 JSON.parse）
         }
         return map;
     }

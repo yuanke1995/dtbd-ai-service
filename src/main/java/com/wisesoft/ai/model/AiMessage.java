@@ -37,6 +37,8 @@ public class AiMessage {
 
     /** 引用来源 (JSON数组字符串: [{ref,knowledgeId,docId,fileName,title,snippet}]) */
     private String sources;
+    /** 检索状态行数据 (JSON: keywords/refs/terms) */
+    private String retrieved;
 
     /** 消息序号 (会话内递增) */
     private Integer sequence;

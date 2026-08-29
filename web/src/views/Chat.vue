@@ -46,6 +46,20 @@
                         @click.stop @change="toggleSelect(i)" />
             <div class="msg-block" :class="m.role">
               <div class="bubble" :class="m.role">
+              <!-- 检索状态行（豆包式）：过程概览，与气泡下方引用（结果溯源）互补不重复 -->
+              <!-- 检索状态行（豆包式）：纯过程概览展示；检索调试入口在 ··· 菜单 -->
+              <!-- 检索状态行：点击展开检索词与参考资料明细（明细与下方引用标签同源，过程视角） -->
+              <div v-if="m.role === 'ai' && m.retrieved" class="retrieval-line" @click="m.rtOpen = !m.rtOpen">
+                搜索 {{ m.retrieved.keywords }} 个关键词，参考 {{ m.retrieved.refs }} 段资料
+                <down-outlined class="rt-arrow" :class="{ open: m.rtOpen }" />
+              </div>
+              <div v-if="m.role === 'ai' && m.retrieved && m.rtOpen" class="retrieval-detail">
+                <div v-if="m.retrieved.terms?.length" class="rt-terms">检索词：{{ (m.retrieved.terms || []).join('、') }}</div>
+                <div v-for="(s, si) in (m.sources || [])" :key="si" class="rt-ref">
+                  <span class="rt-ref-tag">[{{ s.ref }}]</span>{{ (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '') }}
+                  <div v-if="s.snippet" class="rt-snip">{{ s.snippet }}</div>
+                </div>
+              </div>
                 <!-- 用户上传图片（本地 dataUrl 预览 / 历史 URL） -->
                 <div v-if="m.role === 'user' && m.images && m.images.length" class="msg-imgs">
                   <img v-for="(u, ui) in m.images" :key="ui" :src="resolveImg(u)"
@@ -622,7 +636,8 @@ async function switchSession(sid) {
           related: [],
           thinking: m.thinking || '',
           thinkOpen: false,
-          time: m.createTime ? new Date(m.createTime).getTime() : null
+          time: m.createTime ? new Date(m.createTime).getTime() : null,
+          retrieved: (() => { try { return m.retrieved ? JSON.parse(m.retrieved) : null } catch (e) { return null } })()
         }))
       scroll()
     } else {
@@ -867,6 +882,15 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1,
     },
     onToken: t => { gotToken = true; full += t; messages.value[idx].content = full; messages.value[idx].stage = ''; messages.value[idx].thinkLoading = false; scroll() },
     onStage: s => { messages.value[idx].stage = s; scroll() },
+    onRetrieved: payload => {
+      try {
+        const j = JSON.parse(payload)
+        // 检索状态行（含检索词列表，展开明细用）；到达即清阶段提示
+        messages.value[idx].retrieved = { keywords: j.keywords || 0, refs: j.refs || 0, terms: j.terms || [] }
+        messages.value[idx].stage = ''
+        scroll()
+      } catch (e) { /* 忽略 */ }
+    },
     onImage: imgs => {
       try {
         const parsed = JSON.parse(imgs)
@@ -1261,7 +1285,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
    p 为 v-html 动态内容不带 scoped 属性，需 :deep 穿透） */
 .bubble.user :deep(.md > p) { margin: 0; }
 .bubble.ai { background: transparent; padding: 0; }
-.input { padding: 12px 48px 16px; border-top: 1px solid #f0f0f0; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.input { padding: 12px 48px 16px; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
 /* 输入卡片：无内边框文本在上，工具行在下 */
 .input-box {
   position: relative; flex: 1; min-width: 0; max-width: 860px;
@@ -1420,6 +1444,19 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .act-icon-btn.act-danger:hover:not(:disabled) { color: #ff4d4f; background: rgba(255,77,79,.08); }
 .act-icon-btn:disabled { cursor: not-allowed; opacity: .4; }
 .act-icon-btn.fb-active { color: #1677ff; }
+/* 检索状态行（豆包式，回答气泡上方）：搜索 N 个关键词，参考 M 段资料 */
+.retrieval-line { font-size: 12px; color: #999; margin-bottom: 6px; user-select: none; cursor: pointer; }
+.retrieval-line:hover { color: #1677ff; }
+.rt-arrow { font-size: 10px; margin-left: 2px; transition: transform .15s; }
+.rt-arrow.open { transform: rotate(180deg); }
+.retrieval-detail {
+  font-size: 12px; color: #888; background: #fafafa; border: 1px solid #f0f0f0;
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; width: 100%;
+}
+.rt-terms { margin-bottom: 6px; color: #666; }
+.rt-ref { padding: 3px 0; border-top: 1px dashed #ececec; }
+.rt-ref-tag { color: #1677ff; margin-right: 4px; }
+.rt-snip { color: #bbb; margin-top: 2px; }
 /* 检索进度提示（首 token 前的阶段状态：理解问题/检索资料/生成回答） */
 .stage-hint
 .stage-hint { margin-top: 6px; font-size: 13px; color: #1677ff; display: flex; align-items: center; gap: 6px; }

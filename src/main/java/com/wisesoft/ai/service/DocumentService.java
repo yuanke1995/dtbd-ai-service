@@ -344,10 +344,9 @@ public class DocumentService {
             deletedFlags.remove(docId);
             parseThreads.put(docId, Thread.currentThread());
             updateProgress(docId, 5, "开始解析");
-            byte[] bytes = Files.readAllBytes(source);
-            // parse 为黑盒（含图片视觉描述，可能较慢），期间进度显示静态值；DocxParser 会逐张图片上报精确进度
+            // 流式解析：直接传源文件 Path（已持久落盘），避免大文件全量读入堆内存
             updateProgress(docId, 10, "解析文档内容(图片较多时较慢)");
-            List<Chunk> chunks = parser.parse(bytes, fileName, docId,
+            List<Chunk> chunks = parser.parse(source, fileName, docId,
                     (percent, desc) -> updateProgress(docId, percent, desc));
             // 分块重叠：不再改写块正文（content 保持净内容），重叠尾巴作为 embedding 文本前缀在循环内计算——
             // 不入库、不进指纹，因此邻块变动不会连锁改变本块指纹（chunk.overlap 可调，0=关闭）

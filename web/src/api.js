@@ -91,7 +91,7 @@ function upload(path, formData, onProgress) {
  * signal 用于停止生成（AbortController.abort()）
  * deepThink=true 时后端先流式输出思考过程（thinking / thinking_done 事件）
  */
-export function sendQuestion(sessionId, question, images = [], { onToken, onImage, onDone, onError, onThinking, onThinkingDone, onWarn, onStage, deepThink = false, signal }) {
+export function sendQuestion(sessionId, question, images = [], { onToken, onImage, onDone, onError, onThinking, onThinkingDone, onWarn, onStage, onRetrieved, deepThink = false, signal }) {
   fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: authHeaders(),
@@ -119,6 +119,7 @@ export function sendQuestion(sessionId, question, images = [], { onToken, onImag
               const d = JSON.parse(line.substring(5).trim())
               if (d.type === 'token') { onToken(d.content) }
               else if (d.type === 'stage') { onStage && onStage(d.content) }
+              else if (d.type === 'retrieved') { onRetrieved && onRetrieved(d.content) }
               else if (d.type === 'thinking') { onThinking && onThinking(d.content) }
               else if (d.type === 'thinking_done') { onThinkingDone && onThinkingDone(d.content) }
               else if (d.type === 'image') { console.log('[SSE] 收到 image 事件:', d.content); onImage(d.content) }
@@ -222,6 +223,13 @@ export const submitFeedback = (messageId, rating, feedbackText) =>
 
 /** 看板统计 */
 export const getAnalytics = () => request('/analytics/summary')
+
+/** 差评样本列表（反馈回流：问题/回答摘要/反馈说明/引用块） */
+export const getBadCases = () => request('/analytics/badcases')
+
+/** 追加单条评估 case（差评回流：问题 → 引用过的知识块） */
+export const addEvalCase = (question, knowledgeIds) =>
+  request('/eval/case', { method: 'POST', body: JSON.stringify({ question, knowledgeIds }) })
 
 /** 知识块详情（引用溯源全文） */
 export const getKnowledgeDetail = id => request(`/knowledge/${id}`)

@@ -6,6 +6,7 @@ import com.alibaba.fastjson2.JSONObject;
 import com.wisesoft.ai.dto.ResultJson;
 import com.wisesoft.ai.service.RetrievalEvaluationService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -30,6 +31,17 @@ public class EvaluationController {
     }
 
     /** 从历史问答回放生成评估集 */
+    @Operation(summary = "追加单条评估 case", description = "差评回流：把「问题 → 引用过的知识块」加入评估集（按问题去重，失效期望块自动剔除）")
+    @PostMapping("/case")
+    public ResultJson addCase(
+            @Parameter(description = "{\"question\": \"问题\", \"knowledgeIds\": [\"期望知识块ID\"]}")
+            @org.springframework.web.bind.annotation.RequestBody Map<String, Object> body) {
+        String question = body.get("question") == null ? "" : String.valueOf(body.get("question"));
+        List<String> knowledgeIds = body.get("knowledgeIds") instanceof List<?> list
+                ? list.stream().map(String::valueOf).toList() : List.of();
+        return ResultJson.ok(evalService.addCase(question, knowledgeIds));
+    }
+
     @Operation(summary = "生成评估集（回放 c_ai_message.sources）")
     @PostMapping("/generate")
     public ResultJson<RetrievalEvaluationService.EvalSet> generate(@RequestBody(required = false) Map<String, Object> body) {
