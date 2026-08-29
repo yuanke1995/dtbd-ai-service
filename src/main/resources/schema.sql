@@ -122,6 +122,21 @@ CREATE TABLE IF NOT EXISTS `c_ai_image_desc` (
     PRIMARY KEY (`cache_key`),
     KEY `idx_update` (`update_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='图片描述缓存(内容寻址,持久化)';
+CREATE TABLE IF NOT EXISTS `c_ai_answer_cache` (
+    `id`          VARCHAR(50)   NOT NULL COMMENT '主键ID',
+    `question`    TEXT          NOT NULL COMMENT '原始问题',
+    `embedding`   MEDIUMTEXT    NOT NULL COMMENT '问题向量 (JSON float 数组)',
+    `answer`      MEDIUMTEXT    NOT NULL COMMENT '完整回答 (含 [N] 引用与 [图片N] 标记)',
+    `sources`     TEXT          DEFAULT NULL COMMENT '引用来源 (JSON)',
+    `images`      TEXT          DEFAULT NULL COMMENT '关联图片 URL (JSON 数组)',
+    `related`     TEXT          DEFAULT NULL COMMENT '相关追问 (JSON 数组)',
+    `message_id`  VARCHAR(50)   DEFAULT NULL COMMENT '关联消息ID (反馈用)',
+    `hit_count`   INT           DEFAULT 0 COMMENT '命中次数',
+    `create_time` DATETIME      DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_create` (`create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='相似问题答案缓存 (知识库变更时整体清空)';
+
 CREATE TABLE IF NOT EXISTS `c_ai_config` (
     `config_key`    VARCHAR(64)   NOT NULL COMMENT '配置键（chat.model/chat.temperature/vision.model/...）',
     `config_value`  TEXT          NOT NULL COMMENT '配置值（TEXT 以容纳长 system prompt）',

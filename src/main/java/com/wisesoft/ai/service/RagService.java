@@ -2,6 +2,7 @@ package com.wisesoft.ai.service;
 
 import com.alibaba.fastjson2.JSON;
 import com.wisesoft.ai.config.AiAppProperties;
+import com.wisesoft.ai.model.AiAnswerCache;
 import com.wisesoft.ai.util.TokenCounter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -53,7 +54,11 @@ public class RagService {
      * 仅当 chat.showDebugDegradations=true 时展示（默认只进 [FAIL-LOUD] 日志）。
      */
     private static final Set<String> USER_DEGRADATION_CODES = Set.of(
-            "noHit", "streamError", "deepThinkDegraded", "contextTruncated", "imgFilterDropped");
+            "noHit", "streamError", "deepThinkDegraded", "contextTruncated", "imgFilterDropped",
+            "invalidCitation", "cacheHit");
+
+    /** 引用角标 [N]（用于完成阶段校验编号是否超出来源范围，剔除 LLM 编造的无效引用） */
+    private static final Pattern CITE_PATTERN = Pattern.compile("\\[(\\d+)]");
 
     /** fail-loud：按 code 去重添加降级事件（user 级默认展示；debug 级由 chat.showDebugDegradations 开关控制） */
     private void addDegradation(List<Map<String, String>> list, Set<String> codes, String code, String msg) {
@@ -81,6 +86,50 @@ public class RagService {
     /** 引用摘要截断长度 */
     private static final int SNIPPET_LEN = 80;
 
+    /**
+     * 语义缓存命中直出：跳过检索与 LLM，把历史回答作为完整回答一次性下发（SSE 事件序列与正常路径一致）。
+     * 会话历史与问答日志照常落库，保证会话恢复/反馈/看板链路不受影响。
+     */
+    private void serveFromCache(String sessionId, String question, AiAnswerCache cached, SseEmitter emitter, long startTime) {
+        try {
+            List<Map<String, Object>> sources = cached.getSources() == null ? List.of()
+                    : JSON.parseObject(cached.getSources(), new com.alibaba.fastjson2.TypeReference<List<Map<String, Object>>>() {
+                    });
+            List<String> images = cached.getImages() == null ? List.of()
+                    : JSON.parseArray(cached.getImages(), String.class);
+            List<String> related = cached.getRelated() == null ? List.of()
+                    : JSON.parseArray(cached.getRelated(), String.class);
+            // 图片 URL 动态签名（与正常路径一致，避免签名过期 401）
+            if (!images.isEmpty()) {
+                List<String> signed = images.stream().map(imageUrlSigner::signUrl).toList();
+                sendSseEvent(emitter, "image", JSON.toJSONString(signed), sessionId);
+            }
+            sendSseEvent(emitter, "token", cached.getAnswer(), sessionId);
+            // 会话历史 + 问答日志照常落库
+            sessionService.appendMessage(sessionId, "user", question, null, null);
+            sessionService.appendMessage(sessionId, "assistant", cached.getAnswer(), images, cached.getSources());
+            List<String> hitDocIds = sources.stream().map(s -> String.valueOf(s.get("docId"))).toList();
+            qaLogService.logAsync(sessionId, question, cached.getAnswer(), hitDocIds,
+                    !sources.isEmpty(), System.currentTimeMillis() - startTime, question);
+            Map<String, Object> donePayload = new LinkedHashMap<>();
+            donePayload.put("sources", sources);
+            donePayload.put("related", related);
+            donePayload.put("messageId", cached.getMessageId());
+            donePayload.put("finalContent", cached.getAnswer());
+            donePayload.put("finalImages", images);
+            donePayload.put("degradations", List.of(Map.of(
+                    "code", "cacheHit",
+                    "msg", "已复用相似问题「" + cached.getQuestion() + "」的回答（知识库未变化时的加速策略）",
+                    "level", "user")));
+            sendSseEvent(emitter, "done", JSON.toJSONString(donePayload), sessionId);
+        } catch (Exception e) {
+            log.warn("[ANSWER-CACHE] 缓存回答下发失败: {}", e.getMessage());
+            sendSseEvent(emitter, "error", "回答下发失败，请重试", sessionId);
+        } finally {
+            completeEmitter(emitter);
+        }
+    }
+
     private static final Pattern relatedPattern = Pattern.compile("<related>([\\s\\S]*?)</related>");
     /** 全局编号后的图片占位：[图片N] 或 [图片N：描述]（描述内不含 ]；用于收集片段截取丢掉的图） */
     private static final Pattern IMG_NUMBER_PATTERN = Pattern.compile("\\[图片\\d+[^\\]]*\\]");
@@ -98,6 +147,7 @@ public class RagService {
     private final ImageFilterService imageFilterService;
     private final KeywordExtractor keywordExtractor;
     private final KnowledgeRefService knowledgeRefService;
+    private final AnswerCacheService answerCacheService;
 
     /** M1：查询改写专用线程池（隔离超时任务，避免占用公共池/无限堆积） */
     private final ExecutorService rewriteExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -153,7 +203,8 @@ public class RagService {
                       ConfigService configService,
                       ImageFilterService imageFilterService,
                       KeywordExtractor keywordExtractor,
-                      KnowledgeRefService knowledgeRefService) {
+                      KnowledgeRefService knowledgeRefService,
+                      AnswerCacheService answerCacheService) {
         this.chatClient = chatClientBuilder.build();
         this.sessionService = sessionService;
         this.properties = properties;
@@ -167,6 +218,7 @@ public class RagService {
         this.imageFilterService = imageFilterService;
         this.keywordExtractor = keywordExtractor;
         this.knowledgeRefService = knowledgeRefService;
+        this.answerCacheService = answerCacheService;
     }
 
     /**
@@ -198,11 +250,22 @@ public class RagService {
         List<Map<String, String>> degradations = new ArrayList<>();
         Set<String> degradedCodes = new HashSet<>();
         try {
+            // 0. 进度提示：理解问题阶段（图片描述/改写/缓存查询都有耗时，先给用户反馈）
+            sendSseEvent(emitter, "stage", "正在理解问题…", sessionId);
             // 0. 用户上传图片：并行保存+视觉描述（用于上下文与检索召回）
             List<UserImageService.UserImage> userImgs = userImageService.process(userImages);
             String imgDescText = userImgs.isEmpty() ? "" : userImgs.stream()
                     .map(i -> "- " + (i.desc().isBlank() ? "（图片内容无法识别）" : i.desc()))
                     .collect(Collectors.joining("\n"));
+
+            // 0. 相似问题语义缓存：命中直接返回历史答案（跳过改写/检索/LLM；带图片的提问不走缓存）
+            if (userImgs.isEmpty()) {
+                AiAnswerCache cached = answerCacheService.lookup(question);
+                if (cached != null) {
+                    serveFromCache(sessionId, question, cached, emitter, startTime);
+                    return;
+                }
+            }
 
             // 0. 查询改写（支持多轮历史上下文；失败降级为原始问题并上报 fail-loud；M2：关闭时跳过历史查询）
             String retrievalQuery = question;
@@ -241,6 +304,7 @@ public class RagService {
                 if (dr.ok()) {
                     String rankQuery;
                     // 多路检索：精化 query + 子问题并行召回合并；开关关闭时单路精化 query
+                    sendSseEvent(emitter, "stage", "正在检索资料…", sessionId);
                     if (configService.getBoolean("deepReasoning.multiRetrieval")) {
                         List<String> queries = new ArrayList<>();
                         queries.add(dr.refinedQuery());
@@ -263,6 +327,7 @@ public class RagService {
             }
             // 降级/未开启深度思考：走普通单路检索
             if (hits == null) {
+                sendSseEvent(emitter, "stage", "正在检索资料…", sessionId);
                 hits = hybridRetrievalService.search(retrievalQuery, retrievalDiag);
                 hits = rerankIfNeeded(hits, retrievalQuery, degradations, degradedCodes);
             }
@@ -484,6 +549,7 @@ public class RagService {
             }
 
             // 5. 异步流式生成（缓冲过滤 <related> 块：跨 token 分割也能正确剥离，前端不会看到标签原文）
+            sendSseEvent(emitter, "stage", "正在生成回答…", sessionId);
             AnswerStreamState st = new AnswerStreamState(sessionId, question, emitter,
                     imgIndex, imgDescIndex, sources, userImgs, startTime, queryForLog, thinkingHolder,
                     degradations, degradedCodes);
@@ -615,6 +681,29 @@ public class RagService {
                     if (!st.sources.isEmpty() && !answer.matches(".*\\[\\d+\\].*")) {
                         addDegradation(st.degradations, st.degradedCodes, "noCitation", "回答未标注引用来源");
                     }
+                    // 引用编号越界校验：剔除超出来源范围的 [N]（LLM 偶发编造编号，用户点击角标无溯源）
+                    int maxRef = st.sources.size();
+                    if (maxRef > 0) {
+                        java.util.regex.Matcher cm = CITE_PATTERN.matcher(answer);
+                        StringBuilder cb = new StringBuilder();
+                        int invalidRefs = 0;
+                        while (cm.find()) {
+                            int n = Integer.parseInt(cm.group(1));
+                            if (n < 1 || n > maxRef) {
+                                invalidRefs++;
+                                cm.appendReplacement(cb, "");
+                            } else {
+                                cm.appendReplacement(cb, java.util.regex.Matcher.quoteReplacement(cm.group()));
+                            }
+                        }
+                        cm.appendTail(cb);
+                        if (invalidRefs > 0) {
+                            answer = cb.toString();
+                            addDegradation(st.degradations, st.degradedCodes, "invalidCitation",
+                                    "已移除 " + invalidRefs + " 处无效的引用标注（编号超出来源范围）");
+                            log.info("[CITE-CHECK] 剔除越界引用 {} 处 (maxRef={})", invalidRefs, maxRef);
+                        }
+                    }
 
                     // 记录对话历史（含图片与引用来源），拿到消息ID供前端反馈
                     String sourcesJson = st.sources.isEmpty() ? null : JSON.toJSONString(st.sources);
@@ -629,6 +718,11 @@ public class RagService {
                     qaLogService.logAsync(st.sessionId, st.question, answer, hitDocIds,
                             !st.sources.isEmpty(), System.currentTimeMillis() - st.startTime,
                             st.queryForLog);
+
+                    // 相似问题语义缓存写入（带图片提问/流式中断的回答不入缓存；异步不阻塞）
+                    if (st.userImgs.isEmpty() && !st.degradedCodes.contains("streamError")) {
+                        answerCacheService.storeAsync(st.question, answer, sourcesJson, finalImgs, related, messageId);
+                    }
 
                     // done 事件：引用来源/相关推荐/消息ID + 校验修正后的内容/图片 + 思考全文 + 本轮全部降级事件（fail-loud）
                     Map<String, Object> donePayload = new LinkedHashMap<>();

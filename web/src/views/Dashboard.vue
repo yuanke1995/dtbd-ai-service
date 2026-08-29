@@ -18,7 +18,14 @@
       <a-col :span="12">
         <a-card title="热门问题 TOP10" size="small">
           <a-table :data-source="summary.topQuestions || []" :columns="qCols" size="small"
-                   row-key="question" :pagination="false" :locale="{ emptyText: '暂无数据' }" />
+                   row-key="question" :pagination="false" :locale="{ emptyText: '暂无数据' }">
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'action'">
+                <a-button type="link" size="small" :loading="addingSuggested === record.question"
+                          @click="addRecommended(record.question)">设为推荐</a-button>
+              </template>
+            </template>
+          </a-table>
         </a-card>
       </a-col>
       <a-col :span="12">
@@ -67,12 +74,25 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
-import { getAnalytics, getUnmatchedQuestions, createKnowledge } from '../api'
+import { getAnalytics, getUnmatchedQuestions, createKnowledge, addSuggested } from '../api'
 
 const qCols = [
   { title: '问题', dataIndex: 'question', key: 'question', ellipsis: true },
-  { title: '次数', dataIndex: 'count', key: 'count', width: 80 }
+  { title: '次数', dataIndex: 'count', key: 'count', width: 80 },
+  { title: '操作', key: 'action', width: 100 }
 ]
+
+// 热门问题一键加入推荐池（欢迎页展示）
+const addingSuggested = ref('')
+const addRecommended = async question => {
+  addingSuggested.value = question
+  try {
+    const r = await addSuggested(question)
+    if (r.success) message.success('已加入推荐问题池，用户侧欢迎页将展示')
+    else message.error(r.msg || '加入失败')
+  } catch (e) { message.error(e.message || '加入失败') }
+  finally { addingSuggested.value = '' }
+}
 
 // 无命中问题 TOP10 带操作（跳转至缺口管理看全部）
 const noHitCols = [

@@ -29,6 +29,11 @@
                           placeholder="AI 助手的角色与回答风格（引用/图片/追问规则由系统固定，不可修改）" />
             </a-form-item>
             <a-form-item>
+              <template #label><a-tooltip :title="tips.suggestedQuestions" placement="top">推荐问题池 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-textarea v-model:value="form.chat.suggestedQuestions" :rows="4"
+                          placeholder="每行一个问题，欢迎页展示前 8 条（数据看板热门问题也可一键加入）" />
+            </a-form-item>
+            <a-form-item>
               <template #label><a-tooltip :title="tips.historyRounds" placement="top">多轮记忆轮数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.chat.historyRounds" :min="0" :max="20" style="width:200px" />
             </a-form-item>
@@ -382,6 +387,29 @@
                    message="深度思考：AI 先流式展示思维链（回答上方折叠面板），思考末尾输出 <search> 检索计划（精化 query + 子问题），多路并行检索合并后回答。默认 maxThinkingTokens=0 不设上限（qwen 思考模式设 max_tokens 会空输出）。失败自动降级为普通回答。" />
         </a-collapse-panel>
 
+        <a-collapse-panel key="semanticCache" :id="'cfg-anchor-semanticCache'" header="语义缓存（相似问题加速）">
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.scEnabled" placement="top">总开关 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.semanticCache.enabled" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.scThreshold" placement="top">相似度阈值 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.semanticCache.threshold" :min="0.8" :max="1" :step="0.01" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.scMaxEntries" placement="top">最大条数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.semanticCache.maxEntries" :min="10" :step="50" style="width:200px" />
+            </a-form-item>
+            <a-form-item label="已缓存">
+              <span>{{ cacheStats.count }} 条</span>
+              <a-button size="small" style="margin-left:12px" :loading="cacheClearing" @click="doClearCache">清空缓存</a-button>
+            </a-form-item>
+          </a-form>
+          <a-alert type="info" show-icon style="margin:0 24px 16px"
+                   message="命中相似问题（≥阈值）时直接复用历史回答：省检索与 LLM 成本、秒级返回，回答下方会标注来源问题。知识库变更（解析/删除/回滚/启停用）时自动整体清空，不会用过期答案。" />
+        </a-collapse-panel>
+
         <a-collapse-panel key="ratelimit" :id="'cfg-anchor-ratelimit'" header="接口限流（防滥用）">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item>
@@ -419,7 +447,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { QuestionCircleOutlined, SaveOutlined } from '@ant-design/icons-vue'
-import { getConfig, saveConfig, checkRerank, checkKeywordEngine } from '../api'
+import { getConfig, saveConfig, checkRerank, checkKeywordEngine, getAnswerCacheStats, clearAnswerCache } from '../api'
 
 // 折叠面板：默认展开常用分组（chat / retrieval / context / deepReasoning），vision / embedding 收起
 const activeKeys = ref(['chat', 'retrieval', 'context', 'deepReasoning'])
@@ -433,6 +461,7 @@ const anchors = [
   { key: 'retrieval', label: '检索设置' },
   { key: 'context', label: '上下文控制' },
   { key: 'deepReasoning', label: '深度思考' },
+  { key: 'semanticCache', label: '语义缓存' },
   { key: 'ratelimit', label: '接口限流' }
 ]
 const currentAnchor = ref('')
@@ -490,6 +519,7 @@ const tips = {
   pipelineThreads: '问答流水线的并发线程数：图片识别、查询改写、检索、深度思考等"重活"在独立线程池执行，不占 Tomcat 请求线程（多用户并发问答时避免请求线程被打满）。调高可支撑更多并发用户，但占用更多 CPU/内存；队列满时新请求会快速返回"系统繁忙"。保存即生效。',
   streamRetryCount: '主 LLM 流式生成在"未输出任何内容"时中断的自动重试次数（0=关闭）。已输出内容后中断不重试（避免重复内容）；重试仍失败会在回答下方给出警示。',
   sseTimeoutMs: '问答 SSE 连接超时（毫秒）：超过后回答被截断，前端提示"回答超时已截断"。深度思考+长回答场景可调大，默认 300000（5 分钟）。',
+  suggestedQuestions: '欢迎页展示的推荐问题（新用户引导）。每行一条、最多 8 条；数据看板的热门问题可一键加入。改动保存后，用户下次进入问答页生效。',
   showDebugDegradations: '回答提示中是否显示调试级降级信息（图片引用剔除/未标注引用/查询改写失败/检索降级等内部细节）。默认关：只显示对用户有意义的信息；调试排障时可开启，所有降级信息仍会写 [FAIL-LOUD] 日志。',
   visionEnabled: '视觉模型总开关。关闭后：文档图片/用户图片都不生成描述——图片仅展示、内容不进检索与回答引用（RAG 对图片语义失效），一般不建议关闭。',
   parseConcurrency: '文档异步解析的并发数（同时解析几个文档）。调高多文档上传更快，但并发解析会同时占用 embedding/Ollama 资源；保存后对新任务生效。',
@@ -515,6 +545,9 @@ const tips = {
   keywordBaseUrl: 'Meilisearch 服务地址（如 http://localhost:7700，docker-compose 部署为容器内地址）。',
   keywordApiKey: 'Meilisearch master key（需与服务端 MEILI_MASTER_KEY 一致）。留空时回退读取环境变量 AI_MEILI_KEY；服务端已设置 key 而此处为空/错误，切换引擎时会校验失败并阻止保存。',
   keywordTimeout: '关键词引擎单次请求超时(ms)：关键词路是辅助召回，超时会自动降级回 MySQL LIKE，不建议设太大。',
+  scEnabled: '语义缓存总开关：提问向量化后与历史问题比对，相似度达阈值直接复用历史回答（跳过检索与 LLM，秒级返回且省成本）。带图片的提问不走缓存。',
+  scThreshold: '命中阈值（余弦相似度 0.8~1）。越高越保守（只有问法几乎一致才命中）；0.96 兼顾准确与命中率的推荐值。知识库变更时缓存自动整体失效。',
+  scMaxEntries: '缓存条数上限，超出按时间淘汰最早的条目。每条存储一次问题向量化 + 完整回答。',
   rlEnabled: '接口限流总开关（Redis 固定窗口计数）。关闭后所有接口不限流；Redis 不可用时即使开启也会自动放行（限流是保护措施，不比业务先挂）。',
   rlChat: '每个用户每分钟最多发起的问答次数（0=不限流）。匿名请求（网关未透传 X-User-Id）按 IP 维度共享额度。用于防止滥用与成本失控。',
   rlUpload: '每个用户每分钟最多上传文档的次数（0=不限流）。批量上传按一次请求计。解析是重资源操作，限制上传频次可防止解析队列被打满。'
@@ -522,6 +555,17 @@ const tips = {
 
 const loading = ref(false)
 const saving = ref(false)
+const cacheStats = ref({ count: 0 })
+const cacheClearing = ref(false)
+const doClearCache = async () => {
+  cacheClearing.value = true
+  try {
+    const r = await clearAnswerCache()
+    if (r.success) { cacheStats.value = { count: 0 }; message.success('答案缓存已清空') }
+    else message.error(r.msg || '清空失败')
+  } catch (e) { message.error(e.message || '清空失败') }
+  finally { cacheClearing.value = false }
+}
 const rerankChecking = ref(false)
 const keywordChecking = ref(false)
 
@@ -564,7 +608,7 @@ const onRerankEnabledChange = async checked => {
     rerankChecking.value = false
   }
 }
-const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8, streamRetryCount: 1, sseTimeoutMs: 300000, showDebugDegradations: false },
+const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', suggestedQuestions: '', remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8, streamRetryCount: 1, sseTimeoutMs: 300000, showDebugDegradations: false },
                     vision: { enabled: true, model: '', prompt: '', concurrency: 4, userImageConcurrency: 2 },
                     chunk: { maxChunks: 3000, maxImages: 100, overlap: 100, concurrency: 2, ocrMinText: 20, structural: true, structuralRatio: 0.8, embedRetryCount: 1 },
                     upload: { maxFileSizeMB: 200 },
@@ -583,7 +627,8 @@ const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remain
                     deepReasoning: { enabled: true, thinkingMode: 'model', enableThinking: true, prompt: '',
                                      searchTag: 'search', maxSubQueries: 3, multiRetrieval: true,
                                      timeoutMillis: 30000, maxThinkingTokens: 0 },
-                    ratelimit: { enabled: true, chatPerMinute: 10, uploadPerMinute: 10 } })
+                    ratelimit: { enabled: true, chatPerMinute: 10, uploadPerMinute: 10 },
+                    semanticCache: { enabled: true, threshold: 0.96, maxEntries: 500 } })
 const ro = ref({ chat: {}, vision: {}, embedding: {} })
 
 onMounted(async () => {
@@ -595,6 +640,7 @@ onMounted(async () => {
       form.value.chat.model = d.chat?.model?.value || ''
       form.value.chat.temperature = Number(d.chat?.temperature?.value ?? 0.3)
       form.value.chat.systemPrompt = d.chat?.systemPrompt?.value || ''
+      form.value.chat.suggestedQuestions = d.chat?.suggestedQuestions?.value || ''
       form.value.chat.remainTokenFloor = Number(d.chat?.remainTokenFloor?.value ?? 800)
       form.value.chat.truncateFallbackChars = Number(d.chat?.truncateFallbackChars?.value ?? 200)
       form.value.chat.historyRounds = Number(d.chat?.historyRounds?.value ?? 5)
@@ -674,6 +720,12 @@ onMounted(async () => {
       form.value.ratelimit.enabled = rl.enabled?.value !== 'false'
       form.value.ratelimit.chatPerMinute = Number(rl.chatPerMinute?.value ?? 10)
       form.value.ratelimit.uploadPerMinute = Number(rl.uploadPerMinute?.value ?? 10)
+      const sc = d.semanticCache || {}
+      form.value.semanticCache.enabled = sc.enabled?.value !== 'false'
+      form.value.semanticCache.threshold = Number(sc.threshold?.value ?? 0.96)
+      form.value.semanticCache.maxEntries = Number(sc.maxEntries?.value ?? 500)
+      // 缓存统计（条数）异步刷新
+      getAnswerCacheStats().then(r => { if (r.success) cacheStats.value = r.data }).catch(() => {})
       ro.value.chat = { baseUrl: d.chat?.baseUrl?.value || '', apiKey: d.chat?.apiKey?.value || '' }
       ro.value.vision = { baseUrl: d.vision?.baseUrl?.value || '', apiKey: d.vision?.apiKey?.value || '' }
       ro.value.embedding = { model: d.embedding?.model?.value || '' }
@@ -703,6 +755,7 @@ const save = async () => {
     const r = await saveConfig({
       chat: { model: form.value.chat.model?.trim(), temperature: String(form.value.chat.temperature),
               systemPrompt: form.value.chat.systemPrompt?.trim(),
+              suggestedQuestions: form.value.chat.suggestedQuestions?.trim(),
               remainTokenFloor: String(form.value.chat.remainTokenFloor),
               truncateFallbackChars: String(form.value.chat.truncateFallbackChars),
               historyRounds: String(form.value.chat.historyRounds),
@@ -772,7 +825,10 @@ const save = async () => {
                        maxThinkingTokens: String(form.value.deepReasoning.maxThinkingTokens) },
       ratelimit: { enabled: String(form.value.ratelimit.enabled),
                    chatPerMinute: String(form.value.ratelimit.chatPerMinute),
-                   uploadPerMinute: String(form.value.ratelimit.uploadPerMinute) }
+                   uploadPerMinute: String(form.value.ratelimit.uploadPerMinute) },
+      semanticCache: { enabled: String(form.value.semanticCache.enabled),
+                       threshold: String(form.value.semanticCache.threshold),
+                       maxEntries: String(form.value.semanticCache.maxEntries) }
     })
     if (r.success) message.success('配置已保存并生效')
     else message.error(r.msg || '保存失败')

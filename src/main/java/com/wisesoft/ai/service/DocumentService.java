@@ -72,6 +72,7 @@ public class DocumentService {
     private final KeywordIndexService keywordIndexService;
     /** 知识块引用关系（交叉引用识别 + 1-hop 扩散）：与块/文档同生命周期重建 */
     private final KnowledgeRefService knowledgeRefService;
+    private final AnswerCacheService answerCacheService;
     /** docx 解析器：图片描述补齐用（解析时失败/超限的图，按 URL 重新描述） */
     private final DocxParser docxParser;
     /** 解析进度节流守卫：docId -> 已上报 progress（值未变化不写库） */
@@ -241,6 +242,7 @@ public class DocumentService {
      */
     public boolean embedAndStore(AiKnowledge k, String content) {
         try {
+            answerCacheService.clearAll();
             Map<String, Object> metadata = new HashMap<>();
             if (k.getDocId() != null) {
                 metadata.put("docId", k.getDocId());
@@ -520,6 +522,8 @@ public class DocumentService {
             doc.setStatus(0);
             doc.setFailReason(null);
             documentMapper.updateById(doc);
+            // 知识库变更：相似问题答案缓存整体失效（缓存答案对应旧知识库快照）
+            answerCacheService.clearAll();
             // 版本管理：成功解析后版本号 +1 并保存快照
             try {
                 int newVersion = (doc.getVersion() == null ? 0 : doc.getVersion()) + 1;
@@ -560,6 +564,7 @@ public class DocumentService {
                 // 重解析失败：未变旧块仍在（变更块已被 diff 清理），回退到生效状态继续可用
                 doc.setStatus(0);
                 doc.setFailReason("重解析失败，已保留上一版内容: " + truncate(e.getMessage()));
+                answerCacheService.clearAll();
             } else {
                 // 全新解析失败：无旧内容可回退，清理图片目录并置失败
                 cleanupImages(docId);
@@ -580,6 +585,7 @@ public class DocumentService {
      * 删除文档（向量/MySQL/图片分别清理）
      */
     public void delete(String docId) {
+        answerCacheService.clearAll();
         // 立即标记删除 + 中断解析线程（图片 join 等待立即响应，不再等阶段检查点）
         // 多实例语义：deletedFlags/parseThreads 为进程内存态——本实例解析的任务可立即中断；
         // 其他实例上运行的解析任务由 isDocAlive 的 DB 兜底感知（删除后 selectById 为 null），
@@ -683,6 +689,7 @@ public class DocumentService {
         doc.setStatus(status);
         documentMapper.updateById(doc);
         documentMetaCache.invalidate(docId);
+        answerCacheService.clearAll();
         // 关键词索引同步（best-effort，失败仅告警；检索侧 loadNonRetrievableDocIds 已兜底过滤弃用）
         try {
             if (status == 1) {
@@ -985,6 +992,7 @@ public class DocumentService {
         if (configService.getBoolean("retrieval.refDetectEnabled")) {
             knowledgeRefService.rebuildByDocId(docId);
         }
+        answerCacheService.clearAll();
         log.info("[{}] 回滚到 v{} 完成: {} chunks", docId, version, snapshot.size());
     }
 

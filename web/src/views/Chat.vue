@@ -61,7 +61,12 @@
                   </div>
                 </div>
                 <div class="md" :data-msg-index="i" v-html="renderMd(m.content, m.images)"></div>
-                <a-spin v-if="m.loading" size="small" style="margin-top:4px" />
+                <!-- 检索进度提示：首 token 前显示后端 stage 事件（自带加载图标，与下方 spinner 互斥） -->
+                <div v-if="m.loading && m.stage && !m.content" class="stage-hint">
+                  <loading-outlined /> {{ m.stage }}
+                </div>
+                <!-- 内容生成中：仅当已有正文在流出时显示（文字增长本身就是进度，避免与阶段提示双重转圈） -->
+                <a-spin v-if="m.loading && m.content" size="small" style="margin-top:4px" />
                 <!-- fail-loud：本轮回答的降级事件警示（检索失败/改写失败/重排不可用/上下文截断等） -->
                 <div v-if="m.role === 'ai' && m.degradations && m.degradations.length" class="degradation-bar">
                   <exclamation-circle-outlined style="margin-right:6px" />
@@ -229,7 +234,7 @@
               :disabled="loading"
               :auto-size="{ minRows: 1, maxRows: 6 }"
               class="input-area"
-              @keydown.enter.exact.prevent="send"
+              @keydown.enter.exact.prevent="onEnterKey"
             />
             <div class="input-suffix">
               <a-tooltip title="上传图片（最多 5 张，随问题一起发送）">
@@ -251,8 +256,8 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval } from '../api'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined, LoadingOutlined } from '@ant-design/icons-vue'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval, getSuggested } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 import { renderMd, resolveImg, onImgError, copyCode, prepKnowledgeContent } from '../utils/markdown'
 
@@ -329,7 +334,9 @@ function onSidebarDrag(e) {
   window.addEventListener('mouseup', onUp)
 }
 
-const tips = ['系统有哪些功能？', '如何创建一个新表单？', '字段验证怎么设置？', '什么是填报周期？']
+// 推荐问题池：DB 配置（chat.suggestedQuestions，设置页/看板可管理）；加载失败回退内置默认
+const FALLBACK_TIPS = ['系统有哪些功能？', '如何创建一个新表单？', '字段验证怎么设置？', '什么是填报周期？']
+const tips = ref(FALLBACK_TIPS)
 
 // 文档图片访问：data URL（用户上传预览）原样返回；http 原样；其余走 /proxy
 // 点击回答内容：复制按钮 / 引用角标 [N] → 来源详情；图片 → 灯箱预览（事件委托）
@@ -542,6 +549,10 @@ onMounted(async () => {
     await createNewSession()
   }
   focusInput()
+  // 推荐问题池：DB 配置优先（失败静默回退内置默认）
+  getSuggested().then(r => {
+    if (r.success && Array.isArray(r.data) && r.data.length) tips.value = r.data
+  }).catch(() => {})
 })
 
 // 加载会话列表（支持关键词搜索）
@@ -766,15 +777,23 @@ const send = () => {
   streamAnswer(q, imgs, null, messages.value.length === 1, 1, deep)
 }
 
+// 回车发送：中文输入法组合中的 Enter（选词确认，isComposing/keyCode 229）必须交还输入法，
+// 否则确认候选词的 Enter 会触发发送——消息发出、输入框清空后，输入法又把确认文本回填，
+// 表现为"消息已发送但问题还在输入框里"
+const onEnterKey = e => {
+  if (e.isComposing || e.keyCode === 229) return
+  send()
+}
+
 // 统一流式回答：replaceIdx 为 null 追加新 AI 消息；否则替换该条（重新生成）
 // autoRetry：剩余自动重试次数（仅"未收到任何 token"的瞬时断连才自动重试，避免清空已生成内容）
 // deepThink：是否深度思考（开启后后端先流式下发 thinking 事件）
 const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1, deepThink = false) => {
   const idx = replaceIdx ?? messages.value.length
   if (replaceIdx == null) {
-    messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, thinking: '', thinkOpen: true, thinkLoading: false })
+    messages.value.push({ role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, thinking: '', thinkOpen: true, thinkLoading: false, stage: '正在思考中…' })
   } else {
-    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, messageId: null, fb: null, thinking: '', thinkOpen: true, thinkLoading: false }
+    messages.value[replaceIdx] = { role: 'ai', content: '', images: [], sources: [], related: [], degradations: [], warnMsg: '', loading: true, messageId: null, fb: null, thinking: '', thinkOpen: true, thinkLoading: false, stage: '正在思考中…' }
   }
   loading.value = true
   // 发送后立即滚到底部：不等第一个 token（深度思考/图片处理时 AI 迟迟不出字，视角也要先到最下看到 loading 气泡）
@@ -804,7 +823,8 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1,
         if (j.thinking) m.thinking = j.thinking
       } catch (e) { /* 兼容旧 payload */ }
     },
-    onToken: t => { gotToken = true; full += t; messages.value[idx].content = full; messages.value[idx].thinkLoading = false; scroll() },
+    onToken: t => { gotToken = true; full += t; messages.value[idx].content = full; messages.value[idx].stage = ''; messages.value[idx].thinkLoading = false; scroll() },
+    onStage: s => { messages.value[idx].stage = s; scroll() },
     onImage: imgs => {
       try {
         const parsed = JSON.parse(imgs)
@@ -1266,6 +1286,8 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
   font-size: 12px; line-height: 1.6; display: flex; flex-wrap: wrap; gap: 4px 12px;
 }
 .degradation-item { display: inline-block; }
+/* 检索进度提示（首 token 前的阶段状态：理解问题/检索资料/生成回答） */
+.stage-hint { margin-top: 6px; font-size: 13px; color: #1677ff; display: flex; align-items: center; gap: 6px; }
 /* 回答反馈（默认隐藏，hover 消息块时悬浮显示；保留整行可 hover 避免移过去按钮消失） */
 .fb-row {
   margin-top: 10px;

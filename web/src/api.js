@@ -91,7 +91,7 @@ function upload(path, formData, onProgress) {
  * signal 用于停止生成（AbortController.abort()）
  * deepThink=true 时后端先流式输出思考过程（thinking / thinking_done 事件）
  */
-export function sendQuestion(sessionId, question, images = [], { onToken, onImage, onDone, onError, onThinking, onThinkingDone, onWarn, deepThink = false, signal }) {
+export function sendQuestion(sessionId, question, images = [], { onToken, onImage, onDone, onError, onThinking, onThinkingDone, onWarn, onStage, deepThink = false, signal }) {
   fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: authHeaders(),
@@ -118,6 +118,7 @@ export function sendQuestion(sessionId, question, images = [], { onToken, onImag
             try {
               const d = JSON.parse(line.substring(5).trim())
               if (d.type === 'token') { onToken(d.content) }
+              else if (d.type === 'stage') { onStage && onStage(d.content) }
               else if (d.type === 'thinking') { onThinking && onThinking(d.content) }
               else if (d.type === 'thinking_done') { onThinkingDone && onThinkingDone(d.content) }
               else if (d.type === 'image') { console.log('[SSE] 收到 image 事件:', d.content); onImage(d.content) }
@@ -243,6 +244,19 @@ export const reindexSearchIndex = () => request('/search-index/reindex', { metho
 
 /** 模型配置：保存可编辑项 {"chat":{...},"vision":{...}} */
 export const saveConfig = payload => request('/config', { method: 'PUT', body: JSON.stringify(payload) })
+
+/** 推荐问题列表（欢迎页展示，DB 配置） */
+export const getSuggested = () => request('/suggested')
+
+/** 加入推荐问题（看板热门问题一键加入；返回更新后列表） */
+export const addSuggested = question =>
+  request('/suggested', { method: 'POST', body: JSON.stringify({ question }) })
+
+/** 答案缓存统计（条数/阈值/开关） */
+export const getAnswerCacheStats = () => request('/answer-cache')
+
+/** 清空答案缓存 */
+export const clearAnswerCache = () => request('/answer-cache', { method: 'DELETE' })
 
 /** 按文档列出知识块（知识块预览） */
 export const listKnowledgeByDoc = docId => request('/knowledge/list?docId=' + encodeURIComponent(docId))

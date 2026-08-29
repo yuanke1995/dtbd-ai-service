@@ -40,6 +40,7 @@ public class ConfigService {
             Map.entry("chat.streamRetryCount", "主 LLM 流式中断自动重试次数(未输出token时,0=关闭)"),
             Map.entry("chat.sseTimeoutMs", "问答 SSE 超时(毫秒,默认300000)"),
             Map.entry("chat.showDebugDegradations", "回答提示显示调试级降级信息（默认关：只显示用户级）"),
+            Map.entry("chat.suggestedQuestions", "推荐问题池（每行一个，欢迎页展示，最多8条；看板热门问题可一键加入）"),
             Map.entry("vision.enabled", "视觉模型总开关（false 时图片不生成描述）"),
             Map.entry("vision.model", "视觉识别模型名"),
             Map.entry("vision.prompt", "视觉识别提示词"),
@@ -96,7 +97,10 @@ public class ConfigService {
             Map.entry("keyword.timeoutMillis", "关键词引擎：单次超时(ms)"),
             Map.entry("ratelimit.enabled", "接口限流总开关（Redis 固定窗口，按用户/IP）"),
             Map.entry("ratelimit.chatPerMinute", "问答限频：次/分钟/用户(0=不限)"),
-            Map.entry("ratelimit.uploadPerMinute", "上传限频：次/分钟/用户(0=不限)"));
+            Map.entry("ratelimit.uploadPerMinute", "上传限频：次/分钟/用户(0=不限)"),
+            Map.entry("semanticCache.enabled", "语义缓存总开关（相似问题直接复用历史回答）"),
+            Map.entry("semanticCache.threshold", "语义缓存相似度阈值(0.8~1，默认0.96)"),
+            Map.entry("semanticCache.maxEntries", "语义缓存最大条数(超出淘汰最早，默认500)"));
 
     private final AiConfigMapper configMapper;
     private final AiAppProperties properties;
@@ -304,10 +308,15 @@ public class ConfigService {
         d.put("chat.streamRetryCount", "1");               // H2：主 LLM 流式中断（未输出token）自动重试次数
         d.put("chat.sseTimeoutMs", "300000");              // H4：问答 SSE 超时(ms)
         d.put("chat.showDebugDegradations", "false");      // 回答提示：调试级降级信息开关（默认只显示用户级）
+        d.put("chat.suggestedQuestions", "系统有哪些功能？\n如何创建一个新表单？\n字段验证怎么设置？\n什么是填报周期？");  // 欢迎页推荐问题（每行一个）
         // 接口限流（按用户/IP 固定窗口）
         d.put("ratelimit.enabled", String.valueOf(properties.getRatelimit().isEnabled()));
         d.put("ratelimit.chatPerMinute", String.valueOf(properties.getRatelimit().getChatPerMinute()));
         d.put("ratelimit.uploadPerMinute", String.valueOf(properties.getRatelimit().getUploadPerMinute()));
+        // 语义缓存（相似问题直出历史答案；知识库变更时整体失效）
+        d.put("semanticCache.enabled", "true");
+        d.put("semanticCache.threshold", "0.96");
+        d.put("semanticCache.maxEntries", "500");
         return d;
     }
 
@@ -507,9 +516,18 @@ public class ConfigService {
                 throw new IllegalArgumentException("keyword.timeoutMillis 必须是整数");
             }
         }
+        String scThr = updates.get("semanticCache.threshold");
+        if (scThr != null && !scThr.isBlank()) {
+            try {
+                double t = Double.parseDouble(scThr);
+                if (t < 0.8 || t > 1.0) throw new IllegalArgumentException("semanticCache.threshold 需在 0.8~1 之间");
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("semanticCache.threshold 必须是数字");
+            }
+        }
         // 解析参数校验：非负整数（0 表示不限制）
         for (String iKey : new String[]{"chunk.maxChunks", "chunk.maxImages", "vision.concurrency",
-                "ratelimit.chatPerMinute", "ratelimit.uploadPerMinute"}) {
+                "ratelimit.chatPerMinute", "ratelimit.uploadPerMinute", "semanticCache.maxEntries"}) {
             String v = updates.get(iKey);
             if (v != null && !v.isBlank()) {
                 try {
