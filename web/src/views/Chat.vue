@@ -233,12 +233,6 @@
           </a-button>
         </div>
         <div v-if="!selectMode" class="input">
-          <!-- 深度思考图标按钮：输入框左侧（点击切换，开启高亮；localStorage 记忆） -->
-          <div class="input-side">
-            <a-tooltip :title="deepThinkOn ? '深度思考：已开启（点击关闭）' : '深度思考：已关闭（点击开启，AI 先展示思维链再回答）'">
-              <bulb-outlined :class="['dt-icon', { 'dt-icon-on': deepThinkOn }]" @click="toggleDeepThink" />
-            </a-tooltip>
-          </div>
           <!-- 待发送图片预览（点击可放大查看） -->
           <div v-if="pendingImages.length" class="pending-imgs">
             <div v-for="(p, pi) in pendingImages" :key="pi" class="pending-img">
@@ -246,6 +240,7 @@
               <span class="pending-del" @click.stop="removePendingImage(pi)">×</span>
             </div>
           </div>
+          <!-- 豆包式输入卡片：文本在上，工具行在下（图片/深度思考靠左，发送/停止靠右） -->
           <div class="input-box">
             <a-textarea
               ref="textareaRef"
@@ -256,14 +251,17 @@
               class="input-area"
               @keydown.enter.exact.prevent="onEnterKey"
             />
-            <div class="input-suffix">
-              <a-tooltip title="上传图片（最多 5 张，随问题一起发送）">
-                <picture-outlined style="color:#888;cursor:pointer;margin-right:10px" @click="pickImages" />
-              </a-tooltip>
-              <a-button v-if="loading" type="text" size="small" @click="stop" style="color:#ff4d4f">
-                <pause-circle-outlined />
-              </a-button>
-              <send-outlined v-else-if="text.trim() || pendingImages.length" style="color:#1677ff;cursor:pointer" @click="send" />
+            <div class="input-toolbar">
+              <div class="toolbar-left">
+                <a-tooltip title="上传图片（最多 5 张，随问题一起发送）">
+                  <button class="act-icon-btn toolbar-btn" @click="pickImages"><picture-outlined /></button>
+                </a-tooltip>
+                <a-tooltip :title="deepThinkOn ? '深度思考：已开启（点击关闭）' : '深度思考：已关闭（点击开启，AI 先展示思维链再回答）'">
+                  <button class="act-icon-btn toolbar-btn" :class="{ 'toolbar-btn-on': deepThinkOn }" @click="toggleDeepThink"><bulb-outlined /></button>
+                </a-tooltip>
+              </div>
+              <button v-if="loading" class="send-btn stop" title="停止生成" @click="stop"><pause-circle-outlined /></button>
+              <button v-else class="send-btn" title="发送" :disabled="!canSend" @click="send"><arrow-up-outlined /></button>
             </div>
           </div>
           <input ref="fileInput" type="file" accept="image/*" multiple style="display:none" @change="onFilesChange" />
@@ -276,7 +274,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch, h } from 'vue'
 import { message, notification } from 'ant-design-vue'
-import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined, LoadingOutlined, MoreOutlined, DeleteOutlined } from '@ant-design/icons-vue'
+import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined, LoadingOutlined, MoreOutlined, DeleteOutlined, ArrowUpOutlined } from '@ant-design/icons-vue'
 import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval, getSuggested, deleteMessageGroup, undoDeleteMessageGroup, getConfig } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 import { renderMd, resolveImg, onImgError, copyCode, prepKnowledgeContent } from '../utils/markdown'
@@ -285,6 +283,7 @@ const text = ref('')
 const textareaRef = ref(null)
 // 深度思考开关（localStorage 记忆偏好，默认关）
 const deepThinkOn = ref(localStorage.getItem('ai_deep_think') === '1')
+const canSend = computed(() => !!(text.value.trim() || pendingImages.value.length))
 // 思考面板 body 引用（思考中自动滚动到底部，跟随最新内容）
 const thinkingBodyRefs = []
 // 开关变更持久化（script 中访问浏览器全局 localStorage，模板内联表达式会被编译为 _ctx 属性导致 undefined）
@@ -1260,27 +1259,28 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .bubble.user { background: #1677ff; color: #fff; }
 .bubble.ai { background: #f5f5f5; color: #333; }
 .input { padding: 12px 48px 16px; border-top: 1px solid #f0f0f0; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
-/* 深度思考图标按钮：输入框左侧外面 */
-.input-side {
-  flex: 0 0 auto;
-  width: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 8px;
+/* 豆包式输入卡片：无内边框文本在上，工具行在下 */
+.input-box {
+  position: relative; flex: 1; min-width: 0;
+  border: 1px solid #e5e6eb; border-radius: 16px; background: #fff;
+  padding: 8px 10px 6px;
+  transition: border-color .2s, box-shadow .2s;
 }
-.dt-icon {
-  font-size: 16px;
-  color: #bbb;
-  cursor: pointer;
-  padding: 3px;
-  border-radius: 6px;
-  transition: color 0.2s, background 0.2s;
-  user-select: none;
+.input-box:focus-within { border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22,119,255,.08); }
+.input-toolbar { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
+.toolbar-left { display: flex; align-items: center; gap: 2px; }
+.toolbar-btn-on { color: #1677ff !important; background: rgba(22,119,255,.08); }
+.send-btn {
+  width: 32px; height: 32px; border-radius: 50%; border: none;
+  background: #1677ff; color: #fff; font-size: 16px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background .2s, transform .1s;
 }
-.dt-icon:hover { color: #1677ff; background: #e6f4ff; }
-.dt-icon.dt-icon-on { color: #1677ff; }
-.input-box { position: relative; flex: 1; }
+.send-btn:hover:not(:disabled) { background: #4096ff; }
+.send-btn:active:not(:disabled) { transform: scale(.94); }
+.send-btn:disabled { background: #e5e6eb; color: #fff; cursor: not-allowed; }
+.send-btn.stop { background: #ff4d4f; }
+.send-btn.stop:hover { background: #ff7875; }
 /* 深度思考折叠面板（AI 气泡内） */
 .think-panel {
   margin: 4px 0 8px;
@@ -1345,24 +1345,13 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 /* 多行自适应输入框：随内容增高（1~6 行），右侧留出发送/停止按钮位 */
 .input-area {
   resize: none;
-  padding: 6px 44px 6px 12px;
+  padding: 2px 4px;
   font-size: 14px;
   line-height: 1.6;
-  border-radius: 8px;
+  border: none;
+  background: transparent;
 }
-.input-area:focus { border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22,119,255,.1); }
-.input-suffix {
-  position: absolute;
-  right: 12px;
-  bottom: 8px;
-  font-size: 18px;
-  display: flex;
-  align-items: center;
-  line-height: 1;
-}
-.input-suffix :deep(.ant-btn) { padding: 0; }
-.input-suffix .anticon-send { color: #1677ff; }
-.input-suffix .anticon-send:hover { opacity: .8; }
+.input-area:focus { border: none; box-shadow: none; }
 /* 检索调试面板 */
 .dbg-item { padding: 6px 8px; margin-bottom: 6px; border: 1px solid #f0f0f0; border-radius: 6px; background: #fafafa; }
 /* 检索词元展示行 */
