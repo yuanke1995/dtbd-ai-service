@@ -90,15 +90,48 @@ export const prepKnowledgeContent = (content, images) => {
 // 核心渲染：content(markdown，含 [图片N] 占位) + images(数组) → 安全 HTML
 // 产物结构：标题/表格/代码高亮/图文交错(md-img 居中 data-seq)/引用角标(ref-sup)/代码复制按钮(code-copy)
 // 事件委托由调用方处理（点击 .code-copy 调 copyCode；.ref-sup/.md-img 按页面语义处理）
+// 表格容错：LLM 常在标题/列表项后直接跟表格行（无空行），markdown-it 会把表格行吞进列表/段落变成纯文本。
+// 逐行扫描：识别"表头行 + 分隔行(|---|)"表格起点，在其前补空行；分隔行后连续收集表体行。
+// 显式区分表头/分隔/表体，避免误伤正常表格（上一版正则把"分隔行+表体行"误当表格起点，导致表体丢失）。
+const isTableRow = l => /^\s*\|.*\|\s*$/.test(l)
+const isSepRow = l => /^\s*\|[\s:|-]+\|\s*$/.test(l)
+const ensureTableSpacing = text => {
+  const lines = text.split('\n')
+  const res = []
+  let i = 0
+  while (i < lines.length) {
+    // 表格起点：当前是表格行 且 下一行是分隔行（表头+分隔）
+    if (isTableRow(lines[i]) && i + 1 < lines.length && isSepRow(lines[i + 1])) {
+      const prev = res.length ? res[res.length - 1] : ''
+      if (prev.trim() !== '') res.push('') // 表格前补空行（已有空行则 prev 为空不补）
+      res.push(lines[i])                    // 表头行
+      res.push(lines[i + 1])                // 分隔行
+      i += 2
+      while (i < lines.length && isTableRow(lines[i]) && !isSepRow(lines[i])) {
+        res.push(lines[i])                  // 表体行（连续表格行）
+        i++
+      }
+      continue
+    }
+    res.push(lines[i])
+    i++
+  }
+  return res.join('\n')
+}
+
 export const renderMd = (t, images = []) => {
   if (!t) return ''
   // ① 预处理：图片标记 [图片N：描述]/[图片N] → markdown 图片占位（保留位置/顺序）
-  const pre = t.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？\s]*/g, '![img](__AI_IMG_$1__)')
-  // ② 渲染 + 消毒（放行内部图片占位前缀 __AI_IMG_，否则 DOMPurify 会剥掉其 src 导致图片丢失）
+  let pre = t.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？\s]*/g, '![img](__AI_IMG_$1__)')
+  // ② 表格容错：表头前无空行时补空行，让表格独立渲染（已有空行不重复补）
+  pre = ensureTableSpacing(pre)
+  // ③ 清理末尾孤立竖线（LLM 回答结尾偶发残留" |"），避免渲染成一行竖线
+  pre = pre.replace(/\n\s*\|\s*$/g, '')
+  // ④ 渲染 + 消毒（放行内部图片占位前缀 __AI_IMG_，否则 DOMPurify 会剥掉其 src 导致图片丢失）
   let html = DOMPurify.sanitize(md.render(pre), {
     ALLOWED_URI_REGEXP: /^(?:__AI_IMG_|https?:|data:|mailto:|tel:)/i
   })
-  // ③ DOM 后处理（sanitize 之后新建元素不受白名单限制）
+  // ⑤ DOM 后处理（sanitize 之后新建元素不受白名单限制）
   const box = document.createElement('div')
   box.innerHTML = html
   // 图片：占位 → 真实 src + 居中 + data-seq；图片缺失保留原文 [图片N]
