@@ -1,6 +1,7 @@
 package com.wisesoft.ai.controller;
 
 import com.alibaba.fastjson2.JSON;
+import com.wisesoft.ai.common.BizException;
 import com.wisesoft.ai.dto.ChatRequest;
 import com.wisesoft.ai.dto.ResultJson;
 import com.wisesoft.ai.dto.SessionInfo;
@@ -9,13 +10,16 @@ import com.wisesoft.ai.model.AiKnowledge;
 import com.wisesoft.ai.service.ImageUrlSigner;
 import com.wisesoft.ai.service.RagService;
 import com.wisesoft.ai.service.ConfigService;
+import com.wisesoft.ai.service.RateLimitService;
 import com.wisesoft.ai.service.SessionService;
+import com.wisesoft.ai.util.UserContext;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,6 +32,7 @@ import java.util.Map;
 
 /**
  * AI 聊天控制器（SSE 流式）
+ * 用户身份：网关透传 X-User-Id（无则 anonymous）；会话按用户隔离
  *
  * @author yuanke
  */
@@ -43,18 +48,35 @@ public class ChatController {
     private final ImageUrlSigner imageUrlSigner;
     private final AiKnowledgeMapper knowledgeMapper;
     private final ConfigService configService;
+    private final RateLimitService rateLimitService;
 
     @Operation(summary = "SSE 流式问答",
-            description = "发送问题（可含图片），通过 SSE 流式返回 AI 回答。事件类型：thinking（深度思考增量）、thinking_done（思考结束）、token（文本增量）、image（图片 URL 列表）、done（引用来源/相关推荐/消息ID/思考全文）、error（错误信息）")
+            description = "发送问题（可含图片），通过 SSE 流式返回 AI 回答。事件类型：thinking（深度思考增量）、thinking_done（思考结束）、token（文本增量）、image（图片 URL 列表）、done（引用来源/相关推荐/消息ID/思考全文）、error（错误信息）。按用户限频（ratelimit.chatPerMinute）")
     @ApiResponse(responseCode = "200", description = "SSE 流式响应",
             content = @Content(mediaType = "text/event-stream"))
     @PostMapping("/chat")
-    public SseEmitter chat(@RequestBody @Valid ChatRequest request) {
+    public SseEmitter chat(@RequestBody @Valid ChatRequest request, HttpServletRequest httpRequest) {
+        String userId = UserContext.resolve(httpRequest);
+        // 按用户限频（anonymous 落到 IP 维度，避免匿名共享池互相挤兑）
+        rateLimitService.checkRateLimit("chat", UserContext.ANONYMOUS.equals(userId)
+                ? "ip:" + clientIp(httpRequest) : "user:" + userId);
+
         String question = request.getQuestion().trim();
 
         String sessionId = request.getSessionId();
         if (sessionId == null || sessionId.isEmpty()) {
-            sessionId = sessionService.createSession();
+            sessionId = sessionService.createSession(userId);
+        } else {
+            // 客户端传入会话 ID：存在则校验归属（防跨用户读写），不存在则按当前用户补建会话记录（兼容旧客户端行为）
+            try {
+                sessionService.assertOwned(sessionId, userId);
+            } catch (BizException e) {
+                if (e.getCode() == 404) {
+                    sessionId = sessionService.ensureSession(sessionId, userId);
+                } else {
+                    throw e;
+                }
+            }
         }
 
         // 超时配置化（chat.sseTimeoutMs，默认 5 分钟）；超时由 RagService.onTimeout 先发 warn 再 dispose（fail-loud）
@@ -65,12 +87,13 @@ public class ChatController {
         return emitter;
     }
 
-    @Operation(summary = "会话列表", description = "列出所有会话（置顶优先、按更新时间倒序）；支持 keyword 按标题或消息内容模糊搜索")
+    @Operation(summary = "会话列表", description = "列出当前用户的会话（含 anonymous 历史兼容池；置顶优先、按更新时间倒序）；支持 keyword 按标题或消息内容模糊搜索")
     @GetMapping("/sessions")
     public ResultJson listSessions(
             @Parameter(description = "搜索关键词（可选，按标题/消息内容模糊匹配）")
-            @RequestParam(value = "keyword", required = false) String keyword) {
-        List<SessionInfo> sessions = sessionService.listSessions(keyword);
+            @RequestParam(value = "keyword", required = false) String keyword,
+            HttpServletRequest httpRequest) {
+        List<SessionInfo> sessions = sessionService.listSessions(UserContext.resolve(httpRequest), keyword);
         return ResultJson.ok(sessions);
     }
 
@@ -78,9 +101,10 @@ public class ChatController {
     @PutMapping("/session/{sessionId}/pin")
     public ResultJson updatePin(
             @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId,
-            @RequestBody Map<String, Boolean> body) {
+            @RequestBody Map<String, Boolean> body,
+            HttpServletRequest httpRequest) {
         boolean pinned = Boolean.TRUE.equals(body.get("pinned"));
-        sessionService.updatePin(sessionId, pinned);
+        sessionService.updatePin(UserContext.resolve(httpRequest), sessionId, pinned);
         return ResultJson.ok("操作成功");
     }
 
@@ -88,16 +112,19 @@ public class ChatController {
     @PutMapping("/session/{sessionId}/favorite")
     public ResultJson updateFavorite(
             @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId,
-            @RequestBody Map<String, Boolean> body) {
+            @RequestBody Map<String, Boolean> body,
+            HttpServletRequest httpRequest) {
         boolean favorite = Boolean.TRUE.equals(body.get("favorite"));
-        sessionService.updateFavorite(sessionId, favorite);
+        sessionService.updateFavorite(UserContext.resolve(httpRequest), sessionId, favorite);
         return ResultJson.ok("操作成功");
     }
 
-    @Operation(summary = "会话历史", description = "获取指定会话的完整对话历史（含图片与引用来源）")
+    @Operation(summary = "会话历史", description = "获取指定会话的完整对话历史（含图片与引用来源；校验会话归属）")
     @GetMapping("/session/{sessionId}")
     public ResultJson getHistory(
-            @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId) {
+            @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId,
+            HttpServletRequest httpRequest) {
+        sessionService.assertOwned(sessionId, UserContext.resolve(httpRequest));
         List<Map<String, Object>> history = sessionService.getHistory(sessionId);
         // 历史图片存的是原始 URL，响应时动态签名（避免签名过期导致恢复会话图片 401）
         for (Map<String, Object> msg : history) {
@@ -112,25 +139,26 @@ public class ChatController {
         return ResultJson.ok(history);
     }
 
-    @Operation(summary = "删除会话", description = "删除指定会话（MySQL 软删除 + Redis 清理）")
+    @Operation(summary = "删除会话", description = "删除指定会话（MySQL 软删除 + Redis 清理；校验会话归属）")
     @DeleteMapping("/session/{sessionId}")
     public ResultJson deleteSession(
-            @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId) {
-        sessionService.deleteSession(sessionId);
+            @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId,
+            HttpServletRequest httpRequest) {
+        sessionService.deleteSession(UserContext.resolve(httpRequest), sessionId);
         return ResultJson.ok("会话已删除");
     }
 
-    @Operation(summary = "清空所有会话", description = "清空全部会话数据")
+    @Operation(summary = "清空会话", description = "清空当前用户名下的全部会话数据")
     @DeleteMapping("/sessions")
-    public ResultJson clearAllSessions() {
-        sessionService.clearAll();
-        return ResultJson.ok("所有会话已清空");
+    public ResultJson clearAllSessions(HttpServletRequest httpRequest) {
+        sessionService.clearAll(UserContext.resolve(httpRequest));
+        return ResultJson.ok("会话已清空");
     }
 
-    @Operation(summary = "新建会话", description = "创建一个新的对话会话，返回会话 ID")
+    @Operation(summary = "新建会话", description = "创建一个新的对话会话（归属当前用户），返回会话 ID")
     @PostMapping("/session/new")
-    public ResultJson newSession() {
-        return ResultJson.ok(Map.of("sessionId", sessionService.createSession()));
+    public ResultJson newSession(HttpServletRequest httpRequest) {
+        return ResultJson.ok(Map.of("sessionId", sessionService.createSession(UserContext.resolve(httpRequest))));
     }
 
     @Operation(summary = "知识块详情", description = "获取指定知识块的全文内容（引用溯源：弹窗展示来源知识块全文与图片）")
@@ -151,5 +179,14 @@ public class ChatController {
         m.put("images", (k.getImages() == null || k.getImages().isBlank())
                 ? List.of() : JSON.parseArray(k.getImages(), String.class));
         return ResultJson.ok(m);
+    }
+
+    /** 客户端真实 IP（nginx 反代场景取 X-Forwarded-For 首段，兜底 remoteAddr） */
+    private String clientIp(HttpServletRequest request) {
+        String xff = request.getHeader("X-Forwarded-For");
+        if (xff != null && !xff.isBlank()) {
+            return xff.split(",")[0].trim();
+        }
+        return request.getRemoteAddr();
     }
 }

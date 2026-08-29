@@ -173,6 +173,7 @@ public class DocumentService {
         if (file.isEmpty()) {
             throw new BizException("请选择文件");
         }
+        validateMagicBytes(file, ext);
 
         // 同名串行：并发上传同一文件名时，避免双方都判定"无可复用"而各建一条文档（本实例内互斥；
         // 跨实例仍靠 tryLockParsing 的 CAS 兜底，最坏情况产生一条重复记录，可手动删除）
@@ -1250,6 +1251,32 @@ public class DocumentService {
     private String extOf(String fileName) {
         int idx = fileName.lastIndexOf('.');
         return idx < 0 ? "" : fileName.substring(idx + 1).toLowerCase();
+    }
+
+    /**
+     * 魔数校验：文件头字节必须与扩展名对应的真实格式一致（防伪造扩展名绕过类型限制）。
+     * docx/xlsx 为 OODF zip 容器（PK\x03\x04），pdf 为 %PDF-。
+     * 仅读文件头部 8 字节，不整体加载。
+     */
+    private void validateMagicBytes(MultipartFile file, String ext) {
+        byte[] expected = switch (ext) {
+            case "docx", "xlsx", "doc", "xls" -> new byte[]{0x50, 0x4B, 0x03, 0x04}; // PK.. (zip 容器)
+            case "pdf" -> new byte[]{0x25, 0x50, 0x44, 0x46};                        // %PDF
+            default -> null; // 其余格式无魔数约定，跳过
+        };
+        if (expected == null) return;
+        byte[] head = new byte[expected.length];
+        try (java.io.InputStream in = file.getInputStream()) {
+            int read = in.readNBytes(head, 0, head.length);
+            if (read < head.length || !java.util.Arrays.equals(head, expected)) {
+                throw new BizException("文件内容与扩展名 ." + ext + " 不符，已拒绝上传");
+            }
+        } catch (BizException e) {
+            throw e;
+        } catch (Exception e) {
+            // 读不出文件头（异常 IO）：宁可拒绝也不放行伪造文件
+            throw new BizException("无法读取文件内容，已拒绝上传");
+        }
     }
 
     /** 文件名清洗（防路径穿越） */

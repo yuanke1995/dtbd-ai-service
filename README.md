@@ -69,6 +69,10 @@ export AI_TRUSTED_TOKEN=xxx               # 内部鉴权 token（与平台网关
 
 # ===== 可选 =====
 export AI_DEEPSEEK_KEY=sk-xxxx            # chat 模型密钥（MaaS 网关；有默认空值，缺失不启动失败，但聊天不可用）
+export DB_HOST=127.0.0.1                  # 数据库主机（容器部署默认 mysql；外部 OceanBase 改为实际地址）
+export DB_PORT=3306                       # 数据库端口
+export DB_NAME=ai_doc_assistant           # 库名
+export DB_USERNAME=root                   # 用户名
 export REDIS_HOST=127.0.0.1
 export REDIS_PORT=6379               # Redis 端口（本机环境覆盖为 6380：docker 映射）
 export AI_VISION_MODEL=qwen3-vl:2b        # 图片描述/OCR 模型（本地 Ollama）
@@ -78,6 +82,9 @@ export AI_IMAGES_DIR=./data               # 数据落盘目录（跨平台兜底
 export AI_IMAGES_AUTH_ENABLED=false       # 图片访问鉴权（生产建议 true，HMAC 签名 URL）
 export AI_QUERY_REWRITE_ENABLED=true      # 查询改写开关（默认开启）
 export AI_IMAGE_FILTER_ENABLED=true       # 回答图片相关性校验开关（默认开启）
+export AI_RATELIMIT_ENABLED=true          # 接口限流开关（Redis 固定窗口，按用户/IP；也可设置页改）
+export AI_RATELIMIT_CHAT=10               # 问答限频：次/分钟/用户（0=不限）
+export AI_RATELIMIT_UPLOAD=10             # 上传限频：次/分钟/用户（0=不限）
 export LOG_LEVEL_APP=info                 # 应用日志级别
 ```
 
@@ -95,8 +102,10 @@ mvn spring-boot:run
 mvn clean package -DskipTests
 java -jar target/ai-doc-assistant.jar
 
-# 方式三：Docker Compose（含 redis-stack）
+# 方式三：Docker Compose（含 redis-stack + meilisearch + 内置 MySQL，自包含）
 docker compose up -d
+# 使用外部 OceanBase/MySQL：先 docker compose up -d redis-stack meilisearch，
+# 再以 DB_HOST/DB_PORT/DB_NAME/DB_USERNAME 指向外部库启动 app（或改 compose 环境变量）
 ```
 
 后端监听 `http://localhost:8090/ai`（context-path `/ai`），API 前缀 `/api/ai/*`，
@@ -179,6 +188,8 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 1. 平台网关需额外透传图片路径 `/ai/images/**`（生产开启图片鉴权时，图片 URL 带 HMAC 签名与过期时间，由本服务动态生成）
 2. SSE 接口（`/chat`）网关需关闭响应缓冲，否则流式 token 无法实时到达
 3. 内部 token `AI_TRUSTED_TOKEN` 由网关注入请求头，前端不携带共享密钥
+4. **用户身份透传**：网关鉴权后必须注入（并覆盖客户端自带的）`X-User-Id` 请求头作为用户标识——会话按该标识隔离（列表/删除/清空只作用于本人；anonymous 名下的存量会话为升级兼容池，全员可见）。前端在无网关的本地调试场景会用 localStorage 稳定 ID 自行携带该头。**生产网关若不注入，所有人共用 anonymous 池，等于无隔离**
+5. **接口限流**：问答/上传按"用户（无身份则按 IP）"做 Redis 固定窗口限频（默认 10 次/分钟，设置页可调，超限返回 429）；Redis 不可用自动放行
 
 ## 测试与验证
 
@@ -225,11 +236,11 @@ curl http://localhost:8090/api/ai/search-index/stats             # indexedCount 
 
 ## 产品化特性
 
-- **安全**：关键密钥零默认值（`DB_PASSWORD`/`AI_TRUSTED_TOKEN` 缺失 fail-fast，模型密钥允许空默认仅功能不可用）、token 恒定时间比较、图片访问 HMAC 签名 URL（`AI_IMAGES_AUTH_ENABLED=true`）、统一异常+参数校验（`@Valid`）、错误信息不泄露内部细节
+- **安全**：关键密钥零默认值（`DB_PASSWORD`/`AI_TRUSTED_TOKEN` 缺失 fail-fast，模型密钥允许空默认仅功能不可用）、token 恒定时间比较、图片访问 HMAC 签名 URL（`AI_IMAGES_AUTH_ENABLED=true`）、统一异常+参数校验（`@Valid`）、错误信息不泄露内部细节、**上传魔数校验**（文件头字节须与扩展名匹配，docx/xlsx=PK、pdf=%PDF，防伪造扩展名）、**接口限流**（问答/上传按用户/IP 固定窗口限频，超限 429，Redis 不可用自动放行）、**管理操作审计**（上传/删除/批量删除/回滚记录操作者 `[AUDIT]` 日志）
 - **可靠性**：上传失败自动补偿清理（删向量+MySQL+图片）、脏解析记录清理、解析异步化（不阻塞上传）、**解析中删除文档立即中断**（内存标志 + 线程 interrupt + 阶段检查点，清理本次产物）、SSE 异步订阅支持停止生成、查询改写专用线程池（超时隔离 + daemon + PreDestroy 回收）
 - **可配置**：模型名/温度/System Prompt 角色段/视觉提示词/检索权重与行为参数/重排区间/解析并发/上下文参数/关联扩散参数 **数据库存储、保存即生效**（`c_ai_config`，存量升级自动补默认项）；prompt 调整无需重启；检索/重排/解析/问答/关联扩散 5 组 30+ 项行为参数收口配置化（原硬编码移除）
 - **可观测性**：`/actuator/health` 健康检查、日志级别环境变量化、MyBatis 日志走 slf4j、检索调试 API、Swagger UI 接口文档（springdoc 自动生成，随代码实时更新）；**降级提示分级**（fail-loud：回答降级事件分 user 级默认展示/调试级由 `chat.showDebugDegradations` 开关控制，全部仍写 `[FAIL-LOUD]` 日志）
-- **部署**：multi-stage Dockerfile、docker-compose（含 redis-stack）、nginx 参考配置（`deploy/nginx.conf`，SPA fallback + SSE 关缓冲 + 图片缓存）
+- **多用户与部署**：**会话按用户隔离**（网关透传 `X-User-Id`，列表/历史/删除/清空均校验归属；anonymous 为存量兼容池）、multi-stage Dockerfile（非 root 运行 + HEALTHCHECK + `JAVA_OPTS` 内存注入）、docker-compose（redis-stack + meilisearch + **内置 MySQL**，亦可经 `DB_HOST` 等指向外部 OceanBase）、nginx 参考配置（`deploy/nginx.conf`，SPA fallback + SSE 关缓冲 + 图片缓存）
 
 ## 配置说明
 

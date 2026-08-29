@@ -17,11 +17,11 @@ spring:
       max-file-size: 1024MB
       max-request-size: 1100MB
 
-  # 数据库（独立库，密码必须通过环境变量 DB_PASSWORD 提供，缺失启动即失败）
+  # 数据库（独立库；主机/端口/库名环境变量化以支持容器部署，密码必须通过 DB_PASSWORD 提供，缺失启动即失败）
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://127.0.0.1:3306/ai_doc_assistant?useUnicode=true&useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8&nullCatalogMeansCurrent=true
-    username: root
+    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/${DB_NAME:ai_doc_assistant}?useUnicode=true&useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8&nullCatalogMeansCurrent=true
+    username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD}
 
   # 启动时自动执行 schema.sql 建表（CREATE TABLE IF NOT EXISTS，重复执行安全）
@@ -111,6 +111,11 @@ ai-app:
   session:
     max-history: 10
     expire-minutes: 30
+  # 接口限流（Redis 固定窗口，按用户/IP；Redis 不可用自动放行）
+  ratelimit:
+    enabled: ${AI_RATELIMIT_ENABLED:true}
+    chat-per-minute: ${AI_RATELIMIT_CHAT:10}
+    upload-per-minute: ${AI_RATELIMIT_UPLOAD:10}
   # 文档图片提取
   images:
     # 数据根目录（源文件/图片落盘）。默认 ./data（跨平台兜底）。

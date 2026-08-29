@@ -56,7 +56,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ResultJson<Void>> handleMaxUploadSize(MaxUploadSizeExceededException e) {
         log.warn("上传文件超过大小限制: {}", e.getMessage());
         return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
-                .body(ResultJson.error(413, "文件大小超过限制，单文件最大 50MB"));
+                .body(ResultJson.error(413, "文件大小超过上传限制"));
     }
 
     /**
@@ -66,6 +66,16 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ResultJson<Void>> handleNotFound(NoResourceFoundException e) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
                 .body(ResultJson.error(404, "请求的资源不存在"));
+    }
+
+    /**
+     * 请求体不是 multipart（如未携带文件字段/Content-Type 错误）：400 而非 500 兜底
+     */
+    @ExceptionHandler(org.springframework.web.multipart.MultipartException.class)
+    public ResponseEntity<ResultJson<Void>> handleMultipart(org.springframework.web.multipart.MultipartException e) {
+        log.debug("非法 multipart 请求: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ResultJson.error(400, "请求格式错误：需要 multipart/form-data 文件上传"));
     }
 
     /**

@@ -54,12 +54,15 @@ public class SessionService {
 
     /**
      * 创建新会话（MySQL + Redis）
+     *
+     * @param userId 归属用户（null/空白归入 anonymous 历史兼容池）
      */
-    public String createSession() {
+    public String createSession(String userId) {
         String sessionId = UUID.randomUUID().toString().replace("-", "");
         try {
             AiSession session = new AiSession();
             session.setId(sessionId);
+            session.setUserId(normalizeUser(userId));
             session.setMessageCount(0);
             sessionMapper.insert(session);
         } catch (Exception e) {
@@ -69,13 +72,61 @@ public class SessionService {
     }
 
     /**
-     * 查询会话列表（支持关键词搜索），置顶优先、按更新时间倒序
+     * 归属校验：会话不存在抛 404；存在但不属于该用户且非 anonymous 历史池则抛 403。
+     * anonymous 名下的存量会话对所有用户可见（升级兼容），新建会话严格隔离。
+     *
+     * @return 校验通过的会话实体
+     */
+    public AiSession assertOwned(String sessionId, String userId) {
+        AiSession session = sessionMapper.selectById(sessionId);
+        if (session == null) {
+            throw new com.wisesoft.ai.common.BizException(404, "会话不存在或已被删除");
+        }
+        String owner = session.getUserId() == null || session.getUserId().isBlank()
+                ? com.wisesoft.ai.util.UserContext.ANONYMOUS : session.getUserId();
+        String uid = normalizeUser(userId);
+        if (!owner.equals(uid) && !com.wisesoft.ai.util.UserContext.ANONYMOUS.equals(owner)) {
+            throw new com.wisesoft.ai.common.BizException(403, "无权访问该会话");
+        }
+        return session;
+    }
+
+    /** 用户标识规范化：空值归 anonymous */
+    private String normalizeUser(String userId) {
+        return userId == null || userId.isBlank()
+                ? com.wisesoft.ai.util.UserContext.ANONYMOUS : userId;
+    }
+
+    /**
+     * 确保指定 ID 的会话存在且归属当前用户（chat 传入不存在/已被删除的 sessionId 时补建，兼容旧客户端行为）
+     *
+     * @return 校验/补建后的会话 ID
+     */
+    public String ensureSession(String sessionId, String userId) {
+        AiSession session = new AiSession();
+        session.setId(sessionId);
+        session.setUserId(normalizeUser(userId));
+        session.setMessageCount(0);
+        try {
+            sessionMapper.insert(session);
+        } catch (Exception e) {
+            // 并发下同 ID 重复插入等异常：仅记录，聊天流程继续（消息追加不依赖会话记录存在）
+            log.warn("补建会话记录失败 (session={}): {}", sessionId, e.getMessage());
+        }
+        return sessionId;
+    }
+
+    /**
+     * 查询会话列表（仅当前用户 + anonymous 历史兼容池；支持关键词搜索），置顶优先、按更新时间倒序
      *
      * @param keyword 可选，按标题或消息内容模糊匹配；空/空白返回全量
      */
-    public List<SessionInfo> listSessions(String keyword) {
+    public List<SessionInfo> listSessions(String userId, String keyword) {
         try {
             LambdaQueryWrapper<AiSession> wrapper = new LambdaQueryWrapper<>();
+            // 只看自己的会话 + anonymous 历史兼容池（存量升级数据）
+            wrapper.and(w -> w.eq(AiSession::getUserId, normalizeUser(userId))
+                    .or().eq(AiSession::getUserId, com.wisesoft.ai.util.UserContext.ANONYMOUS));
             if (keyword != null && !keyword.isBlank()) {
                 String esc = escapeLike(keyword.trim());
                 wrapper.and(w -> w.like(AiSession::getTitle, keyword.trim())
@@ -102,16 +153,18 @@ public class SessionService {
     }
 
     /**
-     * 置顶/取消置顶会话
+     * 置顶/取消置顶会话（校验归属）
      */
-    public void updatePin(String sessionId, boolean pinned) {
+    public void updatePin(String userId, String sessionId, boolean pinned) {
+        assertOwned(sessionId, userId);
         updateFlag(sessionId, pinned, "is_pinned", AiSession::setIsPinned);
     }
 
     /**
-     * 收藏/取消收藏会话
+     * 收藏/取消收藏会话（校验归属）
      */
-    public void updateFavorite(String sessionId, boolean favorite) {
+    public void updateFavorite(String userId, String sessionId, boolean favorite) {
+        assertOwned(sessionId, userId);
         updateFlag(sessionId, favorite, "is_favorite", AiSession::setIsFavorite);
     }
 
@@ -141,9 +194,10 @@ public class SessionService {
     }
 
     /**
-     * 软删除会话（MySQL 逻辑删除会话+消息 + Redis 清理）
+     * 软删除会话（校验归属；MySQL 逻辑删除会话+消息 + Redis 清理）
      */
-    public void deleteSession(String sessionId) {
+    public void deleteSession(String userId, String sessionId) {
+        assertOwned(sessionId, userId);
         try {
             sessionMapper.deleteById(sessionId);
             // 同步软删除该会话下的所有消息
@@ -307,25 +361,29 @@ public class SessionService {
     }
 
     /**
-     * 清空所有会话（软删全部会话+消息 + Redis 清理）
+     * 清空当前用户的会话（anonymous 用户清空匿名池；MySQL 软删 + Redis 清理）
      */
-    public void clearAll() {
+    public void clearAll(String userId) {
+        String uid = normalizeUser(userId);
         try {
-            // 逻辑删除所有会话（@TableLogic 自动转 UPDATE deleted=1）
-            sessionMapper.delete(new LambdaQueryWrapper<AiSession>().eq(AiSession::getDeleted, 0));
-            // 逻辑删除所有消息
-            messageMapper.delete(new LambdaQueryWrapper<AiMessage>().eq(AiMessage::getDeleted, 0));
-        } catch (Exception e) {
-            log.warn("清空会话 MySQL 操作失败: {}", e.getMessage());
-        }
-        try {
-            // 清理所有 Redis 会话 key
-            Set<String> keys = redisTemplate.keys(KEY_PREFIX + "*");
-            if (keys != null && !keys.isEmpty()) {
+            // 先取该用户名下的会话 ID（Redis 按 sessionId 清理需要）
+            List<AiSession> own = sessionMapper.selectList(new LambdaQueryWrapper<AiSession>()
+                    .eq(AiSession::getUserId, uid));
+            List<String> ownIds = own.stream().map(AiSession::getId).toList();
+            // 逻辑删除该用户的会话与其下所有消息
+            if (!ownIds.isEmpty()) {
+                messageMapper.delete(new LambdaQueryWrapper<AiMessage>()
+                        .in(AiMessage::getSessionId, ownIds));
+            }
+            sessionMapper.delete(new LambdaQueryWrapper<AiSession>()
+                    .eq(AiSession::getUserId, uid));
+            // 清理该用户的 Redis 会话 key
+            if (!ownIds.isEmpty()) {
+                Set<String> keys = ownIds.stream().map(KEY_PREFIX::concat).collect(java.util.stream.Collectors.toSet());
                 redisTemplate.delete(keys);
             }
         } catch (Exception e) {
-            log.warn("清空会话 Redis 清理失败: {}", e.getMessage());
+            log.warn("清空会话 MySQL 操作失败: {}", e.getMessage());
         }
     }
 

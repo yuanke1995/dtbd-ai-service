@@ -8,8 +8,21 @@
 const BASE = import.meta.env.VITE_API_BASE || '/proxy/api/ai'
 const TOKEN = import.meta.env.VITE_TRUSTED_TOKEN || ''
 
+// 用户标识：localStorage 稳定 ID，经 X-User-Id 透传做会话隔离；
+// 生产环境由平台网关覆盖为真实用户身份（客户端值仅作本地/调试用途）
+const USER_ID = (() => {
+  try {
+    let id = localStorage.getItem('ai_user_id')
+    if (!id) {
+      id = (crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '') : 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10))
+      localStorage.setItem('ai_user_id', id)
+    }
+    return id
+  } catch (e) { return 'anonymous' }
+})()
+
 const authHeaders = extra => {
-  const h = { 'Content-Type': 'application/json', ...(extra || {}) }
+  const h = { 'Content-Type': 'application/json', 'X-User-Id': USER_ID, ...(extra || {}) }
   if (TOKEN) h['X-Trusted-Token'] = TOKEN
   return h
 }
@@ -50,6 +63,7 @@ function upload(path, formData, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', BASE + path)
+    xhr.setRequestHeader('X-User-Id', USER_ID)
     if (TOKEN) xhr.setRequestHeader('X-Trusted-Token', TOKEN)
     xhr.timeout = 120000
     xhr.upload.onprogress = e => {

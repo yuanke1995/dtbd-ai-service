@@ -4,10 +4,13 @@ import com.wisesoft.ai.common.BizException;
 import com.wisesoft.ai.dto.ResultJson;
 import com.wisesoft.ai.service.ConfigService;
 import com.wisesoft.ai.service.DocumentService;
+import com.wisesoft.ai.service.RateLimitService;
+import com.wisesoft.ai.util.UserContext;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -21,6 +24,7 @@ import java.util.Map;
 /**
  * 文档管理控制器
  * 支持：单/批量上传（异步解析）、列表、删除、启停用、重解析
+ * 文档为共享知识库（不做用户隔离）；管理操作记录操作者（X-User-Id）便于审计追溯
  *
  * @author yuanke
  */
@@ -33,6 +37,7 @@ public class DocumentController {
 
     private final DocumentService documentService;
     private final ConfigService configService;
+    private final RateLimitService rateLimitService;
 
     /** 上传大小业务校验（DB 配置 upload.maxFileSize，保存即生效；multipart 物理上限由容器兜底） */
     private void checkUploadSize(MultipartFile file) {
@@ -47,22 +52,28 @@ public class DocumentController {
         return String.format("%.0fMB", bytes / (1024.0 * 1024));
     }
 
-    @Operation(summary = "上传文档", description = "上传单个文档（docx/pdf/xlsx），异步解析，返回文档 ID 和解析状态")
+    @Operation(summary = "上传文档", description = "上传单个文档（docx/pdf/xlsx），异步解析，返回文档 ID 和解析状态；按用户限频（ratelimit.uploadPerMinute）")
     @PostMapping("/upload")
     public ResultJson upload(
             @Parameter(description = "文档文件") @RequestParam("file") MultipartFile file,
             @Parameter(description = "文档描述（可选）") @RequestParam(value = "description", required = false) String description,
-            @Parameter(description = "文档分类（可选，≤50字）") @RequestParam(value = "category", required = false) String category) throws Exception {
+            @Parameter(description = "文档分类（可选，≤50字）") @RequestParam(value = "category", required = false) String category,
+            HttpServletRequest httpRequest) throws Exception {
+        rateLimitService.checkRateLimit("upload", rateIdentity(httpRequest));
         checkUploadSize(file);
         var doc = documentService.upload(file, description, category);
+        log.info("[AUDIT] 上传文档 operator={} docId={} file={} size={}", UserContext.resolve(httpRequest),
+                doc.getId(), file.getOriginalFilename(), file.getSize());
         return ResultJson.ok(doc, "已提交解析");
     }
 
-    @Operation(summary = "批量上传文档", description = "批量上传多个文档，逐个提交异步解析，返回每个文件的上传结果")
+    @Operation(summary = "批量上传文档", description = "批量上传多个文档，逐个提交异步解析，返回每个文件的上传结果；按用户限频（ratelimit.uploadPerMinute）")
     @PostMapping("/upload/batch")
     public ResultJson uploadBatch(
             @Parameter(description = "文档文件列表") @RequestParam("file") MultipartFile[] files,
-            @Parameter(description = "批量分类（可选，应用到所有文件）") @RequestParam(value = "category", required = false) String category) {
+            @Parameter(description = "批量分类（可选，应用到所有文件）") @RequestParam(value = "category", required = false) String category,
+            HttpServletRequest httpRequest) {
+        rateLimitService.checkRateLimit("upload", rateIdentity(httpRequest));
         List<Map<String, Object>> results = new ArrayList<>();
         for (MultipartFile file : files) {
             Map<String, Object> item = new LinkedHashMap<>();
@@ -79,6 +90,7 @@ public class DocumentController {
             }
             results.add(item);
         }
+        log.info("[AUDIT] 批量上传 operator={} count={}", UserContext.resolve(httpRequest), files.length);
         return ResultJson.ok(results);
     }
 
@@ -107,8 +119,10 @@ public class DocumentController {
     @Operation(summary = "删除文档", description = "删除指定文档（同时清理向量、知识块、图片、源文件）")
     @DeleteMapping("/{id}")
     public ResultJson delete(
-            @Parameter(description = "文档 ID") @PathVariable("id") String id) {
+            @Parameter(description = "文档 ID") @PathVariable("id") String id,
+            HttpServletRequest httpRequest) {
         documentService.delete(id);
+        log.info("[AUDIT] 删除文档 operator={} docId={}", UserContext.resolve(httpRequest), id);
         return ResultJson.ok("删除成功");
     }
 
@@ -143,8 +157,11 @@ public class DocumentController {
     @PostMapping("/batch/delete")
     public ResultJson batchDelete(
             @Parameter(description = "{\"ids\": [\"docId1\", \"docId2\"]}")
-            @RequestBody Map<String, List<String>> body) {
-        documentService.batchDelete(body.getOrDefault("ids", List.of()));
+            @RequestBody Map<String, List<String>> body,
+            HttpServletRequest httpRequest) {
+        List<String> ids = body.getOrDefault("ids", List.of());
+        documentService.batchDelete(ids);
+        log.info("[AUDIT] 批量删除文档 operator={} count={} ids={}", UserContext.resolve(httpRequest), ids.size(), ids);
         return ResultJson.ok("删除成功");
     }
 
@@ -178,10 +195,21 @@ public class DocumentController {
     @PostMapping("/{id}/rollback")
     public ResultJson rollback(
             @Parameter(description = "文档 ID") @PathVariable("id") String id,
-            @Parameter(description = "{\"version\": 2}") @RequestBody Map<String, Integer> body) {
+            @Parameter(description = "{\"version\": 2}") @RequestBody Map<String, Integer> body,
+            HttpServletRequest httpRequest) {
         Integer version = body.get("version");
         if (version == null) throw new BizException("缺少 version 参数");
         documentService.rollback(id, version);
+        log.info("[AUDIT] 回滚文档版本 operator={} docId={} version={}", UserContext.resolve(httpRequest), id, version);
         return ResultJson.ok("回滚成功");
+    }
+
+    /** 限流维度标识：有用户身份用 user:xxx，否则落到 IP 维度 */
+    private String rateIdentity(HttpServletRequest request) {
+        String uid = UserContext.resolve(request);
+        if (!UserContext.ANONYMOUS.equals(uid)) return "user:" + uid;
+        String xff = request.getHeader("X-Forwarded-For");
+        String ip = (xff != null && !xff.isBlank()) ? xff.split(",")[0].trim() : request.getRemoteAddr();
+        return "ip:" + ip;
     }
 }

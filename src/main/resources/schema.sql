@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS `c_ai_knowledge` (
 
 CREATE TABLE IF NOT EXISTS `c_ai_session` (
     `id`            VARCHAR(50)  NOT NULL COMMENT '主键ID (UUID无横线)',
+    `user_id`       VARCHAR(64)  NOT NULL DEFAULT 'anonymous' COMMENT '归属用户（网关透传X-User-Id；anonymous=历史兼容池全局可见）',
     `title`         VARCHAR(200) DEFAULT NULL COMMENT '会话标题 (取自首条用户问题)',
     `message_count` INT          DEFAULT 0 COMMENT '消息条数',
     `is_pinned`     INT          DEFAULT 0 COMMENT '置顶: 0=否, 1=是',
@@ -64,7 +65,8 @@ CREATE TABLE IF NOT EXISTS `c_ai_session` (
     `update_time`   DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `deleted`       INT          DEFAULT 0 COMMENT '逻辑删除: 0=未删除, 1=已删除',
     PRIMARY KEY (`id`),
-    KEY `idx_deleted_update` (`deleted`, `update_time` DESC)
+    KEY `idx_deleted_update` (`deleted`, `update_time` DESC),
+    KEY `idx_user_update` (`user_id`, `deleted`, `update_time` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI会话表';
 
 CREATE TABLE IF NOT EXISTS `c_ai_message` (

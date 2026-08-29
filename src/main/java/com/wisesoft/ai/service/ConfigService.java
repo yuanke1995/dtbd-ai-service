@@ -93,7 +93,10 @@ public class ConfigService {
             Map.entry("keyword.engine", "关键词引擎：mysql / meilisearch（切换前先探测并重建索引）"),
             Map.entry("keyword.baseUrl", "关键词引擎：Meilisearch 服务地址"),
             Map.entry("keyword.apiKey", "关键词引擎：Meilisearch master key（留空回退环境变量 AI_MEILI_KEY）"),
-            Map.entry("keyword.timeoutMillis", "关键词引擎：单次超时(ms)"));
+            Map.entry("keyword.timeoutMillis", "关键词引擎：单次超时(ms)"),
+            Map.entry("ratelimit.enabled", "接口限流总开关（Redis 固定窗口，按用户/IP）"),
+            Map.entry("ratelimit.chatPerMinute", "问答限频：次/分钟/用户(0=不限)"),
+            Map.entry("ratelimit.uploadPerMinute", "上传限频：次/分钟/用户(0=不限)"));
 
     private final AiConfigMapper configMapper;
     private final AiAppProperties properties;
@@ -301,6 +304,10 @@ public class ConfigService {
         d.put("chat.streamRetryCount", "1");               // H2：主 LLM 流式中断（未输出token）自动重试次数
         d.put("chat.sseTimeoutMs", "300000");              // H4：问答 SSE 超时(ms)
         d.put("chat.showDebugDegradations", "false");      // 回答提示：调试级降级信息开关（默认只显示用户级）
+        // 接口限流（按用户/IP 固定窗口）
+        d.put("ratelimit.enabled", String.valueOf(properties.getRatelimit().isEnabled()));
+        d.put("ratelimit.chatPerMinute", String.valueOf(properties.getRatelimit().getChatPerMinute()));
+        d.put("ratelimit.uploadPerMinute", String.valueOf(properties.getRatelimit().getUploadPerMinute()));
         return d;
     }
 
@@ -572,7 +579,7 @@ public class ConfigService {
     /** 全量配置（供配置界面展示；apiKey 脱敏） */
     public Map<String, Object> snapshot() {
         Map<String, Object> result = new LinkedHashMap<>();
-        String[] groups = {"chat", "vision", "embedding", "chunk", "upload", "retrieval", "rerank", "keyword", "context", "deepReasoning"};
+        String[] groups = {"chat", "vision", "embedding", "chunk", "upload", "retrieval", "rerank", "keyword", "context", "deepReasoning", "ratelimit"};
         for (String g : groups) {
             Map<String, Object> items = new LinkedHashMap<>();
             for (Map.Entry<String, String> d : defaults().entrySet()) {

@@ -20,6 +20,7 @@ public class AiAppProperties {
     private Session session = new Session();
     private Images images = new Images();
     private Vision vision = new Vision();
+    private Ratelimit ratelimit = new Ratelimit();
 
     private QueryRewrite queryRewrite = new QueryRewrite();
 
@@ -101,6 +102,16 @@ public class AiAppProperties {
         private int maxHistory = 10;
         /** 会话过期时间（分钟） */
         private int expireMinutes = 30;
+    }
+
+    @Data
+    public static class Ratelimit {
+        /** 接口限流总开关（Redis 固定窗口，按用户/IP；Redis 不可用自动放行） */
+        private boolean enabled = true;
+        /** 问答限频：次/分钟/用户（0=不限） */
+        private int chatPerMinute = 10;
+        /** 上传限频：次/分钟/用户（0=不限） */
+        private int uploadPerMinute = 10;
     }
 
     @Data
