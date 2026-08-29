@@ -44,7 +44,6 @@
             <a-checkbox v-if="selectMode" class="msg-select-box"
                         :checked="selected.includes(roundStart(i))"
                         @click.stop @change="toggleSelect(i)" />
-            <a-avatar :style="{ background: m.role==='user'?'#87d068':'#1677ff', flexShrink:0 }">{{ m.role==='user'?'我':'AI' }}</a-avatar>
             <div class="msg-block" :class="m.role">
               <div class="bubble" :class="m.role">
                 <!-- 用户上传图片（本地 dataUrl 预览 / 历史 URL） -->
@@ -1249,19 +1248,24 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 }
 .welcome h2 { margin: 16px 0 8px; }
 .welcome p { color: #888; margin-bottom: 24px; }
-.row { display: flex; gap: 12px; margin-bottom: 20px; }
-.row.user { flex-direction: row-reverse; }
+.row { display: flex; gap: 12px; margin-bottom: 20px; justify-content: center; }
+/* 豆包式文档流：内容列居中限宽——问题右对齐浅灰气泡，回答列内全宽无气泡 */
+.row.user { justify-content: center; }
 /* 消息块：承载气泡 + 气泡下方悬浮操作区（编辑等）；宽度约束由外层承担 */
-.msg-block { position: relative; display: flex; flex-direction: column; max-width: min(720px, 70%); min-width: 0; }
+.msg-block { position: relative; display: flex; flex-direction: column; min-width: 0; max-width: min(92%, 860px); width: 100%; }
 .msg-block.user { align-items: flex-end; }
 .msg-block.ai { align-items: flex-start; }
 .bubble { width: 100%; padding: 12px 16px; border-radius: 12px; line-height: 1.6; }
-.bubble.user { background: #1677ff; color: #fff; }
-.bubble.ai { background: #f5f5f5; color: #333; }
+.bubble.user { background: #f2f3f5; color: #333; width: fit-content; max-width: 100%; }
+/* 用户问题气泡：正文为纯文本，收拢段落边距使高度贴合文字（.md p 默认 6px 上下边距会把气泡撑高一倍；
+   p 为 v-html 动态内容不带 scoped 属性，需 :deep 穿透） */
+.bubble.user :deep(.md > p) { margin: 0; }
+.bubble.ai { background: transparent; padding: 0; }
 .input { padding: 12px 48px 16px; border-top: 1px solid #f0f0f0; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
 /* 豆包式输入卡片：无内边框文本在上，工具行在下 */
 .input-box {
-  position: relative; flex: 1; min-width: 0;
+  position: relative; flex: 1; min-width: 0; max-width: 860px;
+  margin-left: auto; margin-right: auto;
   border: 1px solid #e5e6eb; border-radius: 16px; background: #fff;
   padding: 8px 10px 6px;
   transition: border-color .2s, box-shadow .2s;
@@ -1319,7 +1323,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 }
 .think-panel .think-body .md :deep(p) { margin: 4px 0; }
 /* 待发送图片预览 */
-.pending-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; flex: 0 0 100%; }
+.pending-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 auto 8px; flex: 0 0 100%; max-width: 860px; }
 .pending-img { position: relative; }
 .pending-img img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid #e0e0e0; cursor: zoom-in; }
 .pending-del { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%;
