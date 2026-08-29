@@ -508,7 +508,8 @@ public class ConfigService {
             }
         }
         // 解析参数校验：非负整数（0 表示不限制）
-        for (String iKey : new String[]{"chunk.maxChunks", "chunk.maxImages", "vision.concurrency"}) {
+        for (String iKey : new String[]{"chunk.maxChunks", "chunk.maxImages", "vision.concurrency",
+                "ratelimit.chatPerMinute", "ratelimit.uploadPerMinute"}) {
             String v = updates.get(iKey);
             if (v != null && !v.isBlank()) {
                 try {

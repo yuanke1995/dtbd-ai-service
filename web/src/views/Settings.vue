@@ -382,6 +382,25 @@
                    message="深度思考：AI 先流式展示思维链（回答上方折叠面板），思考末尾输出 <search> 检索计划（精化 query + 子问题），多路并行检索合并后回答。默认 maxThinkingTokens=0 不设上限（qwen 思考模式设 max_tokens 会空输出）。失败自动降级为普通回答。" />
         </a-collapse-panel>
 
+        <a-collapse-panel key="ratelimit" :id="'cfg-anchor-ratelimit'" header="接口限流（防滥用）">
+          <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.rlEnabled" placement="top">总开关 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.ratelimit.enabled" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.rlChat" placement="top">问答限频（次/分钟/用户） <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.ratelimit.chatPerMinute" :min="0" :step="5" style="width:200px" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.rlUpload" placement="top">上传限频（次/分钟/用户） <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.ratelimit.uploadPerMinute" :min="0" :step="5" style="width:200px" />
+            </a-form-item>
+          </a-form>
+          <a-alert type="info" show-icon style="margin:0 24px 16px"
+                   message="Redis 固定窗口计数，按用户（网关未透传 X-User-Id 时按 IP）限频，超限返回 429 并提示等待秒数。限频设为 0 表示该接口不限流；Redis 不可用时自动放行，不影响正常使用。保存后立即生效。" />
+        </a-collapse-panel>
+
       </a-collapse>
 
       <!-- 悬浮保存按钮：固定在右下角，无需滚动到底部 -->
@@ -413,7 +432,8 @@ const anchors = [
   { key: 'embedding', label: '向量模型' },
   { key: 'retrieval', label: '检索设置' },
   { key: 'context', label: '上下文控制' },
-  { key: 'deepReasoning', label: '深度思考' }
+  { key: 'deepReasoning', label: '深度思考' },
+  { key: 'ratelimit', label: '接口限流' }
 ]
 const currentAnchor = ref('')
 let anchorObserver = null
@@ -494,7 +514,10 @@ const tips = {
   keywordEngine: '关键词召回引擎。mysql=MySQL LIKE（零依赖，知识块量大时全表扫描慢）；meilisearch=外部索引（中文分词+相关度打分）。切换到 meilisearch 时自动校验服务可用性（不可用则保存失败）并自动全量重建索引，无需手动操作。',
   keywordBaseUrl: 'Meilisearch 服务地址（如 http://localhost:7700，docker-compose 部署为容器内地址）。',
   keywordApiKey: 'Meilisearch master key（需与服务端 MEILI_MASTER_KEY 一致）。留空时回退读取环境变量 AI_MEILI_KEY；服务端已设置 key 而此处为空/错误，切换引擎时会校验失败并阻止保存。',
-  keywordTimeout: '关键词引擎单次请求超时(ms)：关键词路是辅助召回，超时会自动降级回 MySQL LIKE，不建议设太大。'
+  keywordTimeout: '关键词引擎单次请求超时(ms)：关键词路是辅助召回，超时会自动降级回 MySQL LIKE，不建议设太大。',
+  rlEnabled: '接口限流总开关（Redis 固定窗口计数）。关闭后所有接口不限流；Redis 不可用时即使开启也会自动放行（限流是保护措施，不比业务先挂）。',
+  rlChat: '每个用户每分钟最多发起的问答次数（0=不限流）。匿名请求（网关未透传 X-User-Id）按 IP 维度共享额度。用于防止滥用与成本失控。',
+  rlUpload: '每个用户每分钟最多上传文档的次数（0=不限流）。批量上传按一次请求计。解析是重资源操作，限制上传频次可防止解析队列被打满。'
 }
 
 const loading = ref(false)
@@ -559,7 +582,8 @@ const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remain
                                snippetWindowChars: 150, maxContextHits: 8 },
                     deepReasoning: { enabled: true, thinkingMode: 'model', enableThinking: true, prompt: '',
                                      searchTag: 'search', maxSubQueries: 3, multiRetrieval: true,
-                                     timeoutMillis: 30000, maxThinkingTokens: 0 } })
+                                     timeoutMillis: 30000, maxThinkingTokens: 0 },
+                    ratelimit: { enabled: true, chatPerMinute: 10, uploadPerMinute: 10 } })
 const ro = ref({ chat: {}, vision: {}, embedding: {} })
 
 onMounted(async () => {
@@ -646,6 +670,10 @@ onMounted(async () => {
       form.value.deepReasoning.multiRetrieval = dr.multiRetrieval?.value === 'true'
       form.value.deepReasoning.timeoutMillis = Number(dr.timeoutMillis?.value ?? 30000)
       form.value.deepReasoning.maxThinkingTokens = Number(dr.maxThinkingTokens?.value ?? 0)
+      const rl = d.ratelimit || {}
+      form.value.ratelimit.enabled = rl.enabled?.value !== 'false'
+      form.value.ratelimit.chatPerMinute = Number(rl.chatPerMinute?.value ?? 10)
+      form.value.ratelimit.uploadPerMinute = Number(rl.uploadPerMinute?.value ?? 10)
       ro.value.chat = { baseUrl: d.chat?.baseUrl?.value || '', apiKey: d.chat?.apiKey?.value || '' }
       ro.value.vision = { baseUrl: d.vision?.baseUrl?.value || '', apiKey: d.vision?.apiKey?.value || '' }
       ro.value.embedding = { model: d.embedding?.model?.value || '' }
@@ -741,7 +769,10 @@ const save = async () => {
                        maxSubQueries: String(form.value.deepReasoning.maxSubQueries),
                        multiRetrieval: String(form.value.deepReasoning.multiRetrieval),
                        timeoutMillis: String(form.value.deepReasoning.timeoutMillis),
-                       maxThinkingTokens: String(form.value.deepReasoning.maxThinkingTokens) }
+                       maxThinkingTokens: String(form.value.deepReasoning.maxThinkingTokens) },
+      ratelimit: { enabled: String(form.value.ratelimit.enabled),
+                   chatPerMinute: String(form.value.ratelimit.chatPerMinute),
+                   uploadPerMinute: String(form.value.ratelimit.uploadPerMinute) }
     })
     if (r.success) message.success('配置已保存并生效')
     else message.error(r.msg || '保存失败')
