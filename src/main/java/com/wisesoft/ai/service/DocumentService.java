@@ -70,6 +70,8 @@ public class DocumentService {
     private final List<DocumentParser> parsers;
     private final ConfigService configService;
     private final KeywordIndexService keywordIndexService;
+    /** 知识块引用关系（交叉引用识别 + 1-hop 扩散）：与块/文档同生命周期重建 */
+    private final KnowledgeRefService knowledgeRefService;
     /** docx 解析器：图片描述补齐用（解析时失败/超限的图，按 URL 重新描述） */
     private final DocxParser docxParser;
     /** 解析进度节流守卫：docId -> 已上报 progress（值未变化不写库） */
@@ -507,6 +509,11 @@ public class DocumentService {
             if (!statsDesc.isEmpty()) doneDesc += "；" + statsDesc;
             if (!swept) doneDesc += "；孤儿清扫失败";
             updateProgress(docId, 100, doneDesc);
+            // 引用关系重建（交叉引用识别）：块已全部入库（含 reused+newBlocks），此时重建引用最完整；
+            // 失败仅告警不阻断（检索侧降级为不扩散）
+            if (configService.getBoolean("retrieval.refDetectEnabled")) {
+                knowledgeRefService.rebuildByDocId(docId);
+            }
 
             doc.setChunkCount(chunks.size());
             doc.setStatus(0);
@@ -611,6 +618,8 @@ public class DocumentService {
             log.warn("清理版本快照失败: {}", e.getMessage());
         }
         documentMetaCache.invalidate(docId);
+        // 引用关系清理（纯派生数据，随文档删除）
+        knowledgeRefService.removeByDocId(docId);
         cleanupImages(docId);
         cleanupSourceFile(docId);
     }
@@ -773,6 +782,10 @@ public class DocumentService {
                 log.warn("清理旧向量失败 id={} oldVectorId={}: {}", id, oldVectorId, e.getMessage());
             }
         }
+        // 4. 引用关系：内容可能变化 → 重建该块出边（入边目标 id 不变，无需重建）
+        if (configService.getBoolean("retrieval.refDetectEnabled")) {
+            knowledgeRefService.rebuildFromKnowledgeId(id, k.getDocId());
+        }
     }
 
     /**
@@ -808,6 +821,8 @@ public class DocumentService {
                 log.warn("更新文档 chunk_count 失败: {}", e.getMessage());
             }
         }
+        // 引用关系清理：块被删，其出边（引用他人）与入边（被他人引用）一并移除
+        knowledgeRefService.removeByKnowledgeId(id);
     }
 
     // ==================== 版本管理 ====================
@@ -965,6 +980,10 @@ public class DocumentService {
                 .gt(com.wisesoft.ai.model.AiDocumentVersion::getVersion, version));
         documentMetaCache.invalidate(docId);
         keywordIndexService.indexChunks(rebuilt); // 关键词索引同步：写入重建块（best-effort）
+        // 引用关系重建（回滚后块内容回到快照版本）
+        if (configService.getBoolean("retrieval.refDetectEnabled")) {
+            knowledgeRefService.rebuildByDocId(docId);
+        }
         log.info("[{}] 回滚到 v{} 完成: {} chunks", docId, version, snapshot.size());
     }
 

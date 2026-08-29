@@ -143,3 +143,20 @@ CREATE TABLE IF NOT EXISTS `c_ai_document_version` (
     PRIMARY KEY (`id`),
     KEY `idx_doc_version` (`doc_id`, `version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI文档版本快照表';
+
+-- ============================================
+-- 2026-08-29: 知识块引用关系（交叉引用 1-hop 扩散 + 结构上下文扩展）
+-- 纯派生数据：生命周期完全跟随知识块/文档，重解析按 doc_id 全量重建，不做逻辑删除
+-- ============================================
+CREATE TABLE IF NOT EXISTS `c_ai_knowledge_ref` (
+    `id`                VARCHAR(50)  NOT NULL COMMENT '主键ID',
+    `doc_id`            VARCHAR(50)  NOT NULL COMMENT '所属文档ID（引用只在同文档内有效）',
+    `from_knowledge_id` VARCHAR(50)  NOT NULL COMMENT '引用来源知识块ID（A）',
+    `to_knowledge_id`   VARCHAR(50)  NOT NULL COMMENT '被引用目标知识块ID（B）',
+    `ref_text`          VARCHAR(255) DEFAULT NULL COMMENT '原文引用表达（如"详见 4.1.2 节"/"参见「数据字典」"）',
+    `create_time`       DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_from_doc` (`from_knowledge_id`, `doc_id`),
+    KEY `idx_to_doc` (`to_knowledge_id`, `doc_id`),
+    KEY `idx_doc` (`doc_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='AI知识块引用关系表';

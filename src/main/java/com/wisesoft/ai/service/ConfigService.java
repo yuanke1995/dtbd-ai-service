@@ -57,6 +57,17 @@ public class ConfigService {
             Map.entry("retrieval.keywordWeight", "混合检索：关键词权重(0~1)"),
             Map.entry("retrieval.titleBonus", "混合检索：标题命中奖励(0~1)"),
             Map.entry("retrieval.rewriteTimeoutMs", "查询改写超时(毫秒,默认5000；本地模型慢可调大)"),
+            Map.entry("retrieval.refDetectEnabled", "解析时识别知识块交叉引用(详见/参见X节,改后需重解析)"),
+            Map.entry("retrieval.refDetectMention", "识别无动词提及(如 4.1.2 所述/《数据字典》/XX章节,仅精确匹配)"),
+            Map.entry("retrieval.refExpandEnabled", "检索时关联块扩散+父章节带出总开关(保存即生效)"),
+            Map.entry("retrieval.refExpandMaxHits", "关联扩散块数量上限(默认3)"),
+            Map.entry("retrieval.refExpandMaxTokens", "关联扩散块token汇总上限(默认800)"),
+            Map.entry("retrieval.refExpandIncludeIncoming", "是否扩散入边(引用本块的块,默认关)"),
+            Map.entry("retrieval.refExpandParentEnabled", "命中子章节时带出父章节上下文(默认开)"),
+            Map.entry("retrieval.refExpandParentMode", "父章节内容模式: title_only/summary/full"),
+            Map.entry("retrieval.refExpandParentMaxLevels", "父章节向上带出级数(默认2)"),
+            Map.entry("retrieval.refExpandParentSummaryChars", "父章节summary模式截取字符数(默认200)"),
+            Map.entry("retrieval.refExpandFuzzyName", "章节名弱匹配(contains)开关(默认开)"),
             Map.entry("context.modelWindows", "上下文：模型窗口映射（模型名=token,逗号分隔）"),
             Map.entry("context.defaultWindowTokens", "上下文：模型默认窗口(token)"),
             Map.entry("context.safetyFactor", "上下文：窗口安全系数(0~1)"),
@@ -221,6 +232,17 @@ public class ConfigService {
         d.put("retrieval.keywordWeight", String.valueOf(properties.getRetrieval().getKeywordWeight()));
         d.put("retrieval.titleBonus", String.valueOf(properties.getRetrieval().getTitleBonus()));
         d.put("retrieval.rewriteTimeoutMs", String.valueOf(properties.getQueryRewrite().getTimeoutMillis())); // 查询改写超时(ms)
+        d.put("retrieval.refDetectEnabled", "true");      // 解析时引用识别
+        d.put("retrieval.refDetectMention", "true");      // 无动词提及识别（如 4.1.2 所述/《数据字典》）
+        d.put("retrieval.refExpandEnabled", "true");      // 检索时关联扩散+父章节带出
+        d.put("retrieval.refExpandMaxHits", "3");         // 扩散块数量上限
+        d.put("retrieval.refExpandMaxTokens", "800");     // 扩散块 token 上限
+        d.put("retrieval.refExpandIncludeIncoming", "false"); // 入边扩散（默认关）
+        d.put("retrieval.refExpandParentEnabled", "true");   // 父章节带出
+        d.put("retrieval.refExpandParentMode", "summary");   // summary/title_only/full
+        d.put("retrieval.refExpandParentMaxLevels", "2");    // 父块级数
+        d.put("retrieval.refExpandParentSummaryChars", "200"); // summary 截取字符
+        d.put("retrieval.refExpandFuzzyName", "true");       // 章节名弱匹配
         d.put("rerank.enabled", String.valueOf(properties.getRetrieval().getRerank().isEnabled()));
         d.put("rerank.baseUrl", properties.getRetrieval().getRerank().getBaseUrl());
         d.put("rerank.model", properties.getRetrieval().getRerank().getModel());
@@ -419,7 +441,8 @@ public class ConfigService {
         if (mode != null && !mode.isBlank() && !"model".equals(mode) && !"prompt".equals(mode)) {
             throw new IllegalArgumentException("deepReasoning.thinkingMode 仅允许 model / prompt");
         }
-        for (String iKey : new String[]{"deepReasoning.maxSubQueries", "deepReasoning.timeoutMillis", "deepReasoning.maxThinkingTokens"}) {
+        for (String iKey : new String[]{"deepReasoning.maxSubQueries", "deepReasoning.timeoutMillis", "deepReasoning.maxThinkingTokens",
+                "retrieval.refExpandMaxHits", "retrieval.refExpandMaxTokens", "retrieval.refExpandParentMaxLevels", "retrieval.refExpandParentSummaryChars"}) {
             String v = updates.get(iKey);
             if (v != null && !v.isBlank()) {
                 try {
@@ -429,11 +452,19 @@ public class ConfigService {
                 }
             }
         }
-        for (String bKey : new String[]{"deepReasoning.enabled", "deepReasoning.enableThinking", "deepReasoning.multiRetrieval", "chunk.structural"}) {
+        for (String bKey : new String[]{"deepReasoning.enabled", "deepReasoning.enableThinking", "deepReasoning.multiRetrieval", "chunk.structural",
+                "retrieval.refDetectEnabled", "retrieval.refDetectMention", "retrieval.refExpandEnabled", "retrieval.refExpandIncludeIncoming",
+                "retrieval.refExpandParentEnabled", "retrieval.refExpandFuzzyName"}) {
             String v = updates.get(bKey);
             if (v != null && !v.isBlank() && !"true".equalsIgnoreCase(v) && !"false".equalsIgnoreCase(v)) {
                 throw new IllegalArgumentException(bKey + " 仅允许 true / false");
             }
+        }
+        // 引用扩散父块模式校验
+        String rpm = updates.get("retrieval.refExpandParentMode");
+        if (rpm != null && !rpm.isBlank()
+                && !"title_only".equals(rpm) && !"summary".equals(rpm) && !"full".equals(rpm)) {
+            throw new IllegalArgumentException("retrieval.refExpandParentMode 仅允许 title_only / summary / full");
         }
         // 重排参数校验
         String rb = updates.get("rerank.enabled");

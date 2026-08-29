@@ -220,6 +220,37 @@
               <a-input-number v-model:value="form.retrieval.rewriteTimeoutMs" :min="1000" :step="500" style="width:200px" />
               <span style="margin-left:12px;color:#999;font-size:12px">查询改写超时，本地模型慢可调大</span>
             </a-form-item>
+            <!-- 知识块关联检索：引用 1-hop 扩散 + 父章节带出 -->
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.refExpandEnabled" placement="top">关联扩散 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.retrieval.refExpandEnabled" />
+              <span style="margin-left:12px;color:#999;font-size:12px">命中块自动带出"被引用/父章节"关联块</span>
+            </a-form-item>
+            <a-form-item v-if="form.retrieval.refExpandEnabled">
+              <template #label><a-tooltip :title="tips.refExpandMaxHits" placement="top">扩散块上限 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-number v-model:value="form.retrieval.refExpandMaxHits" :min="0" :max="10" style="width:200px" />
+              <span style="margin-left:12px;color:#999;font-size:12px">0=仅父章节不带引用块</span>
+            </a-form-item>
+            <a-form-item v-if="form.retrieval.refExpandEnabled">
+              <template #label><a-tooltip :title="tips.refExpandIncludeIncoming" placement="top">入边扩散 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.retrieval.refExpandIncludeIncoming" />
+              <span style="margin-left:12px;color:#999;font-size:12px">同时带出"引用本块的块"（默认关，易带低相关）</span>
+            </a-form-item>
+            <a-form-item v-if="form.retrieval.refExpandEnabled">
+              <template #label><a-tooltip :title="tips.refExpandParentEnabled" placement="top">父章节带出 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.retrieval.refExpandParentEnabled" />
+              <span style="margin-left:12px;color:#999;font-size:12px">命中子章节时带父章节摘要（定义/总述）</span>
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.refDetectEnabled" placement="top">引用识别 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.retrieval.refDetectEnabled" />
+              <span style="margin-left:12px;color:#999;font-size:12px">解析时识别"详见/参见X节"（改后需重解析）</span>
+            </a-form-item>
+            <a-form-item v-if="form.retrieval.refDetectEnabled">
+              <template #label><a-tooltip :title="tips.refDetectMention" placement="top">提及识别 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-switch v-model:checked="form.retrieval.refDetectMention" />
+              <span style="margin-left:12px;color:#999;font-size:12px">正文提到其他章节也算引用（如 4.1.2 所述/《数据字典》/XX章节）</span>
+            </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.positionBonus" placement="top">位置奖励 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.retrieval.positionBonus" :min="0" :max="0.5" :step="0.01" style="width:200px" />
@@ -451,6 +482,12 @@ const tips = {
   keywordLimit: '关键词检索最多返回的知识块数（SQL LIMIT）。调高召回更全但更慢、融合分计算更重。',
   retrievalTimeout: '混合检索超时（ms）：关键词子检索与总检索的超时上限，超时降级返回已收集结果。',
   rewriteTimeoutMs: '查询改写超时（ms）：LLM 改写问题（多轮追问补全上下文）的等待上限，超时则用原问题检索并提示。本地模型响应慢时调大可减少改写降级，默认 5000。',
+  refExpandEnabled: '知识块关联扩散总开关：命中块时自动带出"它引用的块"（详见/参见X节）与"父章节摘要"，让交叉引用内容的回答更完整。关闭后回到只检索直接命中块。',
+  refExpandMaxHits: '关联扩散块的数量上限（0=只做父章节带出、不带引用块）。扩散块是可舍弃的增强，受数量与 token 双上限约束。',
+  refExpandIncludeIncoming: '是否同时带出"引用了本块的块"（入边扩散）。默认关：入边常带出低相关块；出边（本块引用的）与父章节已覆盖主要场景。',
+  refExpandParentEnabled: '父章节带出：命中子章节块时，自动带上父章节的标题+摘要（前200字，含定义/总述），解决子块上下文不完整。',
+  refDetectEnabled: '解析时识别知识块中的交叉引用（详见/参见/见 X 节/「章节名」）并建立引用关系。改后需重新解析文档才生效。',
+  refDetectMention: '同时识别正文中无动词的章节提及（如"如 4.1.2 所述""在《数据字典》中""报表设计模块"）。提及类只做精确匹配、单块最多 8 条引用，避免把高频话题词误建成引用边。',
   positionBonus: '知识块位置奖励：位于文档首块/前段的内容额外加分。适合"文档开头是摘要"的结构；对顺序无关的文档可调低。',
   rerankMinHits: '触发重排的候选数区间（下限~上限）：候选太少（无意义）或太多（超时风险）时跳过重排，直接用融合分排序。',
   rerankFailCooldown: '重排服务失败后的冷却时间(ms)：冷却期内不再探测/调用（避免每个请求都撞一次），冷却结束后自动恢复。',
@@ -510,6 +547,8 @@ const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', remain
                     upload: { maxFileSizeMB: 200 },
                     retrieval: { vectorWeight: 0.6, keywordWeight: 0.4, titleBonus: 0.1,
                                  vecThreshold: 0.3, keywordLimit: 20, keywordTimeoutMs: 800, searchTimeoutMs: 8000, rewriteTimeoutMs: 5000,
+                                 refDetectEnabled: true, refDetectMention: true, refExpandEnabled: true, refExpandMaxHits: 3, refExpandIncludeIncoming: false,
+                                 refExpandParentEnabled: true,
                                  positionBonus: 0.03, sectionBonus: 0.01, keywordMaxTerms: 6, keywordMaxTotal: 12,
                                  rerank: { enabled: false, baseUrl: 'http://localhost:7997',
                                            model: 'BAAI/bge-reranker-v2-m3', timeoutMillis: 5000,
@@ -563,6 +602,12 @@ onMounted(async () => {
       form.value.retrieval.keywordTimeoutMs = Number(d.retrieval?.keywordTimeoutMs?.value ?? 800)
       form.value.retrieval.searchTimeoutMs = Number(d.retrieval?.searchTimeoutMs?.value ?? 8000)
       form.value.retrieval.rewriteTimeoutMs = Number(d.retrieval?.rewriteTimeoutMs?.value ?? 5000)
+      form.value.retrieval.refDetectEnabled = d.retrieval?.refDetectEnabled?.value !== 'false'
+      form.value.retrieval.refDetectMention = d.retrieval?.refDetectMention?.value !== 'false'
+      form.value.retrieval.refExpandEnabled = d.retrieval?.refExpandEnabled?.value !== 'false'
+      form.value.retrieval.refExpandMaxHits = Number(d.retrieval?.refExpandMaxHits?.value ?? 3)
+      form.value.retrieval.refExpandIncludeIncoming = d.retrieval?.refExpandIncludeIncoming?.value === 'true'
+      form.value.retrieval.refExpandParentEnabled = d.retrieval?.refExpandParentEnabled?.value !== 'false'
       form.value.retrieval.positionBonus = Number(d.retrieval?.positionBonus?.value ?? 0.03)
       form.value.retrieval.sectionBonus = Number(d.retrieval?.sectionBonus?.value ?? 0.01)
       form.value.retrieval.keywordMaxTerms = Number(d.retrieval?.keywordMaxTerms?.value ?? 6)
@@ -656,6 +701,12 @@ const save = async () => {
                    keywordTimeoutMs: String(form.value.retrieval.keywordTimeoutMs),
                    searchTimeoutMs: String(form.value.retrieval.searchTimeoutMs),
                    rewriteTimeoutMs: String(form.value.retrieval.rewriteTimeoutMs),
+                   refDetectEnabled: String(form.value.retrieval.refDetectEnabled),
+                   refDetectMention: String(form.value.retrieval.refDetectMention),
+                   refExpandEnabled: String(form.value.retrieval.refExpandEnabled),
+                   refExpandMaxHits: String(form.value.retrieval.refExpandMaxHits),
+                   refExpandIncludeIncoming: String(form.value.retrieval.refExpandIncludeIncoming),
+                   refExpandParentEnabled: String(form.value.retrieval.refExpandParentEnabled),
                    positionBonus: String(form.value.retrieval.positionBonus),
                    sectionBonus: String(form.value.retrieval.sectionBonus),
                    keywordMaxTerms: String(form.value.retrieval.keywordMaxTerms),

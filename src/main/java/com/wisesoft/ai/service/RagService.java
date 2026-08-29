@@ -97,6 +97,7 @@ public class RagService {
     private final ConfigService configService;
     private final ImageFilterService imageFilterService;
     private final KeywordExtractor keywordExtractor;
+    private final KnowledgeRefService knowledgeRefService;
 
     /** M1：查询改写专用线程池（隔离超时任务，避免占用公共池/无限堆积） */
     private final ExecutorService rewriteExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -151,7 +152,8 @@ public class RagService {
                       UserImageService userImageService,
                       ConfigService configService,
                       ImageFilterService imageFilterService,
-                      KeywordExtractor keywordExtractor) {
+                      KeywordExtractor keywordExtractor,
+                      KnowledgeRefService knowledgeRefService) {
         this.chatClient = chatClientBuilder.build();
         this.sessionService = sessionService;
         this.properties = properties;
@@ -164,6 +166,7 @@ public class RagService {
         this.configService = configService;
         this.imageFilterService = imageFilterService;
         this.keywordExtractor = keywordExtractor;
+        this.knowledgeRefService = knowledgeRefService;
     }
 
     /**
@@ -330,13 +333,31 @@ public class RagService {
             List<String> retrievalTerms = keywordExtractor.extract(retrievalQuery);
             int maxContextHits = configService.getInt("context.maxContextHits");
             int snippetWindow = configService.getInt("context.snippetWindowChars");
-            // 批量预取引用文件名（避免循环内逐 hit 查库；冷缓存时一次 selectBatchIds）
-            Set<String> refDocIds = hits.stream().map(HybridRetrievalService.Hit::docId)
+            // 引用扩散 + 结构上下文扩展：命中 A → 带出被引块 B / 引用块 C（默认关）/ 父章节块。
+            // 扩散块以 Hit 形态混入同一上下文循环，复用图片占位/截取/预算逻辑；任一环节失败降级为不扩散
+            KnowledgeRefService.ExpandResult expandResult = knowledgeRefService.expand(hits);
+            List<HybridRetrievalService.Hit> extraHits = expandResult.extra();
+            Map<String, String> refOrigins = expandResult.origins();
+            List<HybridRetrievalService.Hit> allHits = new ArrayList<>(hits);
+            allHits.addAll(extraHits);
+            int maxExtraHits = Math.max(1, configService.getInt("retrieval.refExpandMaxHits", 3));
+            int maxExtraTokens = configService.getInt("retrieval.refExpandMaxTokens", 800);
+            int extraUsed = 0;
+            int extraTokensUsed = 0;
+            // 批量预取引用文件名（原始命中 + 扩散块都可能有引用展示；冷缓存时一次 selectBatchIds）
+            Set<String> refDocIds = allHits.stream().map(HybridRetrievalService.Hit::docId)
                     .filter(d -> d != null && !d.isBlank())
                     .collect(Collectors.toSet());
             Map<String, String> fileNameMap = documentMetaCache.getFileNames(refDocIds);
-            for (HybridRetrievalService.Hit hit : hits) {
-                if (docNo > maxContextHits) break;
+            for (int hi = 0; hi < allHits.size(); hi++) {
+                HybridRetrievalService.Hit hit = allHits.get(hi);
+                boolean isExtra = hi >= hits.size();
+                if (isExtra) {
+                    // 扩散块是可舍弃的增强：数量/token 双上限，超限直接跳过（不做首块硬截断）
+                    if (extraUsed >= maxExtraHits || extraTokensUsed >= maxExtraTokens) break;
+                } else {
+                    if (docNo > maxContextHits) break;
+                }
                 String text = hit.content();
                 List<String> urls = hit.images();
 
@@ -427,10 +448,17 @@ public class RagService {
                 src.put("title", hit.title());
                 src.put("snippet", snippet(text)); // 用截取后的片段做溯源摘要（更贴近命中内容）
                 src.put("images", hit.images()); // 关联文档截图（原始URL，前端经 /proxy 访问）
+                // 扩散块来源标注：REF_OUT（被引用）/ REF_IN（引用者）/ PARENT（父章节上下文），前端引用弹窗可区分
+                String refOrigin = refOrigins.get(hit.knowledgeId());
+                if (refOrigin != null) src.put("origin", refOrigin);
                 sources.add(src);
 
                 context.append("[").append(docNo++).append("] ").append(text).append("\n");
                 usedTokens += tokens;
+                if (isExtra) {
+                    extraUsed++;
+                    extraTokensUsed += tokens;
+                }
 
                 // 图片数量多于正文占位时，剩余补在末尾
                 for (int i = imgIdxForChunk; i < urls.size(); i++) {
@@ -440,7 +468,7 @@ public class RagService {
                     context.append("[图片").append(globalSeq).append("]\n");
                 }
             }
-            log.info("[CTX] 上下文填充 {} 块, 总用 {} / 预算 {} token", docNo - 1, usedTokens + fixedTokens, budget);
+            log.info("[CTX] 上下文填充 {} 块（含扩散 {}）, 总用 {} / 预算 {} token", docNo - 1, extraUsed, usedTokens + fixedTokens, budget);
 
             // 4. SSE 先发图片 URL 列表（编号顺序，生产开启鉴权时动态签名）
             if (!imgIndex.isEmpty()) {
