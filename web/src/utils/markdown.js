@@ -93,8 +93,10 @@ export const prepKnowledgeContent = (content, images) => {
 // 表格容错：LLM 常在标题/列表项后直接跟表格行（无空行），markdown-it 会把表格行吞进列表/段落变成纯文本。
 // 逐行扫描：识别"表头行 + 分隔行(|---|)"表格起点，在其前补空行；分隔行后连续收集表体行。
 // 显式区分表头/分隔/表体，避免误伤正常表格（上一版正则把"分隔行+表体行"误当表格起点，导致表体丢失）。
+// 注意：分隔行必须含至少一个 '-' —— [\s:|-]+ 会把"全空单元格表体行"(|  |  |)误判为分隔行，
+// 导致表格被拆碎（序号块预览中修订记录表掉行、剩余行渲染成原始竖线文本）。
 const isTableRow = l => /^\s*\|.*\|\s*$/.test(l)
-const isSepRow = l => /^\s*\|[\s:|-]+\|\s*$/.test(l)
+const isSepRow = l => /^\s*\|[\s:|-]*-[\s:|-]*\|\s*$/.test(l)
 const ensureTableSpacing = text => {
   const lines = text.split('\n')
   const res = []
