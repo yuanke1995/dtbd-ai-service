@@ -93,7 +93,7 @@
                          style="cursor:pointer;margin:2px" @click="ask(q)">{{ q }}</a-tag>
                 </div>
               </div>
-              <!-- ===== 操作区（气泡外部，豆包样式：图标一行排开 + 不常用收进「更多」 + 行尾时间） ===== -->
+              <!-- ===== 操作区（气泡外部：图标一行排开 + 不常用收进「更多」 + 行尾时间） ===== -->
               <!-- 流式中断/失败：重试入口（保留已生成内容，重新生成完整回答） -->
               <div v-if="m.role === 'ai' && m.failed && !m.loading" class="retry-row">
                 <a-button size="small" type="primary" ghost :disabled="loading" @click="regenerate(i)">
@@ -239,7 +239,7 @@
               <span class="pending-del" @click.stop="removePendingImage(pi)">×</span>
             </div>
           </div>
-          <!-- 豆包式输入卡片：文本在上，工具行在下（图片/深度思考靠左，发送/停止靠右） -->
+          <!-- 输入卡片：文本在上，工具行在下（图片/深度思考靠左，发送/停止靠右） -->
           <div class="input-box">
             <a-textarea
               ref="textareaRef"
@@ -813,7 +813,7 @@ const onEnterKey = e => {
 
 watch(currentSessionId, () => exitSelectMode())
 
-// 消息时间格式化（豆包样式）：当天只显示时分，昨天带前缀，更早带日期
+// 消息时间格式化：当天只显示时分，昨天带前缀，更早带日期
 const fmtMsgTime = ts => {
   if (!ts) return ''
   const d = new Date(ts)
@@ -1019,14 +1019,14 @@ const exportAnswer = mi => {
 }
 
 // 检索调试：打开弹窗（默认该轮问题）并执行
-// 操作区「更多」菜单：不常用动作收口（豆包样式）
+// 操作区「更多」菜单：不常用动作收口
 const onMoreAction = (key, mi) => {
   if (key === 'debug') openDebug(mi)
   else if (key === 'export') exportAnswer(mi)
   else if (key === 'deleteRound') enterSelectMode(mi)
 }
 
-// ==================== 多选删除（豆包式：进入选择模式 → 勾选轮次 → 底栏批量删除，支持撤销） ====================
+// ==================== 多选删除（进入选择模式 → 勾选轮次 → 底栏批量删除，支持撤销） ====================
 const selectMode = ref(false)
 const selected = ref([])   // 选中的"轮次起始索引"（用户消息）
 const deletingRounds = ref(false)
@@ -1249,7 +1249,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .welcome h2 { margin: 16px 0 8px; }
 .welcome p { color: #888; margin-bottom: 24px; }
 .row { display: flex; gap: 12px; margin-bottom: 20px; justify-content: center; }
-/* 豆包式文档流：内容列居中限宽——问题右对齐浅灰气泡，回答列内全宽无气泡 */
+/* 文档流：内容列居中限宽——问题右对齐浅灰气泡，回答列内全宽无气泡 */
 .row.user { justify-content: center; }
 /* 消息块：承载气泡 + 气泡下方悬浮操作区（编辑等）；宽度约束由外层承担 */
 .msg-block { position: relative; display: flex; flex-direction: column; min-width: 0; max-width: min(92%, 860px); width: 100%; }
@@ -1262,7 +1262,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .bubble.user :deep(.md > p) { margin: 0; }
 .bubble.ai { background: transparent; padding: 0; }
 .input { padding: 12px 48px 16px; border-top: 1px solid #f0f0f0; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
-/* 豆包式输入卡片：无内边框文本在上，工具行在下 */
+/* 输入卡片：无内边框文本在上，工具行在下 */
 .input-box {
   position: relative; flex: 1; min-width: 0; max-width: 860px;
   margin-left: auto; margin-right: auto;
@@ -1406,7 +1406,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
   padding: 14px 16px; border-top: 1px solid #f0f0f0; background: #fff;
 }
 .select-count { font-size: 14px; color: #333; }
-/* 消息时间（豆包样式：操作行行尾小字） */
+/* 消息时间（操作行行尾小字） */
 .msg-time-inline { font-size: 11px; color: #c0c4cc; margin-left: 10px; white-space: nowrap; user-select: none; }
 /* 操作区图标按钮（纯图标紧凑排布） */
 .act-icon-btn {

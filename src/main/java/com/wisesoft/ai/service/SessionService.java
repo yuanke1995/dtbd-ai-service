@@ -485,7 +485,7 @@ public class SessionService {
         map.put("role", m.getRole());
         map.put("content", m.getContent());
         map.put("messageId", m.getId()); // 与 SSE done 事件字段名一致，供前端反馈/导出等操作
-        map.put("createTime", m.getCreateTime()); // 气泡下方时间展示（豆包样式）
+        map.put("createTime", m.getCreateTime()); // 气泡下方时间展示
         if (m.getThinking() != null && !m.getThinking().isBlank()) {
             map.put("thinking", m.getThinking());
         }
