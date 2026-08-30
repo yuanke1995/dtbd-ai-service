@@ -46,21 +46,7 @@
                         @click.stop @change="toggleSelect(i)" />
             <div class="msg-block" :class="m.role">
               <div class="bubble" :class="m.role">
-              <!-- 检索状态行（豆包式）：过程概览，与气泡下方引用（结果溯源）互补不重复 -->
-              <!-- 检索状态行（豆包式）：纯过程概览展示；检索调试入口在 ··· 菜单 -->
-              <!-- 检索状态行：点击展开检索词与参考资料明细（明细与下方引用标签同源，过程视角） -->
-              <div v-if="m.role === 'ai' && m.retrieved" class="retrieval-line" @click="m.rtOpen = !m.rtOpen">
-                搜索 {{ m.retrieved.keywords }} 个关键词，参考 {{ m.retrieved.refs }} 段资料
-                <down-outlined class="rt-arrow" :class="{ open: m.rtOpen }" />
-              </div>
-              <div v-if="m.role === 'ai' && m.retrieved && m.rtOpen" class="retrieval-detail">
-                <div v-if="m.retrieved.terms?.length" class="rt-terms">检索词：{{ (m.retrieved.terms || []).join('、') }}</div>
-                <div v-for="(s, si) in (m.sources || [])" :key="si" class="rt-ref">
-                  <span class="rt-ref-tag">[{{ s.ref }}]</span>{{ (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '') }}
-                  <div v-if="s.snippet" class="rt-snip">{{ s.snippet }}</div>
-                </div>
-              </div>
-                <!-- 用户上传图片（本地 dataUrl 预览 / 历史 URL） -->
+              <!-- 用户上传图片（本地 dataUrl 预览 / 历史 URL） -->
                 <div v-if="m.role === 'user' && m.images && m.images.length" class="msg-imgs">
                   <img v-for="(u, ui) in m.images" :key="ui" :src="resolveImg(u)"
                        class="msg-img" :alt="'上传图片' + (ui + 1)" @click="openPreviewFromMsg(m, ui)" @error="onImgError" />
@@ -91,14 +77,20 @@
                 </div>
                 <!-- SSE warn 事件（如回答超时截断） -->
                 <div v-if="m.role === 'ai' && m.warnMsg" class="degradation-bar">{{ m.warnMsg }}</div>
-                <!-- 引用来源（回答中 [N] 角标点击查看原文片段） -->
-                <div v-if="m.role === 'ai' && m.sources && m.sources.length" class="src-chips">
-                  <a-tag
-                    v-for="(s, si) in m.sources" :key="si" color="blue"
-                    style="cursor:pointer;margin:2px" @click="openSource(m.sources[si])"
-                  >
-                    [{{ s.ref }}] {{ (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '') }}
-                  </a-tag>
+                <!-- 检索状态行（回答下方合并区）：概览行展开=检索词+来源条目；条目点击弹原文（平替原引用 chips，与正文 [N] 角标同源） -->
+                <div v-if="m.role === 'ai' && (m.retrieved || (m.sources && m.sources.length))" class="retrieval-merged">
+                  <div class="retrieval-line" @click="m.rtOpen = !m.rtOpen">
+                    <template v-if="m.retrieved">搜索 {{ m.retrieved.keywords }} 个关键词，参考 {{ m.retrieved.refs }} 段资料</template>
+                    <template v-else>参考 {{ (m.sources || []).length }} 段资料</template>
+                    <down-outlined class="rt-arrow" :class="{ open: m.rtOpen }" />
+                  </div>
+                  <div v-if="m.rtOpen" class="retrieval-detail">
+                    <div v-if="m.retrieved?.terms?.length" class="rt-terms">检索词：{{ (m.retrieved.terms || []).join('、') }}</div>
+                    <div v-for="(s, si) in (m.sources || [])" :key="si" class="rt-ref" title="点击查看原文" @click="openSource(s)">
+                      <span class="rt-ref-tag">[{{ s.ref }}]</span>{{ (s.fileName || '未知文档') + (s.title ? ' §' + s.title : '') }}
+                      <div v-if="s.snippet" class="rt-snip">{{ s.snippet }}</div>
+                    </div>
+                  </div>
                 </div>
                 <!-- 相关推荐问题 -->
                 <div v-if="m.role === 'ai' && m.related && m.related.length" class="related">
@@ -1389,8 +1381,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .dbg-title { font-weight: 500; font-size: 13px; }
 .dbg-snippet { margin-top: 3px; font-size: 12px; color: #888; word-break: break-all; }
 /* 来源引用 chips */
-.src-chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
-.src-chips :deep(.ant-tag) { font-size: 12px; }
+/* 来源引用 chips 已由回答下方检索状态行合并区平替（.retrieval-merged），chips 样式移除 */
 /* 引用弹窗知识块全文 */
 .src-content { max-height: 45vh; overflow-y: auto; color: #333; line-height: 1.7; font-size: 14px;
   padding-right: 6px; scrollbar-width: thin; }
@@ -1444,17 +1435,19 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .act-icon-btn.act-danger:hover:not(:disabled) { color: #ff4d4f; background: rgba(255,77,79,.08); }
 .act-icon-btn:disabled { cursor: not-allowed; opacity: .4; }
 .act-icon-btn.fb-active { color: #1677ff; }
-/* 检索状态行（豆包式，回答气泡上方）：搜索 N 个关键词，参考 M 段资料 */
-.retrieval-line { font-size: 12px; color: #999; margin-bottom: 6px; user-select: none; cursor: pointer; }
+/* 检索状态行（回答下方合并区）：概览行 + 展开的检索词/来源条目，条目点击弹原文（平替原引用 chips） */
+.retrieval-merged { margin-top: 8px; width: 100%; }
+.retrieval-line { font-size: 12px; color: #999; user-select: none; cursor: pointer; }
 .retrieval-line:hover { color: #1677ff; }
 .rt-arrow { font-size: 10px; margin-left: 2px; transition: transform .15s; }
 .rt-arrow.open { transform: rotate(180deg); }
 .retrieval-detail {
   font-size: 12px; color: #888; background: #fafafa; border: 1px solid #f0f0f0;
-  border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; width: 100%;
+  border-radius: 8px; padding: 8px 10px; margin: 4px 0 2px; width: 100%;
 }
 .rt-terms { margin-bottom: 6px; color: #666; }
-.rt-ref { padding: 3px 0; border-top: 1px dashed #ececec; }
+.rt-ref { padding: 3px 0; border-top: 1px dashed #ececec; cursor: pointer; }
+.rt-ref:hover { color: #1677ff; }
 .rt-ref-tag { color: #1677ff; margin-right: 4px; }
 .rt-snip { color: #bbb; margin-top: 2px; }
 /* 检索进度提示（首 token 前的阶段状态：理解问题/检索资料/生成回答） */
