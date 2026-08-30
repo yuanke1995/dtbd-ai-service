@@ -92,6 +92,11 @@ public class ConfigService {
             Map.entry("rerank.baseUrl", "重排：服务地址"),
             Map.entry("rerank.model", "重排：模型名"),
             Map.entry("rerank.timeoutMillis", "重排：单次超时(ms)"),
+            Map.entry("retrieval.vecThreshold", "检索：向量相似度下限(0~1，评估对比后可应用)"),
+            Map.entry("retrieval.keywordLimit", "检索：关键词召回词数上限"),
+            Map.entry("retrieval.vectorTopK", "检索：向量召回 topK（评估对比后可应用）"),
+            Map.entry("rerank.minHits", "重排：触发候选数下限（评估对比后可应用）"),
+            Map.entry("rerank.maxHits", "重排：触发候选数上限（评估对比后可应用）"),
             Map.entry("keyword.engine", "关键词引擎：mysql / meilisearch（切换前先探测并重建索引）"),
             Map.entry("keyword.baseUrl", "关键词引擎：Meilisearch 服务地址"),
             Map.entry("keyword.apiKey", "关键词引擎：Meilisearch master key（留空回退环境变量 AI_MEILI_KEY）"),
@@ -431,7 +436,7 @@ public class ConfigService {
             if (t < 0 || t > 2) throw new IllegalArgumentException("temperature 需在 0~2 之间");
         }
         // 检索权重校验：必须是 0~1 的数字（防非法值导致检索排序异常）
-        for (String wKey : new String[]{"retrieval.vectorWeight", "retrieval.keywordWeight", "retrieval.titleBonus", "context.safetyFactor", "chunk.structuralRatio"}) {
+        for (String wKey : new String[]{"retrieval.vectorWeight", "retrieval.keywordWeight", "retrieval.titleBonus", "retrieval.vecThreshold", "context.safetyFactor", "chunk.structuralRatio"}) {
             String w = updates.get(wKey);
             if (w != null && !w.isBlank()) {
                 try {
@@ -445,6 +450,27 @@ public class ConfigService {
         // 上下文长度参数校验：必须是非负整数
         for (String iKey : new String[]{"context.defaultWindowTokens", "context.costCapTokens", "context.maxOutputTokens",
                 "context.historyMaxTokens", "context.historyPerMsgChars", "context.snippetWindowChars", "context.maxContextHits"}) {
+            String v = updates.get(iKey);
+            if (v != null && !v.isBlank()) {
+                try {
+                    if (Integer.parseInt(v.trim()) < 0) throw new IllegalArgumentException(iKey + " 不能为负数");
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(iKey + " 必须是整数");
+                }
+            }
+        }
+        // 检索/重排数值参数校验：正整数（minHits 允许 0=从不触发）
+        for (String iKey : new String[]{"retrieval.keywordLimit", "retrieval.vectorTopK", "rerank.maxHits"}) {
+            String v = updates.get(iKey);
+            if (v != null && !v.isBlank()) {
+                try {
+                    if (Integer.parseInt(v.trim()) < 1) throw new IllegalArgumentException(iKey + " 需 ≥1");
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(iKey + " 必须是整数");
+                }
+            }
+        }
+        for (String iKey : new String[]{"rerank.minHits"}) {
             String v = updates.get(iKey);
             if (v != null && !v.isBlank()) {
                 try {
