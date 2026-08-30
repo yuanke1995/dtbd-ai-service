@@ -60,8 +60,11 @@
         <span class="p-item"><span class="p-label">topK</span><a-input-number v-model:value="g.topK" :min="1" :placeholder="cur('retrieval.vectorTopK')" style="width:90px" /></span>
         <span class="p-item"><span class="p-label">重排下限</span><a-input-number v-model:value="g.rerankMinHits" :min="0" :placeholder="cur('rerank.minHits')" style="width:80px" /></span>
         <span class="p-item"><span class="p-label">重排上限</span><a-input-number v-model:value="g.rerankMaxHits" :min="1" :placeholder="cur('rerank.maxHits')" style="width:80px" /></span>
-        <span class="p-item"><span class="p-label">重排</span><a-switch v-model:checked="g.rerankEnabled" />
-          <span v-if="g.rerankEnabled === null || g.rerankEnabled === undefined" class="cur-hint">当前：{{ cur('rerank.enabled') === 'true' ? '开' : '关' }}</span>
+        <span class="p-item"><span class="p-label">重排</span>
+          <a-switch :checked="g.rerankEnabled ?? cur('rerank.enabled') === 'true'"
+                    title="未手动拨动 = 跟随线上当前配置；拨动后为该组显式覆盖"
+                    @change="v => g.rerankEnabled = v" />
+          <span v-if="g.rerankEnabled === null || g.rerankEnabled === undefined" class="cur-hint">跟随当前（{{ cur('rerank.enabled') === 'true' ? '开' : '关' }}）</span>
         </span>
       </div>
     </div>
