@@ -245,7 +245,7 @@ curl http://localhost:8090/api/ai/search-index/stats             # indexedCount 
 - **安全**：关键密钥零默认值（`DB_PASSWORD`/`AI_TRUSTED_TOKEN` 缺失 fail-fast，模型密钥允许空默认仅功能不可用）、token 恒定时间比较、图片访问 HMAC 签名 URL（`AI_IMAGES_AUTH_ENABLED=true`）、统一异常+参数校验（`@Valid`）、错误信息不泄露内部细节、**上传魔数校验**（文件头字节须与扩展名匹配，docx/xlsx=PK、pdf=%PDF，防伪造扩展名）、**接口限流**（问答/上传按用户/IP 固定窗口限频，超限 429，Redis 不可用自动放行）、**管理操作审计**（上传/删除/批量删除/回滚记录操作者 `[AUDIT]` 日志）
 - **可靠性**：上传失败自动补偿清理（删向量+MySQL+图片）、脏解析记录清理、解析异步化（不阻塞上传）、**解析中删除文档立即中断**（内存标志 + 线程 interrupt + 阶段检查点，清理本次产物）、SSE 异步订阅支持停止生成、查询改写专用线程池（超时隔离 + daemon + PreDestroy 回收）
 - **可配置**：模型名/温度/System Prompt 角色段/视觉提示词/检索权重与行为参数/重排区间/解析并发/上下文参数/关联扩散参数/限频/语义缓存/推荐问题池 **数据库存储、保存即生效**（`c_ai_config`，存量升级自动补默认项；检索 topK/向量阈值/关键词上限/重排区间等键支持在线修改，检索评估"应用此组"即写入这些键）；prompt 调整无需重启；检索/重排/解析/问答/关联扩散 5 组 30+ 项行为参数收口配置化（原硬编码移除）
-- **可观测性**：`/actuator/health` 健康检查、日志级别环境变量化、MyBatis 日志走 slf4j、检索调试 API、Swagger UI 接口文档（springdoc 自动生成，随代码实时更新）；**降级提示分级**（fail-loud：回答降级事件分 user 级默认展示/调试级由 `chat.showDebugDegradations` 开关控制，全部仍写 `[FAIL-LOUD]` 日志）
+- **可观测性**：`/actuator/health` 健康检查、日志级别环境变量化、MyBatis 日志走 slf4j、检索调试 API、Swagger UI 接口文档（springdoc 自动生成，随代码实时更新）；**降级提示统一开关**（fail-loud：所有回答降级事件——无命中/改写失败/图片剔除/未标注引用/缓存命中——默认不展示，全部写 `[FAIL-LOUD]` 日志；排障时开 `chat.showDebugDegradations` 才在回答下方显示）
 - **多用户与部署**：**会话按用户隔离**（网关透传 `X-User-Id`，列表/历史/删除/清空均校验归属；anonymous 为存量兼容池）、multi-stage Dockerfile（非 root 运行 + HEALTHCHECK + `JAVA_OPTS` 内存注入）、docker-compose（redis-stack + meilisearch + **内置 MySQL**，亦可经 `DB_HOST` 等指向外部 OceanBase）、nginx 参考配置（`deploy/nginx.conf`，SPA fallback + SSE 关缓冲 + 图片缓存）
 
 ## 配置说明

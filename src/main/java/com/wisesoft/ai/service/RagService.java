@@ -49,23 +49,17 @@ public class RagService {
     private int streamRetryCount() { return configService.getInt("chat.streamRetryCount", 1); }
 
     /**
-     * user 级降级事件（默认随 done 展示给用户）：对用户有意义、看得懂、知道怎么办。
-     * 其余 code（图片剔除/未标注引用/改写失败/重排与检索降级等）为 debug 级，
-     * 仅当 chat.showDebugDegradations=true 时展示（默认只进 [FAIL-LOUD] 日志）。
+     * 所有降级事件（无命中/改写失败/图片剔除/未标注引用/缓存命中等）统一由 chat.showDebugDegradations 开关控制，
+     * 默认关闭：回答区不展示任何降级提示，全部只进 [FAIL-LOUD] 日志；排障/调试时开启开关才在回答中展示。
      */
-    private static final Set<String> USER_DEGRADATION_CODES = Set.of(
-            "noHit", "streamError", "deepThinkDegraded", "contextTruncated", "imgFilterDropped",
-            "invalidCitation", "cacheHit");
-
     /** 引用角标 [N]（用于完成阶段校验编号是否超出来源范围，剔除 LLM 编造的无效引用） */
     private static final Pattern CITE_PATTERN = Pattern.compile("\\[(\\d+)]");
 
-    /** fail-loud：按 code 去重添加降级事件（user 级默认展示；debug 级由 chat.showDebugDegradations 开关控制） */
+    /** fail-loud：按 code 去重添加降级事件（全部 debug 级，由 chat.showDebugDegradations 开关控制，默认不展示） */
     private void addDegradation(List<Map<String, String>> list, Set<String> codes, String code, String msg) {
         if (!codes.add(code)) return;
-        boolean userLevel = USER_DEGRADATION_CODES.contains(code);
-        if (userLevel || configService.getBoolean("chat.showDebugDegradations")) {
-            list.add(Map.of("code", code, "msg", msg, "level", userLevel ? "user" : "debug"));
+        if (configService.getBoolean("chat.showDebugDegradations")) {
+            list.add(Map.of("code", code, "msg", msg, "level", "debug"));
         }
     }
 
@@ -117,10 +111,11 @@ public class RagService {
             donePayload.put("messageId", cached.getMessageId());
             donePayload.put("finalContent", cached.getAnswer());
             donePayload.put("finalImages", images);
-            donePayload.put("degradations", List.of(Map.of(
-                    "code", "cacheHit",
-                    "msg", "已复用相似问题「" + cached.getQuestion() + "」的回答（知识库未变化时的加速策略）",
-                    "level", "user")));
+            // 缓存命中提示同样收进调试开关（默认不展示；开启后才提示"已复用相似回答"）
+            donePayload.put("degradations", configService.getBoolean("chat.showDebugDegradations")
+                    ? List.of(Map.of("code", "cacheHit",
+                    "msg", "已复用相似问题「" + cached.getQuestion() + "」的回答（知识库未变化时的加速策略）", "level", "debug"))
+                    : List.of());
             sendSseEvent(emitter, "done", JSON.toJSONString(donePayload), sessionId);
         } catch (Exception e) {
             log.warn("[ANSWER-CACHE] 缓存回答下发失败: {}", e.getMessage());

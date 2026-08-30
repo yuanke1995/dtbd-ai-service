@@ -65,10 +65,10 @@
               <span style="margin-left:12px;color:#999;font-size:12px">SSE 超时截断并提示，默认 300000</span>
             </a-form-item>
             <a-form-item>
-              <template #label><a-tooltip :title="tips.showDebugDegradations" placement="top">调试级提示 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <template #label><a-tooltip :title="tips.showDebugDegradations" placement="top">降级提示 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-switch v-model:checked="form.chat.showDebugDegradations" />
               <span style="margin-left:12px;color:#999;font-size:12px">
-                开启后回答下方显示内部降级信息（图片剔除/未标注引用/检索降级等），默认只显示用户级
+                默认关闭：回答下方不显示任何降级提示（无命中/改写失败/图片剔除/缓存命中等）；调试排障时开启可见全部原因
               </span>
             </a-form-item>
             <a-form-item label="Base URL">
@@ -525,7 +525,7 @@ const tips = {
   sseTimeoutMs: '问答 SSE 连接超时（毫秒）：超过后回答被截断，前端提示"回答超时已截断"。深度思考+长回答场景可调大，默认 300000（5 分钟）。',
   retrievalDebugEnabled: '检索调试入口开关（内部排障用）：开启后回答操作菜单显示「检索调试」，可分步查看关键词/向量/重排召回结果；面向用户的部署建议保持关闭。',
   suggestedQuestions: '欢迎页展示的推荐问题（新用户引导）。每行一条、最多 8 条；数据看板的热门问题可一键加入。改动保存后，用户下次进入问答页生效。',
-  showDebugDegradations: '回答提示中是否显示调试级降级信息（图片引用剔除/未标注引用/查询改写失败/检索降级等内部细节）。默认关：只显示对用户有意义的信息；调试排障时可开启，所有降级信息仍会写 [FAIL-LOUD] 日志。',
+  showDebugDegradations: '回答下方是否显示降级提示（无命中/查询改写失败/图片剔除/未标注引用/缓存命中等）。默认关：回答区不显示任何降级提示（排障信息仍写 [FAIL-LOUD] 日志）；调试排障时开启即可看到全部降级原因。',
   visionEnabled: '视觉模型总开关。关闭后：文档图片/用户图片都不生成描述——图片仅展示、内容不进检索与回答引用（RAG 对图片语义失效），一般不建议关闭。',
   parseConcurrency: '文档异步解析的并发数（同时解析几个文档）。调高多文档上传更快，但并发解析会同时占用 embedding/Ollama 资源；保存后对新任务生效。',
   embedRetryCount: '向量化批次失败时的自动重试次数（0=不重试）。重试仍失败则整个文档解析失败并回退/提示（fail-loud，绝不静默丢块）。',
