@@ -156,6 +156,18 @@ public class ChatController {
         return ResultJson.ok("会话已清空");
     }
 
+    @Operation(summary = "批量删除会话", description = "按 ID 列表软删除多个会话（逐个校验归属，单条失败不中断）；返回成功删除数")
+    @PostMapping("/sessions/batch-delete")
+    public ResultJson batchDeleteSessions(
+            @Parameter(description = "{\"ids\": [\"会话ID\", ...]}") @org.springframework.web.bind.annotation.RequestBody Map<String, Object> body,
+            HttpServletRequest httpRequest) {
+        List<String> ids = body.get("ids") instanceof List<?> list
+                ? list.stream().map(String::valueOf).toList() : List.of();
+        if (ids.isEmpty()) throw new BizException("ids 不能为空");
+        int deleted = sessionService.batchDelete(UserContext.resolve(httpRequest), ids);
+        return ResultJson.ok(Map.of("deleted", deleted));
+    }
+
     @Operation(summary = "新建会话", description = "创建一个新的对话会话（归属当前用户），返回会话 ID")
     @PostMapping("/session/new")
     public ResultJson newSession(HttpServletRequest httpRequest) {

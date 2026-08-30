@@ -172,6 +172,9 @@ export const deleteSessionApi = sid => request(`/session/${sid}`, { method: 'DEL
 /** 清空所有会话 */
 export const clearAllSessionsApi = () => request('/sessions', { method: 'DELETE' })
 
+/** 批量删除会话（按 ID 列表，软删除） */
+export const batchDeleteSessionsApi = ids => request('/sessions/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) })
+
 /** 文档列表 */
 export const listDocuments = () => request('/document/list')
 

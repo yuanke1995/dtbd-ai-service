@@ -44,6 +44,7 @@
         <div class="filter-row">
           <span class="filter-tab" :class="{ active: filter === 'all' }" @click="setFilter('all')">全部</span>
           <span class="filter-tab" :class="{ active: filter === 'fav' }" @click="setFilter('fav')">收藏</span>
+          <span v-if="batchMode" class="batch-entry active" @click="toggleBatch">退出管理</span>
         </div>
       </div>
 
@@ -57,8 +58,11 @@
           :key="s.id"
           class="session-item"
           :class="{ active: s.id === currentSessionId }"
-          @click="$emit('select', s.id)"
+          @click="batchMode ? toggleSel(s.id) : $emit('select', s.id)"
         >
+          <!-- 批量管理模式：勾选框替代 ··· 操作 -->
+          <a-checkbox v-if="batchMode" class="batch-check"
+                      :checked="selected.has(s.id)" @click.stop @change="toggleSel(s.id)" />
           <div class="session-info">
             <div class="session-title">
               <span v-if="s.isPinned" class="pin-mark"><pushpin-filled style="font-size:11px" /></span>
@@ -69,28 +73,41 @@
               <span class="msg-count">{{ s.messageCount || 0 }} 条消息</span>
             </div>
           </div>
-          <div class="session-actions" @click.stop>
-            <a-tooltip :title="s.isFavorite ? '取消收藏' : '收藏'" placement="top"
-                       :open="!!favTipOpen[s.id]" @open-change="v => favTipOpen[s.id] = v">
-              <star-outlined class="act-icon" :class="{ fav: s.isFavorite }"
-                             @click="onToggleFavorite(s)" />
-            </a-tooltip>
-            <a-tooltip :title="s.isPinned ? '取消置顶' : '置顶'" placement="top"
-                       :open="!!pinTipOpen[s.id]" @open-change="v => pinTipOpen[s.id] = v">
-              <pushpin-outlined class="act-icon" :class="{ pin: s.isPinned }"
-                                @click="onTogglePin(s)" />
-            </a-tooltip>
-            <a-popconfirm
-              title="确定删除该会话？"
-              ok-text="删除"
-              cancel-text="取消"
-              placement="right"
-              @confirm="$emit('delete', s.id)"
-            >
-              <delete-outlined class="delete-icon" />
-            </a-popconfirm>
+          <div v-if="!batchMode" class="session-actions" @click.stop>
+            <!-- 更多菜单：收藏/置顶/删除收进 ···，保持会话项简洁 -->
+            <a-dropdown :trigger="['click']" placement="bottomRight">
+              <more-outlined class="act-icon" title="更多" />
+              <template #overlay>
+                <a-menu @click="e => onMenuClick(s, e)">
+                  <a-menu-item key="batch">
+                    <check-square-outlined style="color:#666;margin-right:6px" />批量管理
+                  </a-menu-item>
+                  <a-menu-divider />
+                  <a-menu-item key="fav">
+                    <star-outlined :style="{ color: s.isFavorite ? '#faad14' : '#666', marginRight: '6px' }" />
+                    {{ s.isFavorite ? '取消收藏' : '收藏' }}
+                  </a-menu-item>
+                  <a-menu-item key="pin">
+                    <pushpin-outlined :style="{ color: s.isPinned ? '#1677ff' : '#666', marginRight: '6px' }" />
+                    {{ s.isPinned ? '取消置顶' : '置顶' }}
+                  </a-menu-item>
+                  <a-menu-divider />
+                  <a-menu-item key="del" danger>
+                    <delete-outlined style="margin-right:6px" />删除会话
+                  </a-menu-item>
+                </a-menu>
+              </template>
+            </a-dropdown>
           </div>
         </div>
+      </div>
+
+      <!-- 批量管理操作栏（底部常驻） -->
+      <div v-if="batchMode" class="batch-bar">
+        <a-checkbox :checked="allSelected" :indeterminate="selected.size > 0 && !allSelected"
+                    @change="toggleAll">全选</a-checkbox>
+        <span class="batch-count">已选 {{ selected.size }}</span>
+        <a-button size="small" danger :disabled="selected.size === 0" @click="doBatchDelete">删除所选</a-button>
       </div>
     </div>
 
@@ -120,11 +137,12 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, computed } from 'vue'
+import { Modal } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined, MenuFoldOutlined, MenuUnfoldOutlined, ClearOutlined, CommentOutlined,
-         SearchOutlined, PushpinOutlined, PushpinFilled, StarOutlined } from '@ant-design/icons-vue'
+         SearchOutlined, PushpinOutlined, PushpinFilled, StarOutlined, MoreOutlined, CheckSquareOutlined } from '@ant-design/icons-vue'
 
-defineProps({
+const props = defineProps({
   sessions: { type: Array, default: () => [] },
   currentSessionId: { type: String, default: null },
   collapsed: { type: Boolean, default: false },
@@ -134,18 +152,55 @@ defineProps({
   dragging: { type: Boolean, default: false }    // 拖拽中（禁用宽度过渡动画）
 })
 
-const emit = defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear', 'toggle-pin', 'toggle-favorite', 'search', 'filter-change'])
+const emit = defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear', 'toggle-pin', 'toggle-favorite', 'search', 'filter-change', 'batch-delete'])
 
-// 置顶/收藏 tooltip 受控 open 状态：点击图标时立即关闭，避免浮层残留
-const pinTipOpen = reactive({})
-const favTipOpen = reactive({})
-const onTogglePin = s => {
-  pinTipOpen[s.id] = false
-  emit('toggle-pin', s)
+// 「···」更多菜单：批量管理进入多选模式（当前会话默认勾选）；收藏/置顶直接派发，删除二次确认
+const onMenuClick = (s, { key }) => {
+  if (key === 'batch') {
+    batchMode.value = true
+    selected.value = new Set([s.id])
+  } else if (key === 'fav') emit('toggle-favorite', s)
+  else if (key === 'pin') emit('toggle-pin', s)
+  else if (key === 'del') {
+    Modal.confirm({
+      title: '删除会话？',
+      content: `「${s.title || '新对话'}」的问答记录将被删除`,
+      okText: '删除', okType: 'danger', cancelText: '取消',
+      onOk: () => emit('delete', s.id)
+    })
+  }
 }
-const onToggleFavorite = s => {
-  favTipOpen[s.id] = false
-  emit('toggle-favorite', s)
+
+// 批量管理：多选会话统一删除（emit ids，父组件调批量接口并刷新列表）
+const batchMode = ref(false)
+const selected = ref(new Set())
+const toggleBatch = () => {
+  batchMode.value = !batchMode.value
+  selected.value = new Set()
+}
+const toggleSel = id => {
+  const next = new Set(selected.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selected.value = next
+}
+const allSelected = computed(() => props.sessions.length > 0 && props.sessions.every(s => selected.value.has(s.id)))
+const toggleAll = () => {
+  selected.value = allSelected.value ? new Set() : new Set(props.sessions.map(s => s.id))
+}
+const doBatchDelete = () => {
+  const ids = [...selected.value]
+  if (!ids.length) return
+  Modal.confirm({
+    title: `删除选中的 ${ids.length} 个会话？`,
+    content: '选中会话的问答记录将被删除',
+    okText: '删除', okType: 'danger', cancelText: '取消',
+    onOk: () => {
+      emit('batch-delete', ids)
+      batchMode.value = false
+      selected.value = new Set()
+    }
+  })
 }
 
 // 搜索（300ms 防抖）
@@ -251,14 +306,18 @@ const formatTime = (t) => {
   padding: 8px 12px 4px;
   border-bottom: 1px solid #f0f0f0;
 }
-.search-row { margin-bottom: 6px; }
+.search-row { margin-bottom: 10px; }
 .filter-row {
   display: flex;
+  align-items: center;
   gap: 4px;
-  padding-bottom: 6px;
+  padding-bottom: 2px;
 }
 .filter-tab {
   font-size: 12px;
+  line-height: 20px;
+  display: inline-flex;
+  align-items: center;
   color: #666;
   padding: 2px 10px;
   border-radius: 10px;
@@ -272,7 +331,16 @@ const formatTime = (t) => {
   color: #1677ff;
   font-weight: 500;
 }
-/* 会话项操作区（hover 显示） */
+/* 批量管理入口（筛选行右侧） */
+.batch-entry {
+  margin-left: auto;
+  font-size: 12px;
+  color: #999;
+  cursor: pointer;
+  user-select: none;
+}
+.batch-entry:hover, .batch-entry.active { color: #1677ff; }
+/* 会话项操作区（hover 显示 ··· 更多按钮） */
 .session-actions {
   display: flex;
   align-items: center;
@@ -286,28 +354,14 @@ const formatTime = (t) => {
 .session-item.active .session-actions { opacity: 1; }
 .act-icon {
   color: #bbb;
-  font-size: 13px;
+  font-size: 14px;
   padding: 3px;
   cursor: pointer;
   border-radius: 4px;
 }
 .act-icon:hover { color: #1677ff; background: #f0f0f0; }
-.act-icon.fav { color: #faad14; }
-.act-icon.pin { color: #1677ff; }
 /* 置顶标题前的图钉标记 */
 .pin-mark { color: #1677ff; margin-right: 2px; }
-.delete-icon {
-  color: #ccc;
-  font-size: 13px;
-  flex-shrink: 0;
-  padding: 3px;
-  border-radius: 4px;
-  transition: color 0.15s;
-}
-.delete-icon:hover {
-  color: #ff4d4f;
-  background: #fff1f0;
-}
 .header-row {
   display: flex;
   align-items: center;
@@ -350,6 +404,17 @@ const formatTime = (t) => {
   padding: 32px 16px;
   font-size: 13px;
 }
+/* 批量管理模式：勾选框 + 底部操作栏 */
+.batch-check { margin-right: 8px; flex-shrink: 0; }
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid #e8e8e8;
+  background: #fff;
+}
+.batch-count { flex: 1; font-size: 12px; color: #999; }
 .session-item {
   display: flex;
   align-items: center;

@@ -216,6 +216,23 @@ public class SessionService {
     }
 
     /**
+     * 批量软删除会话（逐个校验归属，单条失败不中断；返回成功数）
+     */
+    public int batchDelete(String userId, List<String> ids) {
+        if (ids == null || ids.isEmpty()) return 0;
+        int ok = 0;
+        for (String id : ids) {
+            try {
+                deleteSession(userId, id);
+                ok++;
+            } catch (Exception e) {
+                log.warn("[batchDelete] 会话删除失败 id={}: {}", id, e.getMessage());
+            }
+        }
+        return ok;
+    }
+
+    /**
      * 获取会话完整历史（MySQL 优先，Redis 兜底）
      */
     public List<Map<String, Object>> getHistory(String sessionId) {

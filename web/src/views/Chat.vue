@@ -11,6 +11,7 @@
       :dragging="sidebarDragging"
       @select="switchSession"
       @delete="handleDeleteSession"
+      @batch-delete="handleBatchDeleteSessions"
       @clear="handleClearAll"
       @new="createNewSession"
       @toggle-collapse="toggleSidebar"
@@ -285,7 +286,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch, h } from 'vue'
 import { message, notification } from 'ant-design-vue'
 import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined, LoadingOutlined, MoreOutlined, DeleteOutlined, ArrowUpOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval, getSuggested, deleteMessageGroup, undoDeleteMessageGroup, getConfig } from '../api'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, batchDeleteSessionsApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval, getSuggested, deleteMessageGroup, undoDeleteMessageGroup, getConfig } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 import { renderMd, resolveImg, onImgError, copyCode, prepKnowledgeContent } from '../utils/markdown'
 
@@ -762,6 +763,32 @@ async function handleDeleteSession(sid) {
     await loadSessions()
   } catch (e) {
     message.error('删除失败: ' + (e.message || '未知错误'))
+  }
+}
+
+// 批量删除会话（sidebar 已二次确认）
+async function handleBatchDeleteSessions(ids) {
+  try {
+    const r = await batchDeleteSessionsApi(ids)
+    if (!r.success) {
+      message.error(r.msg || '批量删除失败')
+      await loadSessions()
+      return
+    }
+    message.success(`已删除 ${r.data?.deleted ?? ids.length} 个会话`)
+    if (ids.includes(currentSessionId.value)) {
+      const remaining = sessions.value.filter(s => !ids.includes(s.id))
+      if (remaining.length > 0) {
+        await switchSession(remaining[0].id)
+      } else {
+        messages.value = []
+        currentSessionId.value = null
+      }
+    }
+    await loadSessions()
+  } catch (e) {
+    message.error('批量删除失败: ' + (e.message || '未知错误'))
+    await loadSessions()
   }
 }
 
