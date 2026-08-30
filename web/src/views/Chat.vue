@@ -27,7 +27,7 @@
       <div class="chat-box">
         <div class="head">
           <span class="head-title">{{ currentSessionTitle }}</span>
-          <span class="disclaimer"><info-circle-outlined style="margin-right:4px" />AI 回答可能有误，重要信息请核实</span>
+          <span class="disclaimer" title="查看免责声明" @click="disclaimerVisible = true"><info-circle-outlined style="margin-right:4px" />AI 回答可能有误，重要信息请核实</span>
         </div>
 
         <div class="messages" ref="box" @click="openPreview">
@@ -175,6 +175,11 @@
           <a-button type="primary" style="margin-top:12px" :loading="feedbackSubmitting" @click="submitFeedback">
             提交反馈
           </a-button>
+        </a-modal>
+
+        <!-- 免责声明（点击头部提示打开） -->
+        <a-modal v-model:open="disclaimerVisible" title="免责声明" :footer="null" width="560">
+          <div class="md disclaimer-body" v-html="renderMd(DISCLAIMER_TEXT, [])"></div>
         </a-modal>
 
         <!-- 检索调试弹窗：分步展示检索过程（为什么这么答） -->
@@ -403,6 +408,30 @@ const openPreview = e => {
     offset.value = { x: 0, y: 0 }
   }
 }
+
+// 免责声明弹窗（点击头部提示打开）
+const disclaimerVisible = ref(false)
+const DISCLAIMER_TEXT = `
+
+### 一、内容生成方式
+
+本系统的回答由人工智能模型基于知识库检索结果**自动生成**，仅供学习与工作参考，不构成任何形式的专业建议（包括但不限于法律、医疗、财务、投资建议），亦不代表系统开发方与运营方的官方立场。
+
+### 二、准确性不作保证
+
+AI 生成内容可能存在**错误、遗漏、过时或与实际情况不符**之处。知识库内容可能更新滞后，回答引用的资料版本可能与最新版本存在差异。重要信息（如操作规范、数据口径、流程要求、审批条件等）请以**官方文档、正式通知或相关业务部门的确认为准**。
+
+### 三、引用来源说明
+
+回答中标注的引用来源仅用于帮助定位参考资料。受文档分块与摘要机制影响，展示的片段可能与原文存在出入，完整含义请以知识块原文及原始文档为准。
+
+### 四、使用限制
+
+请勿仅依赖本系统的回答做出对个人或组织有重大影响的决策。因使用或依赖本系统内容而产生的任何直接或间接损失，系统提供方不承担责任。请遵守信息安全相关规定，**不要在提问中输入密码、密钥、客户隐私等敏感信息**。
+
+### 五、反馈与改进
+
+如发现回答有误或内容不当，可通过回答下方的反馈按钮告知我们，帮助我们持续改进。`
 
 // 引用来源详情弹窗
 const sourceVisible = ref(false)
@@ -1244,7 +1273,7 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 免责声明：标题下方、同一框内，弱化显示不抢焦点 */
+/* 免责声明：标题下方、同一框内，弱化显示不抢焦点；可点击查看完整声明 */
 .disclaimer {
   display: flex;
   align-items: center;
@@ -1252,7 +1281,11 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
   font-weight: 400;
   color: #999;
   text-align: center;
+  cursor: pointer;
+  user-select: none;
 }
+.disclaimer:hover { color: #1677ff; }
+.disclaimer-body { max-height: 60vh; overflow-y: auto; color: #333; }
 .messages {
   flex: 1;
   overflow-y: auto;
