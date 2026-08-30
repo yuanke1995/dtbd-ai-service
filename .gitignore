@@ -17,3 +17,4 @@ src/main/resources/application-local.yml
 /.zcode/
 /.md/
 package-lock.json
+/.vite/

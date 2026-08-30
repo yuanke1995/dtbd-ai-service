@@ -124,7 +124,9 @@ const ensureTableSpacing = text => {
 export const renderMd = (t, images = []) => {
   if (!t) return ''
   // ① 预处理：图片标记 [图片N：描述]/[图片N] → markdown 图片占位（保留位置/顺序）
-  let pre = t.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？\s]*/g, '![img](__AI_IMG_$1__)')
+  // 只吞行内空白与标点，不吞换行：占位符后的空行承担"图片与后续块（表格/段落）分段"的语义，
+  // 吞掉会把表格首行粘进图片行，表格永远无法成块渲染
+  let pre = t.replace(/\[图片\s*(\d+)(?:[：:][^\]]*)?\][，。、；：！？ \u3000]*/g, '![img](__AI_IMG_$1__)')
   // ② 表格容错：表头前无空行时补空行，让表格独立渲染（已有空行不重复补）
   pre = ensureTableSpacing(pre)
   // ③ 清理末尾孤立竖线（LLM 回答结尾偶发残留" |"），避免渲染成一行竖线

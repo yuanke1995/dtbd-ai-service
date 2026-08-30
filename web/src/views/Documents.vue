@@ -138,25 +138,49 @@
       </a-table>
     </a-modal>
 
-    <!-- 知识块编辑弹窗（title/content；图片保留；编辑/预览切换） -->
-    <a-modal v-model:open="kbEditVisible" title="编辑知识块" :footer="null" width="640">
+    <!-- 知识块编辑弹窗：Markdown 工具栏快捷插入 + 左写右看实时预览 + [图片N] 点选插入 + 未保存关闭提醒 -->
+    <a-modal :open="kbEditVisible" title="编辑知识块" :footer="null" width="900" @cancel="closeKbEdit">
       <a-form layout="vertical">
         <a-form-item label="标题">
           <a-input v-model:value="kbEditForm.title" maxlength="200" placeholder="知识块标题" />
         </a-form-item>
         <a-form-item label="内容">
-          <a-tabs v-model:active-key="kbEditTab" size="small">
-            <a-tab-pane key="edit" tab="编辑">
-              <a-textarea v-model:value="kbEditForm.content" :rows="10" placeholder="知识块正文（支持 Markdown 语法，图片用 [图片N] 占位）" />
-            </a-tab-pane>
-            <a-tab-pane key="preview" tab="预览">
-              <div class="md" style="max-height:280px;overflow-y:auto;font-size:14px;line-height:1.7;color:#333;padding:2px 4px" v-html="kbEditPreviewHtml"></div>
-            </a-tab-pane>
-          </a-tabs>
+          <div class="kb-md-bar">
+            <a-space :size="2" wrap>
+              <a-button size="small" type="text" title="二级标题" @click="kbLinePrefix('## ')">H2</a-button>
+              <a-button size="small" type="text" title="三级标题" @click="kbLinePrefix('### ')">H3</a-button>
+              <a-button size="small" type="text" title="加粗（Ctrl/⌘+B）" style="font-weight:700" @click="kbWrap('**', '**', '加粗文字')">B</a-button>
+              <a-button size="small" type="text" title="无序列表" @click="kbLinePrefix('- ')">列表</a-button>
+              <a-button size="small" type="text" title="有序列表" @click="kbLinePrefix('', true)">1. 列表</a-button>
+              <a-button size="small" type="text" title="引用" @click="kbLinePrefix('> ')">引用</a-button>
+              <a-button size="small" type="text" title="插入表格模板" @click="kbInsertTable">表格</a-button>
+              <a-button size="small" type="text" title="代码块" @click="kbWrap('\n```\n', '\n```\n', '代码')">代码</a-button>
+              <a-button size="small" type="text" title="链接" @click="kbWrap('[', '](https://)', '链接文字')">链接</a-button>
+            </a-space>
+            <a-dropdown :trigger="['click']">
+              <a-button size="small" type="text" :disabled="!kbEditImages.length"
+                        :title="kbEditImages.length ? '点击插入图片占位符' : '该知识块无关联图片'">
+                图片<down-outlined style="font-size:10px;margin-left:3px" />
+              </a-button>
+              <template #overlay>
+                <a-menu @click="e => kbWrap(`[图片${e.key}]`)">
+                  <a-menu-item v-for="(u, i) in kbEditImages" :key="i + 1" class="kb-img-item">
+                    <img class="kb-img-thumb" :src="resolveImg(u)" @error="onImgError" />图片{{ i + 1 }}
+                  </a-menu-item>
+                </a-menu>
+              </template>
+            </a-dropdown>
+          </div>
+          <div class="kb-edit-split">
+            <a-textarea ref="kbTaRef" v-model:value="kbEditForm.content" class="kb-edit-ta"
+                        placeholder="支持 Markdown 语法，可用上方工具栏快捷插入；右侧为实时预览"
+                        @keydown="onTaKeydown" />
+            <div class="kb-edit-preview md" v-html="kbEditPreviewHtml"></div>
+          </div>
         </a-form-item>
       </a-form>
       <div style="text-align:right">
-        <a-button style="margin-right:8px" @click="kbEditVisible = false">取消</a-button>
+        <a-button style="margin-right:8px" @click="closeKbEdit">取消</a-button>
         <a-button type="primary" :loading="kbEditSaving" @click="saveKnowledgeEdit">保存</a-button>
       </div>
     </a-modal>
@@ -190,14 +214,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { UploadOutlined, DeleteOutlined, SearchOutlined } from '@ant-design/icons-vue'
+import { UploadOutlined, DeleteOutlined, SearchOutlined, DownOutlined } from '@ant-design/icons-vue'
 import { listDocuments, uploadDocumentsBatch, updateDocumentStatus, reparseDocument, deleteDocument,
          batchDeleteDocuments, batchUpdateDocumentStatus, getDocumentStats, listKnowledgeByDoc, getKnowledgeDetail,
          updateKnowledge, deleteKnowledge, listDocumentVersions, rollbackDocument,
          getRuntimeConfig, batchReparseDocuments, updateKnowledgeStatus, searchKnowledge } from '../api'
-import { renderMd } from '../utils/markdown'
+import { renderMd, prepKnowledgeContent, resolveImg, onImgError } from '../utils/markdown'
 
 // 知识块预览状态
 const kbVisible = ref(false)
@@ -206,8 +230,9 @@ const kbList = ref([])
 const kbDocName = ref('')
 const kbDetailVisible = ref(false)
 const kbDetail = ref(null)
-// 详情弹窗：markdown 渲染 + 图片按原文位置交错（与问答页引用弹窗一致）
-const kbDetailHtml = computed(() => renderMd(kbDetail.value?.content, kbDetail.value?.images))
+// 详情弹窗：markdown 渲染 + 图片按原文位置交错（与问答页引用弹窗同管线，无编号 [图片] 先编号再渲染）
+const kbDetailHtml = computed(() =>
+  renderMd(prepKnowledgeContent(kbDetail.value?.content, kbDetail.value?.images), kbDetail.value?.images))
 const openKb = async record => {
   kbDocName.value = record.fileName
   kbDocId.value = record.id
@@ -234,21 +259,108 @@ const openKbDetail = async row => {
 const kbEditVisible = ref(false)
 const kbEditSaving = ref(false)
 const kbEditForm = ref({ id: '', title: '', content: '' })
-const kbEditTab = ref('edit')        // 编辑弹窗内 tab：edit 源码 / preview 渲染
-const kbEditImages = ref([])         // 预览用图片（列表 record 无 images，打开时异步补）
-const kbEditPreviewHtml = computed(() => renderMd(kbEditForm.value.content, kbEditImages.value))
+const kbEditImages = ref([])         // 预览渲染 + 图片插入菜单（打开时异步取详情）
+const kbEditSnapshot = ref('')       // 打开时的标题+内容快照，用于未保存判断
+const kbTaRef = ref(null)            // a-textarea 实例（光标位置操作）
+const kbEditDirty = computed(() =>
+  kbEditForm.value.title + '\u0000' + kbEditForm.value.content !== kbEditSnapshot.value)
+// 编辑预览与问答页引用弹窗同管线：无编号 [图片] 先按 images 顺序编号再渲染
+const kbEditPreviewHtml = computed(() =>
+  renderMd(prepKnowledgeContent(kbEditForm.value.content, kbEditImages.value), kbEditImages.value))
 const openKbEdit = async row => {
   kbEditForm.value = { id: row.id, title: row.title || '', content: row.content || '' }
   kbEditImages.value = []
-  kbEditTab.value = 'edit'
+  kbEditSnapshot.value = kbEditForm.value.title + '\u0000' + kbEditForm.value.content
   kbEditVisible.value = true
-  // 预览需要图片：正文含 [图片 占位时异步补充 images（失败则空数组，预览时图片位显示 [图片N] 原文）
-  if (/\s*\[图片/.test(kbEditForm.value.content)) {
-    try {
-      const r = await getKnowledgeDetail(row.id)
-      if (r.success && Array.isArray(r.data?.images)) kbEditImages.value = r.data.images
-    } catch (e) { /* 预览降级为无图，不阻塞编辑 */ }
-  }
+  // 图片列表：预览渲染 + 「图片」插入菜单都要用（失败降级为空数组，预览显示 [图片] 原文）
+  try {
+    const r = await getKnowledgeDetail(row.id)
+    if (r.success && Array.isArray(r.data?.images)) kbEditImages.value = r.data.images
+  } catch (e) { /* 预览降级为无图，不阻塞编辑 */ }
+}
+// 关闭（X/遮罩/ESC/取消按钮共用）：有未保存修改先确认，防误关丢稿
+const closeKbEdit = () => {
+  if (!kbEditDirty.value) { kbEditVisible.value = false; return }
+  Modal.confirm({
+    title: '放弃未保存的修改？',
+    content: '标题或内容已修改但尚未保存',
+    okText: '放弃修改', okType: 'danger', cancelText: '继续编辑',
+    onOk: () => { kbEditVisible.value = false }
+  })
+}
+// 取 a-textarea 内部原生 textarea（antd 封装层级兜底，保证拿得到 selectionStart）
+const kbGetTa = () => {
+  const r = kbTaRef.value
+  const ta = r?.resizableTextArea?.textArea || r?.textArea
+  if (ta) return ta
+  const el = r?.$el
+  return el ? (el.tagName === 'TEXTAREA' ? el : el.querySelector?.('textarea')) : null
+}
+// 在光标处插入包裹语法（**xx** / [图片N] / 代码围栏 / 链接）：选中文字进包裹内，无选中插占位文字并选中
+const kbWrap = (before, after = '', placeholder = '') => {
+  const ta = kbGetTa()
+  const v = kbEditForm.value.content
+  const s = ta ? ta.selectionStart : v.length
+  const e = ta ? ta.selectionEnd : s
+  const sel = v.slice(s, e) || placeholder
+  kbEditForm.value.content = v.slice(0, s) + before + sel + after + v.slice(e)
+  nextTick(() => {
+    if (!ta) return
+    ta.focus()
+    ta.setSelectionRange(s + before.length, s + before.length + sel.length)
+  })
+}
+// 行前缀语法（## / - / > / 1.）：作用于光标所在行（多行选区逐行生效），已有前缀再点一次取消
+const kbLinePrefix = (prefix, ordered = false) => {
+  const ta = kbGetTa()
+  const v = kbEditForm.value.content
+  const s = ta ? ta.selectionStart : v.length
+  const e = ta ? ta.selectionEnd : s
+  const ls = v.lastIndexOf('\n', Math.max(s - 1, 0)) + 1
+  let le = v.indexOf('\n', e)
+  if (le === -1) le = v.length
+  const lines = v.slice(ls, le).split('\n')
+  const has = l => ordered ? /^\s*\d+\.\s/.test(l) : l.trimStart().startsWith(prefix)
+  const strip = l => ordered
+    ? l.replace(/^(\s*)\d+\.\s*/, '$1')
+    : l.replace(new RegExp('^(\\s*)' + prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\s*)'), '$1')
+  const all = lines.every(has)
+  const out = lines.map((l, i) => {
+    if (all) return strip(l)
+    if (ordered) {
+      const indent = l.match(/^\s*/)[0]
+      const body = l.trimStart().replace(/^\d+\.\s+|^[-*+]\s+|^>\s?/, '')
+      return `${indent}${i + 1}. ${body}`
+    }
+    return has(l) ? l : prefix + l.trimStart().replace(/^\d+\.\s+/, '')
+  })
+  kbEditForm.value.content = v.slice(0, ls) + out.join('\n') + v.slice(le)
+  nextTick(() => {
+    if (!ta) return
+    ta.focus()
+    ta.setSelectionRange(ls, ls + out.join('\n').length)
+  })
+}
+// 插入三列表格模板（markdown 表格需独立成块：前后补空行；插入后选中"列1"便于直接改表头）
+const kbInsertTable = () => {
+  const ta = kbGetTa()
+  const v = kbEditForm.value.content
+  const s = ta ? ta.selectionStart : v.length
+  const e = ta ? ta.selectionEnd : s
+  const head = v.slice(0, s)
+  const lead = head === '' || /\n\s*\n$/.test(head) ? '' : /\n$/.test(head) ? '\n' : '\n\n'
+  kbEditForm.value.content = head + lead + '| 列1 | 列2 | 列3 |\n| --- | --- | --- |\n|  |  |  |\n\n' + v.slice(e)
+  nextTick(() => {
+    if (!ta) return
+    ta.focus()
+    const p = head.length + lead.length + 2
+    ta.setSelectionRange(p, p + 2)
+  })
+}
+// 编辑区快捷键：Ctrl/⌘+B 加粗
+const onTaKeydown = e => {
+  if (!(e.ctrlKey || e.metaKey)) return
+  if ((e.key || '').toLowerCase() === 'b') { e.preventDefault(); kbWrap('**', '**', '加粗文字') }
 }
 const saveKnowledgeEdit = async () => {
   if (!kbEditForm.value.title.trim()) { message.warning('标题不能为空'); return }
@@ -598,5 +710,23 @@ const fmtTime = t => {
   text-align: center; color: #1677ff; font-size: 16px;
   background: #fff; border: 2px dashed #1677ff; border-radius: 12px;
   padding: 24px 40px; display: flex; flex-direction: column; gap: 8px; align-items: center;
+}
+/* 知识块编辑：Markdown 工具栏 + 左写右看分栏实时预览 */
+.kb-md-bar {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  margin-bottom: 6px;
+}
+.kb-edit-split { display: flex; gap: 10px; }
+.kb-edit-ta { flex: 1 1 50%; min-width: 0; height: 380px; resize: none; font-size: 13px; line-height: 1.7; }
+.kb-edit-preview {
+  flex: 1 1 50%; min-width: 0; height: 380px; overflow-y: auto;
+  border: 1px solid #f0f0f0; border-radius: 6px; background: #fafafa;
+  padding: 10px 14px; font-size: 14px; line-height: 1.7; color: #333;
+}
+/* 图片插入菜单项：缩略图 + 编号 */
+.kb-img-item { display: flex; align-items: center; }
+.kb-img-thumb {
+  width: 42px; height: 26px; object-fit: cover; border-radius: 3px;
+  margin-right: 8px; border: 1px solid #eee; background: #fafafa;
 }
 </style>
