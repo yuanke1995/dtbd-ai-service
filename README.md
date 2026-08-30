@@ -1,6 +1,6 @@
 # AI 文档助手
 
-独立 AI 服务，基于 Spring AI 实现 RAG 知识库问答。支持 Word/PDF/Excel 文档解析（含扫描 PDF OCR）、混合检索 + 查询改写、**知识块关联检索（交叉引用 1-hop 扩散 + 父章节上下文带出）**、价值驱动上下文控制、回答中位置级展示文档原图（识别用压缩图、展示用原图的双图策略 + 相关性预筛防错配）、解析进度实时展示（含图片识别逐张进度）、引用溯源、会话管理（搜索/置顶/收藏）、文档版本管理、数据看板与知识缺口闭环，是面向"操作手册问答"场景的完整智能助手。
+独立 AI 服务，基于 Spring AI 实现 RAG 知识库问答。支持 Word/PDF/Excel/TXT/Markdown 文档解析（含扫描 PDF OCR、大文件流式解析）、混合检索 + 查询改写、**知识块关联检索（交叉引用 1-hop 扩散 + 父章节上下文带出）**、价值驱动上下文控制、**语义缓存加速**、回答中位置级展示文档原图（识别用压缩图、展示用原图的双图策略 + 相关性预筛防错配）、解析进度实时展示（含图片识别逐张进度）、引用溯源与**检索状态行（来源可点击弹原文）**、**差评回流闭环**、会话管理（搜索/置顶/收藏/按组删除）、文档版本管理、数据看板与知识缺口闭环、检索量化评估（一键体检 + 预设参数对比 + 一键应用），是面向"操作手册问答"场景的完整智能助手。
 
 ## 技术栈
 
@@ -11,7 +11,7 @@
 | 数据库 | OceanBase（MySQL 协议，库 `ai_doc_assistant`，可按环境调整） |
 | 向量库 | Redis Stack（RediSearch，docker 映射端口 **6380**，Jedis 客户端） |
 | LLM | 阿里云 MaaS 网关（OpenAI 兼容：chat=`qwen3.7-flash-2026-07-15`，embedding=`qwen3.7-text-embedding`，base-url 不含 `/v1`）；图片理解/OCR 走本地 Ollama `qwen3-vl:2b` |
-| 文档解析 | Apache POI 5.2.3（docx/xlsx）+ PDFBox 3.0.2（含扫描件 OCR 降级）+ jieba-analysis 1.0.2（中文分词） |
+| 文档解析 | Apache POI 5.2.3（docx/xlsx）+ PDFBox 3.0.2（含扫描件 OCR 降级）+ 原生流（txt/md/csv）+ jieba-analysis 1.0.2（中文分词） |
 | 前端 | Vue 3 + Vite 5 + Ant Design Vue 4 + markdown-it/DOMPurify/highlight.js（Node ≥ 18，建议 20/22） |
 
 ## 目录结构
@@ -22,10 +22,10 @@ ai-doc-assistant/
 ├── src/main/java/.../ai/
 │   ├── AiApplication.java           # 入口
 │   ├── config/                      # AiAppProperties / SecurityConfig / ImageWebConfig / GlobalExceptionHandler / ImageAuthInterceptor
-│   ├── controller/                  # Chat(SSE) / Document / Qa(反馈+看板) / Config(模型配置) / AiKnowledge(缺口回流+编辑) / RetrievalDebug(检索调试)
+│   ├── controller/                  # Chat(SSE+会话+消息组) / Document / Qa(反馈+看板) / Config(模型配置) / AiKnowledge(知识块+缺口回流) / RetrievalDebug(检索调试) / Evaluation(检索评估) / AnswerCache(语义缓存) / SearchIndex(关键词索引)
 │   ├── service/                     # RagService / HybridRetrievalService / RerankService / KeywordExtractor / ImageFilterService
-│   │                                # KnowledgeRefService（引用识别+关联扩散）/ DocumentService / VisionService / UserImageService / SessionService / QaLogService / ConfigService / DocumentMetaCache ...
-│   ├── parser/                      # DocumentParser 接口 + DocxParser / PdfParser(OCR) / ExcelParser
+│   │                                # KnowledgeRefService（引用识别+关联扩散）/ DocumentService / VisionService / UserImageService / SessionService / QaLogService / ConfigService / DocumentMetaCache / RateLimitService(限流) / AnswerCacheService(语义缓存) / RetrievalEvaluationService(检索评估) ...
+│   ├── parser/                      # DocumentParser 接口 + DocxParser / PdfParser(OCR) / ExcelParser / TextParser(txt/md/csv)
 │   ├── util/                        # TokenCounter（分语言 token 估算，上下文预算用）
 │   ├── model/ + mapper/ + dto/      # 实体（含 AiDocumentVersion）/ MyBatis-Plus Mapper / 传输对象
 ├── src/main/resources/
@@ -36,7 +36,7 @@ ai-doc-assistant/
 ├── deploy/nginx.conf                # 生产 nginx 参考配置
 └── web/                             # 前端单页应用（Vite，.nvmrc 固定 Node 22）
     ├── vite.config.js               # /proxy → http://localhost:8090/ai（端口固定 5800，strictPort）
-    └── src/views/                   # Chat(智能问答) / Documents(文档管理) / Dashboard(数据看板) / Settings(系统设置)
+    └── src/views/                   # Chat(智能问答) / Documents(文档管理) / Dashboard(数据看板) / Settings(系统设置) / Evaluation(检索评估)
 ```
 
 ## 启动方式
@@ -55,7 +55,7 @@ ollama pull qwen3-vl:2b
 ```
 > 建议设置环境变量 `OLLAMA_NUM_PARALLEL=4`（否则多图描述串行排队）；4GB 显存机器并发度建议 `vision.concurrency=2`。
 
-**数据库**：现有 OceanBase 库 `ai_doc_assistant`（库需预先存在，库名按实际环境配置）。表结构（`c_ai_document`/`c_ai_knowledge`/`c_ai_session`/`c_ai_message`/`c_ai_qa_log`/`c_ai_qa_feedback`/`c_ai_config`/`c_ai_document_version`/`c_ai_knowledge_ref`）由应用启动自动执行 `schema.sql` 创建（全部 `CREATE TABLE IF NOT EXISTS`，重复启动安全）；也可手动执行：
+**数据库**：现有 OceanBase 库 `ai_doc_assistant`（库需预先存在，库名按实际环境配置）。表结构（`c_ai_document`/`c_ai_knowledge`/`c_ai_session`/`c_ai_message`/`c_ai_qa_log`/`c_ai_qa_feedback`/`c_ai_config`/`c_ai_document_version`/`c_ai_knowledge_ref`/`c_ai_answer_cache`）由应用启动自动执行 `schema.sql` 创建（全部 `CREATE TABLE IF NOT EXISTS`，重复启动安全）；也可手动执行：
 ```bash
 mysql -h172.168.10.65 -P2881 -uroot -p ai_doc_assistant < src/main/resources/schema.sql
 ```
@@ -125,12 +125,12 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 
 ### 5. 使用流程
 
-1. **文档管理**：上传 `.docx` / `.pdf` / `.xlsx`（默认 ≤200MB，可多文件；上限在设置页调整，物理上限 1GB）→ 异步解析（解析中状态轮询，进度条实时展示：图片识别阶段逐张显示"识别图片 k/total"）→ 生效/弃用/重解析/批量操作/命中次数统计；**解析中删除文档立即中断**（线程中断 + 产物自动清理，无孤儿数据）；点击"知识块"可预览该文档的分块与图片（支持**编辑/删除单个知识块**，编辑后自动重新向量化）；**版本管理**（每次解析/重解析自动存快照，可查看历史版本并一键回滚）；**结构感知切分**（docx 默认开启：按标题层级开新块、段落边界断块、表格独立成块；**正文只存净内容**，章节路径 `【上下文】章节 > 小节` 独立存储，向量化与检索回答时再拼入上下文，需重解析生效）；**交叉引用识别**（解析时自动扫描块内"详见/参见/见 X 节/《章节名》/XX章节"等引用表达，建立块间引用关系 `c_ai_knowledge_ref`，需重解析生效）
-2. **智能问答**：提问（支持上传图片+问题）→ 混合检索 + 查询改写 + **知识块关联扩散**（命中块自动带出被引用/父章节关联块）→ 流式回答，位置级插入文档原图、[N] 引用角标（点击弹窗看来源全文与图片，扩散块标注"关联引用/父章节上下文"）、末尾相关追问；回答下方操作区（检索调试/重新生成/复制 Markdown/导出 .md/👍👎 反馈，hover 显示）；回答顶部可能展示降级提示（未命中/超时截断/深度思考降级/图片剔除等，调试级提示需设置页开启）；断连自动重试（内联提示）
-3. **会话管理**：侧边栏搜索（标题/内容模糊匹配）、**置顶/收藏**（置顶排最前，收藏 tab 筛选）、拖拽伸缩、删除/清空
-4. **数据看板**：统计卡片（问答量/满意率/引用率/无命中率）+ 热门问题/无命中 TOP10 + **知识库缺口管理**（无命中问题一键入库，含向量召回）
+1. **文档管理**：上传 `.docx` / `.pdf` / `.xlsx` / `.txt` / `.md` / `.csv`（默认 ≤200MB，可多文件 + **拖拽/粘贴上传**，全页拖拽高亮；上限在设置页调整，物理上限 1GB；**大文件流式解析**不整载内存）→ 异步解析（解析中状态轮询，进度条实时展示：图片识别阶段逐张显示"识别图片 k/total"）→ 生效/弃用/重解析/**批量重解析**/批量操作/命中次数统计；**解析中删除文档立即中断**（线程中断 + 产物自动清理，无孤儿数据）；点击"知识块"可预览该文档的分块与图片（支持**编辑/删除单个知识块**——编辑走 Markdown 工具栏 + 左写右看实时预览 + 图片点选插入 + 未保存关闭提醒，保存后自动重新向量化；**知识块级启停用**——停用块不参与召回；**跨文档全局搜索**——按关键词搜全部知识块）；**版本管理**（每次解析/重解析自动存快照，可查看历史版本并一键回滚）；**结构感知切分**（docx 默认开启：按标题层级开新块、段落边界断块、表格独立成块；**正文只存净内容**，章节路径 `【上下文】章节 > 小节` 独立存储，向量化与检索回答时再拼入上下文，需重解析生效）；**交叉引用识别**（解析时自动扫描块内"详见/参见/见 X 节/《章节名》/XX章节"等引用表达，建立块间引用关系 `c_ai_knowledge_ref`，需重解析生效）
+2. **智能问答**：提问（支持上传图片+问题）→ 混合检索 + 查询改写 + **知识块关联扩散**（命中块自动带出被引用/父章节关联块）→ 流式回答，位置级插入文档原图、[N] 引用角标（点击弹窗看来源全文与图片，扩散块标注"关联引用/父章节上下文"）、末尾相关追问；**回答下方检索状态行**（"搜索 N 个关键词，参考 M 段资料"）展开后逐条列出来源与命中摘要，**点击条目弹原文**（与角标同弹窗）；检索阶段有进度提示（理解问题→检索中→生成回答）；头部"AI 回答可能有误"可点击查看完整免责声明；回答下方操作区（检索调试/重新生成/复制 Markdown/导出 .md/👍👎 反馈）；回答顶部可能展示降级提示（未命中/超时截断/深度思考降级/图片剔除等，调试级提示需设置页开启）；断连自动重试（内联提示）；**语义缓存**：与历史问题高度相似时直接复用回答（秒回）
+3. **会话管理**：侧边栏搜索（标题/内容模糊匹配）、**置顶/收藏**（置顶排最前，收藏 tab 筛选）、拖拽伸缩、删除/清空；**按消息组删除问答**（豆包式：进入多选模式，勾选回答自动勾选同组问题，支持撤销）+ 消息时间戳显示
+4. **数据看板**：统计卡片（问答量/满意率/引用率/无命中率）+ 热门问题/无命中 TOP10 + **知识库缺口管理**（无命中问题一键入库，含向量召回）+ **差评样本回流**（看板还原差评问题与引用块，一键加入检索评估集）
 5. **系统设置**：模型名/温度/System Prompt（角色段）/视觉模型/检索权重与行为参数/重排区间/解析并发与结构切分/上下文参数，**保存即生效**（DB 存储，折叠分组展示，顶部**锚点导航**快速定位 + 滚动高亮，参数带 `?` 说明）；问答输入框左侧深度思考开关（图标按钮，localStorage 记忆）
-6. **检索评估**（顶栏入口）：从历史问答引用回放生成评估集（问题→期望知识块）→ 批量参数组对比（recall@k/MRR/命中率 + 弃用文档召回断言）→ 逐问题命中明细；参数覆盖不污染当前配置，用于量化验证调参/切分/分词改动是好是坏
+6. **检索评估**（顶栏入口）：评估集从历史问答引用回放生成（问题→期望知识块，差评案例自动补充）→ **一键体检**（当前配置跑全量评估，红绿灯结论 + 落空/低分题目清单，零参数门槛）→ **对比调优**（+ 添加参数组选预设：关键词优先/向量优先/向量+重排/多路模拟，或自定义；空参数框灰色占位回显当前值）→ 结果表 **recall@k/MRR/命中率** 相对基线 ↑↓ 对比 + 自动结论，好的组**一键「应用此组」直接写入配置生效**（不污染评估，应用前可看逐问题明细）
 
 ## 核心功能
 
@@ -139,12 +139,13 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 - **查询改写**：LLM 将用户问题改写为检索关键词（默认开启）；支持多轮对话上下文改写（追问"那删除呢？"自动补全），改写结果入库可评估
 - **上下文与长度控制**：`预算 = min(模型窗口×安全系数 − 输出限制, 成本软上限)`，窗口按当前模型动态匹配；**价值驱动填充**（知识块按相关度分数累积填充，替代固定 8 块）；**块内命中片段截取**（±150 字窗口，边界对齐行/图片标记，长命令不被切断；**被截掉的图片占位自动补到片段末尾**，保证 LLM 配图依据完整）；**关联扩散块独立配额**（原始命中块用 `max-context-hits`，扩散块用 `refExpandMaxHits/MaxTokens`，共享剩余预算）；**历史裁剪**（单条 200 字 + 总量上限 + 剥离 `[图片N]`）；输出 maxTokens 限制；token 按中英文分语言估算（TokenCounter）
 - **图片链路**：docx 提取图片（去重 + **双图策略**：识别用压缩图 1280px 进视觉模型，**展示用原图**落盘）→ 视觉模型生成描述并随分块落库（Ollama `num_ctx=16384` 防 1280px 视觉 token 截断）→ 检索命中后**相关性预筛**（与问题无关的图不分配编号，LLM 生成时即避开，避免"先输出后剔除"的图闪现）→ 全局编号 `[图片N：描述]` 供 LLM 选图 → **相关性校验兜底**（错配/编造编号自动剔除并重建，被剔除提示用户）→ SSE `image` 事件 → 前端按标记渲染原图（灯箱：滚轮按幅度平滑缩放/拖动/多图切换/ESC）；图片描述完成逐张上报进度（10→30 区间"识别图片 k/total"）
-- **引用溯源**：回答句末 `[N]` 角标 → 弹窗展示来源知识块全文（图文交错，还原原文结构）+ 关联截图；`done` 事件携带 sources/related/messageId
-- **文档解析**：docx（段落/标题大纲级别/**表格→Markdown 表格、单列表格→代码块**/内嵌图/单元格换行保留）/ xlsx（sheet 转文本）/ pdf（PDFBox 文本抽取）；**扫描件自动 OCR**（文本 <20 字符判定，逐页渲染 200DPI → 本地视觉模型识别，OCR 专用提示词）；**结构感知切分**（docx：标题层级开新块 + 章节路径独立存储、向量化/检索时拼入 `【上下文】章节 > 小节`、达到边界阈值在段落交界断块、表格独立成块；`chunk.structural` 可关，需重解析生效）；**分块重叠只进向量化文本**（不入库、不进指纹，邻块变动不连锁重嵌）；**解析删除感知**（内存删除标志 + 线程中断，删除立即停止并清理本次产物）
-- **数据闭环**：问答日志（含改写后问题/命中文档/耗时）+ 回答 👍👎 反馈 + 看板聚合；**无命中问题汇总 → 一键创建知识块（自动生成向量）**，形成"发现缺口→补充→验证"闭环
+- **引用溯源**：回答句末 `[N]` 角标 → 弹窗展示来源知识块全文（图文交错，还原原文结构）+ 关联截图；**回答下方检索状态行**（搜索 N 个关键词/参考 M 段资料）展开列出全部命中来源与摘要片段，条目点击弹同一溯源弹窗（历史消息兼容：无检索数据时降级显示来源数）；`done` 事件携带 sources/related/messageId，`retrieved` 事件携带检索概览（随消息持久化）
+- **语义缓存**（`c_ai_answer_cache`）：相似问题直接复用历史回答（embedding 余弦相似度 ≥ `semanticCache.threshold`，默认 0.96），命中秒回；知识库文档增删改/启停用/重解析**整体失效**，带图片的提问不走缓存；最大条数 LRU 淘汰，设置页可调（`semanticCache.enabled/threshold/maxEntries`）
+- **文档解析**：docx（段落/标题大纲级别/**表格→Markdown 表格、单列表格→代码块**/内嵌图/单元格换行保留）/ xlsx（sheet 转文本）/ pdf（PDFBox 文本抽取）/ **txt/md/csv**（md 按标题分块、代码围栏跟踪不切断，csv 首行表头）；**扫描件自动 OCR**（文本 <20 字符判定，逐页渲染 200DPI → 本地视觉模型识别，OCR 专用提示词）；**大文件流式解析**（解析器按 `Path` 流式读取，不整载内存）；**结构感知切分**（docx：标题层级开新块 + 章节路径独立存储、向量化/检索时拼入 `【上下文】章节 > 小节`、达到边界阈值在段落交界断块、表格独立成块；`chunk.structural` 可关，需重解析生效）；**分块重叠只进向量化文本**（不入库、不进指纹，邻块变动不连锁重嵌）；**解析删除感知**（内存删除标志 + 线程中断，删除立即停止并清理本次产物）
+- **数据闭环**：问答日志（含改写后问题/命中文档/耗时）+ 回答 👍👎 反馈 + 看板聚合；**无命中问题汇总 → 一键创建知识块（自动生成向量）**，形成"发现缺口→补充→验证"闭环；**差评回流**：看板差评样本还原问题与引用块 → 一键加入检索评估集（`POST /api/ai/eval/case` 单条增补），调参后可用真实坏例回归验证
 - **检索调试**：`POST /api/ai/debug/retrieval` 分步展示检索词元（分词结果）/关键词/向量/合并/重排/最终结果与命中率，前端问答页"检索调试"按钮可视化排查召回问题
-- **检索评估**：`POST /api/ai/eval/generate` 从历史问答引用（`c_ai_message.sources`）回放生成评估集（问题→期望知识块，失效期望块自动剔除并计数）→ `POST /api/ai/eval/run` 批量参数组对比 **recall@k / MRR / 命中率** + 弃用文档召回断言；参数覆盖走线程局部 override，**不写 DB 不污染生产配置**（multi 模式为确定性拆分近似，衡量多路合并机制而非 LLM 深度思考质量）
-- **会话**：MySQL + Redis 双层存储，历史恢复（含图片/引用来源/messageId）、删除/清空、**搜索/置顶/收藏**、侧边栏拖拽伸缩（宽度记忆）
+- **检索评估**：`POST /api/ai/eval/generate` 从历史问答引用（`c_ai_message.sources`）回放生成评估集（问题→期望知识块，失效期望块自动剔除并计数；差评回流单条增补）→ `POST /api/ai/eval/run` 批量参数组对比 **recall@k / MRR / 命中率** + 弃用文档召回断言；前端四件套：**一键体检**（当前配置全量评估 → 红绿灯结论 + 落空/低分题清单）、**预设参数组**（关键词优先/向量优先/向量+重排/多路模拟，空参数框占位回显当前值）、**一键应用**（好的组直接写入 `c_ai_config` 广播生效，检索 topK/阈值/关键词上限/重排区间等键已纳入在线白名单）、**自动结论**（相对基线 ↑↓ 与可应用建议）；参数覆盖走线程局部 override，**不写 DB 不污染生产配置**（multi 模式为确定性拆分近似，衡量多路合并机制而非 LLM 深度思考质量）
+- **会话**：MySQL + Redis 双层存储，历史恢复（含图片/引用来源/messageId/检索状态行）、删除/清空、**搜索/置顶/收藏**、侧边栏拖拽伸缩（宽度记忆）、**按消息组删除问答**（多选模式：勾回答默认勾同组问题，支持撤销）、消息时间戳、推荐问题池（`chat.suggestedQuestions`，设置页编辑 + 看板热门问题一键加入，欢迎页展示）
 - **前端体验**：markdown-it + DOMPurify + highlight.js 安全渲染（代码块复制按钮、**长行自动折行 + 限高滚动**、**表格渲染容错**：LLM 在标题/列表后未留空行的表格自动补空行独立渲染、结尾孤立竖线清理）、重新生成/编辑重问（编辑图标悬浮气泡下方）、图片灯箱（**滚轮按幅度平滑缩放**：每 100 单位滚轮量 8%、单次 clamp ±30% 防惯性跳变）、发送后自动滚动到底部（不等首个 token）、问答 👍👎 反馈、断连自动重试内联提示、全局错误边界（渲染异常友好提示防白屏、401 统一提示）、图片加载失败占位图、上传进度条
 
 ## API 一览
@@ -157,19 +158,24 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 | `GET /api/ai/sessions?keyword=`、`POST /api/ai/session/new`、`GET /api/ai/session/{id}` | 会话列表（支持关键词搜索）/ 新建 / 历史恢复 |
 | `PUT /api/ai/session/{id}/pin`、`PUT /api/ai/session/{id}/favorite` | 置顶 / 收藏（`{pinned:true}` 或 `{favorite:true}`） |
 | `DELETE /api/ai/session/{id}`、`DELETE /api/ai/sessions` | 删除单会话（软删除会话+消息）/ 清空全部会话 |
+| `DELETE /api/ai/message-group/{assistantMessageId}`、`POST /api/ai/message-group/undo` | 按消息组删除问答（问题+回答）/ 撤销删除 |
+| `GET /api/ai/suggested`、`POST /api/ai/suggested` | 推荐问题池读取 / 追加（去重上限 8 条） |
+| `GET /api/ai/analytics/badcases` | 差评坏例列表（还原问题与引用块，供回流评估集） |
+| `GET/DELETE /api/ai/answer-cache` | 语义缓存统计 / 清空 |
 | `POST /api/ai/document/upload`、`/upload/batch` | 上传文档（docx/pdf/xlsx，异步解析；category 参数保留兼容，前端已不再传） |
 | `GET /api/ai/document/list`、`DELETE /{id}`、`PUT /{id}/status`、`POST /{id}/reparse` | 文档列表 / 删除 / 启停用 / 重解析 |
 | `GET /api/ai/document/categories`、`PUT /{id}/category` | 分类列表 / 修改文档分类（接口保留，前端分类 UI 已移除） |
 | `GET /api/ai/document/{id}/versions`、`POST /{id}/rollback` | 版本历史 / 回滚到指定版本（按原 ID 重建知识块+向量） |
-| `POST /api/ai/document/batch/delete`、`/batch/status`、`GET /document/stats` | 批量操作 + 命中次数统计 |
+| `POST /api/ai/document/batch/delete`、`/batch/status`、`/batch/reparse`、`GET /document/stats` | 批量操作（删除/启停用/重解析）+ 命中次数统计 |
 | `GET /api/ai/knowledge/{id}`、`GET /api/ai/knowledge/list?docId=` | 知识块详情（引用溯源） / 按文档预览 |
-| `PUT /api/ai/knowledge/{id}`、`DELETE /api/ai/knowledge/{id}` | 编辑知识块（重新向量化：删旧向量+插新）/ 删除知识块 |
+| `PUT /api/ai/knowledge/{id}`、`DELETE /api/ai/knowledge/{id}`、`PUT /{id}/status` | 编辑知识块（重新向量化：删旧向量+插新）/ 删除知识块 / 知识块级启停用（停用不参与召回，关键词索引同步） |
+| `GET /api/ai/knowledge/search?keyword=` | 跨文档全局搜索知识块（含已停用，诊断用） |
 | `GET /api/ai/knowledge/unmatched`、`POST /api/ai/knowledge` | 无命中问题列表 / 手动创建知识块（自动生成向量） |
 | `POST /api/ai/feedback`、`GET /api/ai/analytics/summary` | 回答反馈 / 看板聚合 |
 | `GET/PUT /api/ai/config`、`GET /api/ai/config/keyword/check` | 模型配置读取（apiKey 脱敏）/ 保存即生效（含检索权重、上下文参数）/ 探测 Meilisearch 可用性 |
 | `GET /api/ai/search-index/stats`、`POST /api/ai/search-index/reindex`、`DELETE /api/ai/search-index` | 关键词索引运维：状态统计（indexedCount vs mysqlCount 对比漂移）/ 全量重建（后台执行）/ 清空 |
 | `POST /api/ai/debug/retrieval` | 检索链路分步调试（含检索词元） |
-| `POST /api/ai/eval/generate`、`GET /api/ai/eval/set`、`POST /api/ai/eval/run` | 检索量化评估：从历史问答引用回放生成评估集 / 读取评估集 / 批量参数组对比（recall@k/MRR/命中率 + 弃用文档召回断言） |
+| `POST /api/ai/eval/generate`、`GET /api/ai/eval/set`、`POST /api/ai/eval/run`、`POST /api/ai/eval/case` | 检索量化评估：从历史问答引用回放生成评估集 / 读取评估集 / 批量参数组对比（recall@k/MRR/命中率 + 弃用文档召回断言）/ 差评样本单条增补评估集 |
 
 ## 多副本部署要求
 
@@ -238,7 +244,7 @@ curl http://localhost:8090/api/ai/search-index/stats             # indexedCount 
 
 - **安全**：关键密钥零默认值（`DB_PASSWORD`/`AI_TRUSTED_TOKEN` 缺失 fail-fast，模型密钥允许空默认仅功能不可用）、token 恒定时间比较、图片访问 HMAC 签名 URL（`AI_IMAGES_AUTH_ENABLED=true`）、统一异常+参数校验（`@Valid`）、错误信息不泄露内部细节、**上传魔数校验**（文件头字节须与扩展名匹配，docx/xlsx=PK、pdf=%PDF，防伪造扩展名）、**接口限流**（问答/上传按用户/IP 固定窗口限频，超限 429，Redis 不可用自动放行）、**管理操作审计**（上传/删除/批量删除/回滚记录操作者 `[AUDIT]` 日志）
 - **可靠性**：上传失败自动补偿清理（删向量+MySQL+图片）、脏解析记录清理、解析异步化（不阻塞上传）、**解析中删除文档立即中断**（内存标志 + 线程 interrupt + 阶段检查点，清理本次产物）、SSE 异步订阅支持停止生成、查询改写专用线程池（超时隔离 + daemon + PreDestroy 回收）
-- **可配置**：模型名/温度/System Prompt 角色段/视觉提示词/检索权重与行为参数/重排区间/解析并发/上下文参数/关联扩散参数 **数据库存储、保存即生效**（`c_ai_config`，存量升级自动补默认项）；prompt 调整无需重启；检索/重排/解析/问答/关联扩散 5 组 30+ 项行为参数收口配置化（原硬编码移除）
+- **可配置**：模型名/温度/System Prompt 角色段/视觉提示词/检索权重与行为参数/重排区间/解析并发/上下文参数/关联扩散参数/限频/语义缓存/推荐问题池 **数据库存储、保存即生效**（`c_ai_config`，存量升级自动补默认项；检索 topK/向量阈值/关键词上限/重排区间等键支持在线修改，检索评估"应用此组"即写入这些键）；prompt 调整无需重启；检索/重排/解析/问答/关联扩散 5 组 30+ 项行为参数收口配置化（原硬编码移除）
 - **可观测性**：`/actuator/health` 健康检查、日志级别环境变量化、MyBatis 日志走 slf4j、检索调试 API、Swagger UI 接口文档（springdoc 自动生成，随代码实时更新）；**降级提示分级**（fail-loud：回答降级事件分 user 级默认展示/调试级由 `chat.showDebugDegradations` 开关控制，全部仍写 `[FAIL-LOUD]` 日志）
 - **多用户与部署**：**会话按用户隔离**（网关透传 `X-User-Id`，列表/历史/删除/清空均校验归属；anonymous 为存量兼容池）、multi-stage Dockerfile（非 root 运行 + HEALTHCHECK + `JAVA_OPTS` 内存注入）、docker-compose（redis-stack + meilisearch + **内置 MySQL**，亦可经 `DB_HOST` 等指向外部 OceanBase）、nginx 参考配置（`deploy/nginx.conf`，SPA fallback + SSE 关缓冲 + 图片缓存）
 
