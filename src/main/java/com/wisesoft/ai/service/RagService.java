@@ -684,7 +684,8 @@ public class RagService {
                         }
                     }
                     // L4 fail-loud：有引用来源但回答未标注任何 [N]（溯源缺失）
-                    if (!st.sources.isEmpty() && !answer.matches(".*\\[\\d+\\].*")) {
+                    // 注意用 find() 而非 matches()：matches 全串锚定且 . 不跨行，多行回答永远误判为未标注
+                    if (!st.sources.isEmpty() && !CITE_PATTERN.matcher(answer).find()) {
                         addDegradation(st.degradations, st.degradedCodes, "noCitation", "回答未标注引用来源");
                     }
                     // 引用编号越界校验：剔除超出来源范围的 [N]（LLM 偶发编造编号，用户点击角标无溯源）
