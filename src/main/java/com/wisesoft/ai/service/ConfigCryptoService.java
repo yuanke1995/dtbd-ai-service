@@ -77,14 +77,16 @@ public class ConfigCryptoService {
         return Paths.get(properties.getImages().getDir(), "secret", "config-rsa.key");
     }
 
-    /** 文件格式两行：public=X509 Base64 / private=PKCS8 Base64 */
+    /** 文件格式两行：public=X509 Base64 / private=PKCS8 Base64。
+     *  注意前缀长度：public= 7 字符、private= 8 字符——substring 长度写错会丢 base64 首字符，
+     *  导致密钥文件永远无法解码（此前 bug：重启后密钥失效，已加密配置无法解密） */
     private void loadKeys(Path keyFile) throws Exception {
         KeyFactory factory = KeyFactory.getInstance(ALGORITHM);
         for (String line : Files.readAllLines(keyFile, StandardCharsets.UTF_8)) {
             if (line.startsWith("public=")) {
-                publicKey = factory.generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(line.substring(8))));
+                publicKey = factory.generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(line.substring(7))));
             } else if (line.startsWith("private=")) {
-                privateKey = factory.generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(line.substring(9))));
+                privateKey = factory.generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(line.substring(8))));
             }
         }
         if (publicKey == null || privateKey == null) {

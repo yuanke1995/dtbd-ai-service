@@ -40,7 +40,18 @@ spring:
       database: ${REDIS_DB:0}
 
   ai:
-    # LLM 对话：DeepSeek（OpenAI 兼容协议）
+    # 模型密钥不在 yml/环境变量留明文：问答/向量客户端由 DynamicOpenAiChatModel/DynamicEmbeddingModel
+    # 从 c_ai_config（RSA 加密入库）动态构建。关闭 spring-ai-starter-model-openai 自动装配的全部模型
+    # bean——否则 yml 无明文 api-key 时 audio/chat/embedding 等 Factory bean 启动即抛 "API key must be set"
+    model:
+      chat: false
+      embedding: false
+      audio:
+        speech: false
+        transcription: false
+      image: false
+      moderation: false
+    # LLM 对话：DeepSeek（OpenAI 兼容协议）——以下仅作 DB 未配置时的兜底默认
     openai:
       api-key: ${AI_DEEPSEEK_KEY:}
       base-url: https://llm-xdqpg8ip850vmxh3.cn-beijing.maas.aliyuncs.com/compatible-mode
