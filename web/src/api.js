@@ -269,6 +269,12 @@ export const reindexSearchIndex = () => request('/search-index/reindex', { metho
 /** 模型配置：保存可编辑项 {"chat":{...},"vision":{...}} */
 export const saveConfig = payload => request('/config', { method: 'PUT', body: JSON.stringify(payload) })
 
+/** 向量模型全量重嵌入：任务状态（status/total/done/failed） */
+export const getReembedStatus = () => request('/config/embedding/reindex')
+
+/** 向量模型全量重嵌入：手动触发（切换向量模型后后端自动触发，失败可重试） */
+export const triggerReembed = () => request('/config/embedding/reindex', { method: 'POST' })
+
 /** 推荐问题列表（欢迎页展示，DB 配置） */
 export const getSuggested = () => request('/suggested')
 

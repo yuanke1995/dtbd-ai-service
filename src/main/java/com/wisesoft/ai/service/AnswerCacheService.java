@@ -97,12 +97,23 @@ public class AnswerCacheService {
         double thr = threshold();
         Entry best = null;
         double bestScore = 0;
+        int dimMismatch = 0;
         for (Entry e : index) {
             double s = cosine(qv, e.vector);
+            if (s < 0) {
+                dimMismatch++;
+                continue;
+            }
             if (s > bestScore) {
                 bestScore = s;
                 best = e;
             }
+        }
+        // 维度护栏命中：存量条目出自旧 embedding 模型（向量模型切换后 clearAll 未跑或跑失败）。
+        // 这些条目已永久不可能命中，提示运维手动重嵌入/清缓存以恢复语义缓存加速能力
+        if (dimMismatch > 0) {
+            log.warn("[ANSWER-CACHE] {} 条缓存向量维度与当前模型不一致（旧向量模型残留），已跳过；"
+                    + "请在设置页触发全量重嵌入或清空语义缓存", dimMismatch);
         }
         if (best == null || bestScore < thr) {
             log.debug("[ANSWER-CACHE] 未命中 best={} thr={}", String.format("%.4f", bestScore), thr);
@@ -188,9 +199,20 @@ public class AnswerCacheService {
         return v;
     }
 
-    /** 余弦相似度（embedding 服务返回归一化向量时退化为点积，此处按通用公式实现） */
+    /**
+     * 余弦相似度（embedding 服务返回归一化向量时退化为点积，此处按通用公式实现）。
+     * <p>
+     * <b>维度护栏</b>：长度不等说明两个向量出自不同 embedding 模型——向量模型热切换后，
+     * 库里存量条目仍是旧模型产物。跨模型向量空间不可比：按较短长度截断前缀算出的相似度
+     * 是无意义噪声，且完全可能越过 0.96 阈值，把一条语义无关的历史回答当成命中直接返回。
+     * 故维度不一致一律判为不命中（返回 -1，任何合法阈值都不可能通过），
+     * 存量脏条目由 {@link #clearAll()}（全量重嵌入编排的第一步）负责清理。
+     */
     private static double cosine(float[] a, float[] b) {
-        int n = Math.min(a.length, b.length);
+        if (a == null || b == null || a.length != b.length) {
+            return -1;
+        }
+        int n = a.length;
         double dot = 0, na = 0, nb = 0;
         for (int i = 0; i < n; i++) {
             dot += (double) a[i] * b[i];

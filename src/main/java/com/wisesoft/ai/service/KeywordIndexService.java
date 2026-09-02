@@ -100,8 +100,8 @@ public class KeywordIndexService {
     }
 
     /**
-     * master key：优先读设置页配置（c_ai_config 的 keyword.apiKey，明文入库，保存即生效免重启），
-     * 未配置时回退 yml/env 的 AI_MEILI_KEY。
+     * master key：优先读设置页配置（c_ai_config 的 keyword.apiKey，RSA 加密入库，保存即生效免重启，
+     * ConfigService.get 透明解密），未配置时回退 yml/env 的 AI_MEILI_KEY。
      */
     private String apiKey() {
         String k = configService.get("keyword.apiKey");

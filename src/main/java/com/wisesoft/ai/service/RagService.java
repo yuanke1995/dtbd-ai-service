@@ -186,7 +186,7 @@ public class RagService {
         }
     }
 
-    public RagService(ChatClient.Builder chatClientBuilder,
+    public RagService(ChatClient chatClient,
                       SessionService sessionService,
                       AiAppProperties properties,
                       ImageUrlSigner imageUrlSigner,
@@ -200,7 +200,8 @@ public class RagService {
                       KeywordExtractor keywordExtractor,
                       KnowledgeRefService knowledgeRefService,
                       AnswerCacheService answerCacheService) {
-        this.chatClient = chatClientBuilder.build();
+        // 基于 DynamicOpenAiChatModel 的 ChatClient：网关地址/API Key/补全路径支持跨厂商热切换（保存即生效）
+        this.chatClient = chatClient;
         this.sessionService = sessionService;
         this.properties = properties;
         this.imageUrlSigner = imageUrlSigner;

@@ -37,8 +37,8 @@ public class VisionService {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(10000);
         factory.setReadTimeout(properties.getVision().getTimeoutMillis());
+        // 不设固定 baseUrl：网关地址每次调用动态读 DB（vision.baseUrl 热切换，保存即生效），请求用绝对 URI
         this.restClient = RestClient.builder()
-                .baseUrl(properties.getVision().getBaseUrl())
                 .requestFactory(factory)
                 .build();
     }
@@ -127,12 +127,23 @@ public class VisionService {
                         Map.of("url", "data:" + mime + ";base64," + base64)),
                 Map.of("type", "text", "text", prompt)))));
 
+        // 网关地址/Key 动态读 DB（vision.baseUrl / vision.apiKey，保存即生效；get 对 apiKey 透明解密），
+        // DB 未配置时回退 yml/env；路径容错与 chat 同规则（版本尾缀/完整端点自动识别，支持智谱 /v4 等）
+        String baseUrl = configService.get("vision.baseUrl");
+        if (baseUrl == null || baseUrl.isBlank()) {
+            baseUrl = properties.getVision().getBaseUrl();
+        }
+        String apiKey = configService.get("vision.apiKey");
+        if (apiKey == null || apiKey.isBlank()) {
+            apiKey = properties.getVision().getApiKey();
+        }
+        String[] np = DynamicOpenAiChatModel.normalize(baseUrl, "",
+                "/v1/chat/completions", "/chat/completions");
+        String url = np[0] + np[1];
+
         String resp = restClient.post()
-                // 防御：base-url 已含 /v1（如 Ollama http://localhost:11434/v1）时不重复拼 /v1
-                .uri(properties.getVision().getBaseUrl().endsWith("/v1")
-                        ? "/chat/completions"
-                        : "/v1/chat/completions")
-                .header("Authorization", "Bearer " + properties.getVision().getApiKey())
+                .uri(url)
+                .header("Authorization", "Bearer " + apiKey)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(body)
                 .retrieve()

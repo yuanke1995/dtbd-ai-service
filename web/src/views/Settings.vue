@@ -1,7 +1,7 @@
 <template>
   <div>
     <a-alert type="info" show-icon style="margin-bottom:16px"
-             message="base-url / api-key / 向量模型为只读配置（变更需修改 yml 或环境变量后重启服务）；其余参数保存后立即生效。鼠标悬停参数名旁的 ? 可查看调整该参数的影响。" />
+             message="问答/视觉/向量三类模型均支持跨厂商热切换：修改网关地址/API Key/模型名（预设覆盖 DeepSeek、智谱GLM、百炼Qwen、Kimi、豆包、混元、千帆、MiniMax、SiliconFlow、Ollama 等 OpenAI 兼容端点），保存即生效免重启，API Key 以 RSA 加密入库。其中向量模型切换会先探测新配置（失败拒绝保存），通过后自动全量重嵌入并在下方展示进度。鼠标悬停参数名旁的 ? 可查看说明。" />
 
     <!-- 分区锚点：点击展开并平滑定位到对应配置分组 -->
     <div class="cfg-anchor">
@@ -17,7 +17,27 @@
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
             <a-form-item>
               <template #label><a-tooltip :title="tips.chatModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-              <a-input v-model:value="form.chat.model" placeholder="如 qwen3.7-flash-2026-07-15" />
+              <a-input v-model:value="form.chat.model" placeholder="如 deepseek-chat / glm-4.5 / qwen-plus，与所选厂商一致" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.chatPreset" placement="top">厂商预设 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-select v-model:value="chatPreset" style="width:360px" :options="chatPresetOptions"
+                        placeholder="选择厂商自动填充网关地址与补全路径" @change="onChatPresetChange" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.chatBaseUrl" placement="top">网关地址 Base URL <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.chat.baseUrl" style="width:420px"
+                        placeholder="如 https://api.deepseek.com；…/v1、…/v4 等版本尾缀或完整端点也能自动识别" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.chatCompletionsPath" placement="top">补全路径 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.chat.completionsPath" style="width:420px"
+                        placeholder="默认 /v1/chat/completions；智谱 /v4、方舟 /v3、千帆 /v2（留空自动识别）" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.chatApiKey" placement="top">API Key <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-password v-model:value="form.chat.apiKey" style="width:420px"
+                        placeholder="未修改时显示 ****掩码，无需重新输入（RSA 加密入库）" />
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.temperature" placement="top">温度 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
@@ -71,12 +91,6 @@
                 默认关闭：回答下方不显示任何降级提示（无命中/改写失败/图片剔除/缓存命中等）；调试排障时开启可见全部原因
               </span>
             </a-form-item>
-            <a-form-item label="Base URL">
-              <a-input :value="ro.chat.baseUrl" disabled />
-            </a-form-item>
-            <a-form-item label="API Key">
-              <a-input :value="ro.chat.apiKey" disabled />
-            </a-form-item>
           </a-form>
         </a-collapse-panel>
 
@@ -106,11 +120,15 @@
               <template #label><a-tooltip :title="tips.userImageConcurrency" placement="top">用户图片并发 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
               <a-input-number v-model:value="form.vision.userImageConcurrency" :min="1" :max="16" style="width:200px" />
             </a-form-item>
-            <a-form-item label="Base URL">
-              <a-input :value="ro.vision.baseUrl" disabled />
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.visionBaseUrl" placement="top">网关地址 Base URL <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.vision.baseUrl" style="width:420px"
+                        placeholder="如 http://localhost:11434（Ollama）或 https://open.bigmodel.cn/api/paas" />
             </a-form-item>
-            <a-form-item label="API Key">
-              <a-input :value="ro.vision.apiKey" disabled />
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.visionApiKey" placement="top">API Key <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-password v-model:value="form.vision.apiKey" style="width:420px"
+                        placeholder="未修改时显示 ****掩码（Ollama 无需 Key 可留空；RSA 加密入库）" />
             </a-form-item>
           </a-form>
         </a-collapse-panel>
@@ -139,16 +157,16 @@
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.parseConcurrency" placement="top">解析并发数 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-              <a-input-number v-model:value="form.chunk.concurrency" :min="1" :max="8" style="width:200px" />
+              <a-input-number v-model:value="form.parse.concurrency" :min="1" :max="8" style="width:200px" />
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.embedRetryCount" placement="top">向量化重试 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-              <a-input-number v-model:value="form.chunk.embedRetryCount" :min="0" :max="5" style="width:200px" />
+              <a-input-number v-model:value="form.parse.embedRetryCount" :min="0" :max="5" style="width:200px" />
               <span style="margin-left:12px;color:#999;font-size:12px">向量化批次失败自动重试次数，0=不重试</span>
             </a-form-item>
             <a-form-item>
               <template #label><a-tooltip :title="tips.ocrMinText" placement="top">PDF 扫描件阈值 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
-              <a-input-number v-model:value="form.chunk.ocrMinText" :min="0" :step="5" style="width:200px" />
+              <a-input-number v-model:value="form.parse.ocrMinText" :min="0" :step="5" style="width:200px" />
               <span style="margin-left:12px;color:#999;font-size:12px">页文本少于该长度触发 OCR</span>
             </a-form-item>
             <a-form-item>
@@ -166,14 +184,70 @@
                    message="上传大小上限保存即生效（新上传按新限制校验）；分块/图片上限对超大文档保护：知识块数超上限截断入库，图片数超上限不再提取描述。分块重叠与分块/图片上限均只对重新解析/新上传文档生效。" />
         </a-collapse-panel>
 
-        <a-collapse-panel key="embedding" :id="'cfg-anchor-embedding'" header="向量模型（Embedding）">
+        <a-collapse-panel key="embedding" :id="'cfg-anchor-embedding'" header="向量模型（Embedding，切换需全量重嵌入）">
           <a-form :label-col="{ span: 4 }" :wrapper-col="{ span: 14 }">
-            <a-form-item label="模型名">
-              <a-input :value="ro.embedding.model" disabled />
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.embeddingModel" placement="top">模型名 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.embedding.model" style="width:420px"
+                        placeholder="如 text-embedding-v4 / embedding-3 / bge-m3，与所选厂商一致" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.embeddingBaseUrl" placement="top">网关地址 Base URL <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.embedding.baseUrl" style="width:420px"
+                        placeholder="OpenAI 兼容网关；…/v1、…/v4 等版本尾缀自动识别" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.embeddingApiKey" placement="top">API Key <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input-password v-model:value="form.embedding.apiKey" style="width:420px"
+                        placeholder="未修改时显示 ****掩码，无需重新输入（RSA 加密入库）" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.embeddingPath" placement="top">向量化路径 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <a-input v-model:value="form.embedding.embeddingsPath" style="width:420px"
+                        placeholder="默认 /v1/embeddings；智谱 /v4/embeddings、千帆 /v2/embeddings（留空自动识别）" />
+            </a-form-item>
+            <a-form-item>
+              <template #label><a-tooltip :title="tips.embeddingDimensions" placement="top">当前索引维度 <question-circle-outlined class="tip-icon" /></a-tooltip></template>
+              <span v-if="embeddingDimensions" style="color:#555">{{ embeddingDimensions }} 维</span>
+              <span v-else style="color:#999">未记录（尚未切换过向量模型；首次重嵌入完成后自动记录）</span>
+            </a-form-item>
+            <a-form-item label="重嵌入状态">
+              <div>
+                <span v-if="reembed.status === 'running'" style="color:#1677ff">
+                  进行中：{{ reembed.done }} / {{ reembed.total }} 块
+                  <span v-if="reembed.failed" style="color:#cf1322">（失败 {{ reembed.failed }}）</span>
+                </span>
+                <span v-else-if="reembed.status === 'done'" style="color:#389e0d">
+                  已完成：{{ reembed.done }} 块<span v-if="reembed.failed" style="color:#cf1322">（失败 {{ reembed.failed }}，可重试补齐）</span>
+                </span>
+                <span v-else-if="reembed.status === 'failed'" style="color:#cf1322">
+                  失败：{{ reembed.error }}（已完成 {{ reembed.done }} 块，可重试）
+                </span>
+                <span v-else style="color:#999">未运行</span>
+                <a-button size="small" style="margin-left:12px" :loading="reembedTriggering" @click="doTriggerReembed">
+                  手动重嵌入
+                </a-button>
+                <a-button size="small" style="margin-left:8px" @click="refreshReembedStatus">刷新</a-button>
+              </div>
+              <!-- 维度变化 / 耗时 / 索引对账：任务跑过才有意义 -->
+              <div v-if="reembed.status !== 'idle'" style="margin-top:6px;color:#999;font-size:12px;line-height:1.8">
+                <span v-if="reembed.newDim">
+                  维度：{{ reembed.oldDim || '未知' }} → {{ reembed.newDim }}
+                  <span v-if="reembed.oldDim && reembed.oldDim !== reembed.newDim" style="color:#d46b08">（维度已变，索引 schema 已按新维度重建）</span>
+                </span>
+                <span v-if="reembedElapsed" style="margin-left:12px">耗时 {{ reembedElapsed }}</span>
+                <!-- 对账：索引内实际块数少于成功写入数 = 有丢块（DROP 与并发解析撞车），需再跑一次补齐 -->
+                <span v-if="reembed.indexed" style="margin-left:12px">
+                  索引内 {{ reembed.indexed }} 块
+                  <span v-if="reembed.status === 'done' && reembed.indexed < reembed.done" style="color:#cf1322">
+                    ⚠ 少于成功写入 {{ reembed.done }} 块（疑与并发解析撞车丢块，建议解析空闲时再跑一次）
+                  </span>
+                </span>
+              </div>
             </a-form-item>
           </a-form>
           <a-alert type="warning" show-icon style="margin:0 24px 16px"
-                   message="向量模型不支持页面修改：更换模型后维度可能变化，历史向量全部失效，需删除知识库重新上传文档。" />
+                   message="向量模型热切换说明：不同模型的向量在数学上不可迁移（维度/语义空间均不同）。保存时会先探测新配置并校验维度合法（探测失败或维度非法一律拒绝保存，旧索引保持完整）；通过后自动按新维度重建向量索引并后台全量重嵌入（无需重新上传文档，MySQL 知识块不动）。任务开始即清空语义缓存——旧模型的问题向量已作废，留着可能命中语义无关的历史回答。重嵌入期间向量检索自动降级关键词路，服务不中断。完成后请核对上方「索引内块数」与成功写入块数是否一致，并抽查几个问题验证召回质量。" />
         </a-collapse-panel>
 
         <a-collapse-panel key="retrieval" :id="'cfg-anchor-retrieval'" header="检索设置（混合检索权重 + 重排 + 关键词引擎）">
@@ -448,10 +522,10 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { QuestionCircleOutlined, SaveOutlined } from '@ant-design/icons-vue'
-import { getConfig, saveConfig, checkRerank, checkKeywordEngine, getAnswerCacheStats, clearAnswerCache } from '../api'
+import { getConfig, saveConfig, checkRerank, checkKeywordEngine, getAnswerCacheStats, clearAnswerCache, getReembedStatus, triggerReembed } from '../api'
 
 // 折叠面板：默认展开常用分组（chat / retrieval / context / deepReasoning），vision / embedding 收起
 const activeKeys = ref(['chat', 'retrieval', 'context', 'deepReasoning'])
@@ -482,10 +556,21 @@ const jumpTo = (key) => {
 
 // 参数说明（hover ? 查看"调整该参数会影响什么"）
 const tips = {
-  chatModel: '切换回答所用的底层大模型。不同模型的能力、速度、成本差异很大；更换模型后请同步确认下方「模型窗口映射」包含该模型，否则按默认窗口计算上下文预算。',
-  temperature: '控制回答的随机性（0~2）：越低回答越稳定、严谨、贴近资料原文（操作手册问答建议 0.2~0.4）；越高越有创造性，但也更容易偏离事实或编造内容。',
+  chatModel: '切换回答所用的底层大模型（命名与所选厂商一致，如 deepseek-chat / glm-4.5 / qwen-plus / moonshot-v1-8k / doubao-pro-32k）。不同模型的能力、速度、成本差异很大；更换后请同步确认下方「模型窗口映射」包含该模型，否则按默认窗口计算上下文预算。跨厂商切换后若深度思考报错（enable_thinking 仅 qwen3 系支持），请将「深度思考-思考模式」切为 prompt 或关闭透传。',
+  chatPreset: '常见国产模型厂商预设：选择后自动填充网关地址与补全路径（API Key 与模型名需自行补齐）。覆盖 DeepSeek、智谱 GLM、阿里百炼 Qwen、Kimi、豆包（火山方舟）、腾讯混元、百度千帆、MiniMax、SiliconFlow（一个 Key 访问多个开源模型）与本地 Ollama，均为 OpenAI 兼容端点。',
+  chatBaseUrl: 'OpenAI 兼容网关地址，不含补全路径。三种填法自动识别：① 网关根地址（如 https://api.deepseek.com）；② OpenAI SDK 风格版本尾缀（…/v1、…/compatible-mode/v1、智谱 …/v4、方舟 …/v3、千帆 …/v2，版本段自动移入补全路径）；③ 完整端点（以 /chat/completions 结尾）。修改保存后下一次回答即走新网关，免重启。',
+  chatCompletionsPath: '对话补全路径，默认 /v1/chat/completions。非 /v1 网关需调整：智谱 GLM /v4/chat/completions、火山方舟 /v3/chat/completions、百度千帆 /v2/chat/completions；选择厂商预设会自动填充，手动填写带版本尾缀的 baseUrl 时也可留空自动识别。',
+  chatApiKey: '所选厂商的 API Key（格式以厂商为准，讯飞星火为 key:secret 拼接形式）。以 RSA 加密后存储，页面上仅显示 ****掩码；未修改时无需重新输入。切换厂商后请换对应 Key，否则网关 401。',
+  temperature: '控制回答的随机性（0~2）：越低回答越稳定、严谨、贴近资料原文（操作手册问答建议 0.2~0.4）；越高越有创造性，但也更容易偏离事实或编造内容。注意部分厂商范围更窄（如智谱 0~1），超出会报错。',
   systemPrompt: '定义 AI 的角色与回答风格，会注入每次问答的系统提示。改动立即影响所有回答的语气与行为；引用标注、配图、追问的硬性规则由系统固定，不可在此修改。',
-  visionModel: '图片识别所用的多模态模型，影响文档截图、流程图的描述质量（描述越准，回答配图与检索召回越准）。',
+  visionModel: '图片识别所用的多模态模型，影响文档截图、流程图的描述质量（描述越准，回答配图与检索召回越准）。换云端多模态（如 GLM-4V / qwen-vl-max / GPT-4o）需同步修改下方网关地址与 API Key。',
+  visionBaseUrl: '视觉模型 OpenAI 兼容网关地址。本地 Ollama 用 http://localhost:11434；云端同对话模型厂商（…/v1、…/v4 等版本尾缀自动识别）。修改保存后下一次图片描述即走新网关，免重启。',
+  visionApiKey: '视觉模型 API Key（RSA 加密存储，页面仅显示 ****掩码，未修改无需重输）。本地 Ollama 不校验密钥可留空；切换云端服务后请换对应 Key。',
+  embeddingModel: '向量化所用模型，决定知识块与提问的语义表示。切换保存时会真实探测新配置（不可达/Key 错误将拒绝保存），通过后自动清空向量索引并后台全量重嵌入——不同模型向量不可迁移，这是必要步骤；期间检索降级关键词路。',
+  embeddingBaseUrl: '向量模型 OpenAI 兼容网关地址（可与对话模型不同厂商，如对话用 DeepSeek、向量用百炼）。…/v1、…/v4 等版本尾缀自动识别。',
+  embeddingApiKey: '向量模型 API Key（RSA 加密存储，页面仅显示 ****掩码，未修改无需重输）。注意：与对话模型的 Key 通常不同，切换厂商时务必同步更换。',
+  embeddingPath: '向量化接口路径，默认 /v1/embeddings。智谱 /v4/embeddings、百度千帆 /v2/embeddings；baseUrl 填了版本尾缀时可留空自动识别。',
+  embeddingDimensions: '当前向量索引的维度，由系统在全量重嵌入成功后自动记录，不可手工修改。切换向量模型时用它与新模型探测维度比对：维度变化说明索引 schema 必须重建（重嵌入会自动做）。显示"未记录"表示本库尚未跑过重嵌入，不影响使用。',
   visionPrompt: '图片描述的要求（如提取关键文字/界面元素、说明流程要点）。改动影响图片描述的内容倾向，进而影响检索与配图准确性。',
   visionConcurrency: '文档解析时图片描述的最大并发数。调高解析更快，但占用更多显存/推理资源（本地 Ollama 需设 OLLAMA_NUM_PARALLEL 才能并行）；调低更稳。',
   maxChunks: '单文档解析的最大知识块数（0=不限制）。超大文档超出部分截断不入库，防止 embedding 调用数万次导致解析失控。',
@@ -613,9 +698,47 @@ const onRerankEnabledChange = async checked => {
     rerankChecking.value = false
   }
 }
-const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', suggestedQuestions: '', retrievalDebugEnabled: false, remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8, streamRetryCount: 1, sseTimeoutMs: 300000, showDebugDegradations: false },
-                    vision: { enabled: true, model: '', prompt: '', concurrency: 4, userImageConcurrency: 2 },
-                    chunk: { maxChunks: 3000, maxImages: 100, overlap: 100, concurrency: 2, ocrMinText: 20, structural: true, structuralRatio: 0.8, embedRetryCount: 1 },
+// 厂商预设：主流国产模型 OpenAI 兼容端点（baseUrl 均为网关根地址，不含版本段；版本段在 completionsPath）
+const chatPreset = ref('custom')
+const chatPresets = {
+  deepseek: { baseUrl: 'https://api.deepseek.com', completionsPath: '/v1/chat/completions' },
+  zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas', completionsPath: '/v4/chat/completions' },
+  dashscope: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode', completionsPath: '/v1/chat/completions' },
+  moonshot: { baseUrl: 'https://api.moonshot.cn', completionsPath: '/v1/chat/completions' },
+  ark: { baseUrl: 'https://ark.cn-beijing.volces.com/api', completionsPath: '/v3/chat/completions' },
+  hunyuan: { baseUrl: 'https://api.hunyuan.cloud.tencent.com', completionsPath: '/v1/chat/completions' },
+  qianfan: { baseUrl: 'https://qianfan.baidubce.com', completionsPath: '/v2/chat/completions' },
+  minimax: { baseUrl: 'https://api.minimax.chat', completionsPath: '/v1/chat/completions' },
+  siliconflow: { baseUrl: 'https://api.siliconflow.cn', completionsPath: '/v1/chat/completions' },
+  ollama: { baseUrl: 'http://localhost:11434', completionsPath: '/v1/chat/completions' }
+}
+const chatPresetOptions = [
+  { value: 'custom', label: '自定义 / 保持现状' },
+  { value: 'deepseek', label: 'DeepSeek（api.deepseek.com）' },
+  { value: 'zhipu', label: '智谱 GLM（open.bigmodel.cn）' },
+  { value: 'dashscope', label: '阿里百炼 Qwen（dashscope）' },
+  { value: 'moonshot', label: 'Kimi 月之暗面（moonshot）' },
+  { value: 'ark', label: '豆包/火山方舟（volces.com）' },
+  { value: 'hunyuan', label: '腾讯混元（hunyuan）' },
+  { value: 'qianfan', label: '百度千帆 v2（qianfan）' },
+  { value: 'minimax', label: 'MiniMax（minimax.chat）' },
+  { value: 'siliconflow', label: 'SiliconFlow 硅基流动（多模型聚合）' },
+  { value: 'ollama', label: '本地 Ollama（localhost:11434）' }
+]
+const onChatPresetChange = val => {
+  const p = chatPresets[val]
+  if (!p) return
+  form.value.chat.baseUrl = p.baseUrl
+  form.value.chat.completionsPath = p.completionsPath
+  message.info('已填充网关地址与补全路径，请补齐 API Key 与模型名后保存')
+}
+
+const form = ref({ chat: { model: '', baseUrl: '', apiKey: '', completionsPath: '', temperature: 0.3, systemPrompt: '', suggestedQuestions: '', retrievalDebugEnabled: false, remainTokenFloor: 800, truncateFallbackChars: 200, historyRounds: 5, pipelineThreads: 8, streamRetryCount: 1, sseTimeoutMs: 300000, showDebugDegradations: false },
+                    vision: { enabled: true, model: '', baseUrl: '', apiKey: '', prompt: '', concurrency: 4, userImageConcurrency: 2 },
+                    embedding: { model: '', baseUrl: '', apiKey: '', embeddingsPath: '' },
+                    chunk: { maxChunks: 3000, maxImages: 100, overlap: 100, structural: true, structuralRatio: 0.8 },
+                    // 解析类参数后端 key 前缀是 parse.*（不是 chunk.*），必须独立分组提交，否则被白名单静默丢弃
+                    parse: { concurrency: 2, ocrMinText: 20, embedRetryCount: 1 },
                     upload: { maxFileSizeMB: 200 },
                     retrieval: { vectorWeight: 0.6, keywordWeight: 0.4, titleBonus: 0.1,
                                  vecThreshold: 0.3, keywordLimit: 20, keywordTimeoutMs: 800, searchTimeoutMs: 8000, rewriteTimeoutMs: 5000,
@@ -634,7 +757,46 @@ const form = ref({ chat: { model: '', temperature: 0.3, systemPrompt: '', sugges
                                      timeoutMillis: 30000, maxThinkingTokens: 0 },
                     ratelimit: { enabled: true, chatPerMinute: 10, uploadPerMinute: 10 },
                     semanticCache: { enabled: true, threshold: 0.96, maxEntries: 500 } })
-const ro = ref({ chat: {}, vision: {}, embedding: {} })
+
+// 当前向量索引维度（后端重嵌入成功后回写 embedding.dimensions，只读展示）
+const embeddingDimensions = ref('')
+
+// 向量模型全量重嵌入状态（切换后自动触发/手动重试；运行中轮询刷新）
+const reembed = ref({ status: 'idle', total: 0, done: 0, failed: 0, error: null, oldDim: 0, newDim: 0, indexed: 0 })
+const reembedTriggering = ref(false)
+// 耗时：运行中按当前时间算（轮询驱动刷新），结束后按 endTime 定格
+const reembedElapsed = computed(() => {
+  const s = reembed.value
+  if (!s.startTime) return ''
+  const end = s.status === 'running' ? Date.now() : (s.endTime || 0)
+  if (!end || end < s.startTime) return ''
+  const sec = Math.round((end - s.startTime) / 1000)
+  return sec < 60 ? `${sec} 秒` : `${Math.floor(sec / 60)} 分 ${sec % 60} 秒`
+})
+let reembedTimer = null
+const refreshReembedStatus = async () => {
+  try {
+    const r = await getReembedStatus()
+    if (r.success) reembed.value = r.data || { status: 'idle' }
+    // 运行中每 3s 轮询，结束即停
+    if (reembed.value.status === 'running') {
+      if (!reembedTimer) reembedTimer = setInterval(refreshReembedStatus, 3000)
+    } else if (reembedTimer) {
+      clearInterval(reembedTimer); reembedTimer = null
+      // 任务结束时后端已回写 embedding.dimensions，同步刷新只读维度展示
+      if (reembed.value.newDim) embeddingDimensions.value = String(reembed.value.newDim)
+    }
+  } catch (e) { /* 状态查询失败静默（不影响配置页） */ }
+}
+const doTriggerReembed = async () => {
+  reembedTriggering.value = true
+  try {
+    const r = await triggerReembed()
+    if (r.success) { message.success('全量重嵌入任务已启动，期间检索自动降级关键词路'); refreshReembedStatus() }
+    else message.error(r.msg || '触发失败')
+  } catch (e) { message.error(e.message || '触发失败') }
+  finally { reembedTriggering.value = false }
+}
 
 onMounted(async () => {
   loading.value = true
@@ -643,6 +805,10 @@ onMounted(async () => {
     if (r.success && r.data) {
       const d = r.data
       form.value.chat.model = d.chat?.model?.value || ''
+      form.value.chat.baseUrl = d.chat?.baseUrl?.value || ''
+      // 后端 snapshot 对 apiKey 脱敏（****后4位）；掩码仅展示，未修改则不提交
+      form.value.chat.apiKey = d.chat?.apiKey?.value || ''
+      form.value.chat.completionsPath = d.chat?.completionsPath?.value || ''
       form.value.chat.temperature = Number(d.chat?.temperature?.value ?? 0.3)
       form.value.chat.systemPrompt = d.chat?.systemPrompt?.value || ''
       form.value.chat.suggestedQuestions = d.chat?.suggestedQuestions?.value || ''
@@ -656,6 +822,9 @@ onMounted(async () => {
       form.value.chat.showDebugDegradations = d.chat?.showDebugDegradations?.value === 'true'
       form.value.vision.enabled = d.vision?.enabled?.value !== 'false'
       form.value.vision.model = d.vision?.model?.value || ''
+      form.value.vision.baseUrl = d.vision?.baseUrl?.value || ''
+      // 后端 snapshot 对 apiKey 脱敏（****后4位）；掩码仅展示，未修改则不提交
+      form.value.vision.apiKey = d.vision?.apiKey?.value || ''
       form.value.vision.prompt = d.vision?.prompt?.value || ''
       form.value.vision.concurrency = Number(d.vision?.concurrency?.value ?? 4)
       form.value.vision.userImageConcurrency = Number(d.vision?.userImageConcurrency?.value ?? 2)
@@ -663,11 +832,13 @@ onMounted(async () => {
       form.value.chunk.maxChunks = Number(ck.maxChunks?.value ?? 3000)
       form.value.chunk.maxImages = Number(ck.maxImages?.value ?? 100)
       form.value.chunk.overlap = Number(ck.overlap?.value ?? 100)
-      form.value.chunk.concurrency = Number(ck.concurrency?.value ?? 2)
-      form.value.chunk.ocrMinText = Number(ck.ocrMinText?.value ?? 20)
       form.value.chunk.structural = ck.structural?.value !== 'false'
       form.value.chunk.structuralRatio = Number(ck.structuralRatio?.value ?? 0.8)
-      form.value.chunk.embedRetryCount = Number(ck.embedRetryCount?.value ?? 1)
+      // 解析类参数在后端 parse.* 分组（与 chunk.* 分开）
+      const ps = d.parse || {}
+      form.value.parse.concurrency = Number(ps.concurrency?.value ?? 2)
+      form.value.parse.ocrMinText = Number(ps.ocrMinText?.value ?? 20)
+      form.value.parse.embedRetryCount = Number(ps.embedRetryCount?.value ?? 1)
       const up = d.upload || {}
       form.value.upload.maxFileSizeMB = Math.round(Number(up.maxFileSize?.value ?? 209715200) / 1024 / 1024)
       form.value.retrieval.vectorWeight = Number(d.retrieval?.vectorWeight?.value ?? 0.6)
@@ -730,11 +901,17 @@ onMounted(async () => {
       form.value.semanticCache.enabled = sc.enabled?.value !== 'false'
       form.value.semanticCache.threshold = Number(sc.threshold?.value ?? 0.96)
       form.value.semanticCache.maxEntries = Number(sc.maxEntries?.value ?? 500)
+      const em = d.embedding || {}
+      form.value.embedding.model = em.model?.value || ''
+      form.value.embedding.baseUrl = em.baseUrl?.value || ''
+      form.value.embedding.apiKey = em.apiKey?.value || ''
+      form.value.embedding.embeddingsPath = em.embeddingsPath?.value || ''
+      // 只读：后端记录的当前索引维度（重嵌入成功后回写；空=尚未记录）
+      embeddingDimensions.value = em.dimensions?.value || ''
       // 缓存统计（条数）异步刷新
       getAnswerCacheStats().then(r => { if (r.success) cacheStats.value = r.data }).catch(() => {})
-      ro.value.chat = { baseUrl: d.chat?.baseUrl?.value || '', apiKey: d.chat?.apiKey?.value || '' }
-      ro.value.vision = { baseUrl: d.vision?.baseUrl?.value || '', apiKey: d.vision?.apiKey?.value || '' }
-      ro.value.embedding = { model: d.embedding?.model?.value || '' }
+      // 重嵌入状态（若后台仍在跑则自动开启轮询）
+      refreshReembedStatus()
     }
   } catch (e) { message.error(e.message || '加载配置失败') }
   finally { loading.value = false }
@@ -753,13 +930,18 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (anchorObserver) { anchorObserver.disconnect(); anchorObserver = null }
+  if (reembedTimer) { clearInterval(reembedTimer); reembedTimer = null }
 })
 
 const save = async () => {
   saving.value = true
   try {
     const r = await saveConfig({
-      chat: { model: form.value.chat.model?.trim(), temperature: String(form.value.chat.temperature),
+      chat: { model: form.value.chat.model?.trim(), baseUrl: form.value.chat.baseUrl?.trim(),
+              // 掩码原样提交会覆盖真实 key：未修改（**** 开头）则不提交
+              apiKey: form.value.chat.apiKey?.trim().startsWith('****') ? undefined : form.value.chat.apiKey?.trim(),
+              completionsPath: form.value.chat.completionsPath?.trim(),
+              temperature: String(form.value.chat.temperature),
               systemPrompt: form.value.chat.systemPrompt?.trim(),
               suggestedQuestions: form.value.chat.suggestedQuestions?.trim(),
               retrievalDebugEnabled: String(form.value.chat.retrievalDebugEnabled),
@@ -771,15 +953,26 @@ const save = async () => {
               sseTimeoutMs: String(form.value.chat.sseTimeoutMs),
               showDebugDegradations: String(form.value.chat.showDebugDegradations) },
       vision: { enabled: String(form.value.vision.enabled),
-                model: form.value.vision.model?.trim(), prompt: form.value.vision.prompt?.trim(),
+                model: form.value.vision.model?.trim(),
+                baseUrl: form.value.vision.baseUrl?.trim(),
+                // 掩码原样提交会覆盖真实 key：未修改（**** 开头）则不提交
+                apiKey: form.value.vision.apiKey?.trim().startsWith('****') ? undefined : form.value.vision.apiKey?.trim(),
+                prompt: form.value.vision.prompt?.trim(),
                 concurrency: String(form.value.vision.concurrency),
                 userImageConcurrency: String(form.value.vision.userImageConcurrency) },
+      // 向量模型热切换：保存时后端先探测新配置，通过后自动触发全量重嵌入
+      embedding: { model: form.value.embedding.model?.trim(),
+                   baseUrl: form.value.embedding.baseUrl?.trim(),
+                   apiKey: form.value.embedding.apiKey?.trim().startsWith('****') ? undefined : form.value.embedding.apiKey?.trim(),
+                   embeddingsPath: form.value.embedding.embeddingsPath?.trim() },
       chunk: { maxChunks: String(form.value.chunk.maxChunks), maxImages: String(form.value.chunk.maxImages),
                overlap: String(form.value.chunk.overlap),
-               concurrency: String(form.value.chunk.concurrency), ocrMinText: String(form.value.chunk.ocrMinText),
                structural: String(form.value.chunk.structural),
-               structuralRatio: String(form.value.chunk.structuralRatio),
-               embedRetryCount: String(form.value.chunk.embedRetryCount) },
+               structuralRatio: String(form.value.chunk.structuralRatio) },
+      // parse 是独立分组（后端 key 前缀 parse.*），并发/OCR阈值/向量化重试都在这里，不可放进 chunk
+      parse: { concurrency: String(form.value.parse.concurrency),
+               ocrMinText: String(form.value.parse.ocrMinText),
+               embedRetryCount: String(form.value.parse.embedRetryCount) },
       upload: { maxFileSize: String(form.value.upload.maxFileSizeMB * 1024 * 1024) },
       retrieval: { vectorWeight: String(form.value.retrieval.vectorWeight),
                    keywordWeight: String(form.value.retrieval.keywordWeight),
@@ -837,7 +1030,11 @@ const save = async () => {
                        threshold: String(form.value.semanticCache.threshold),
                        maxEntries: String(form.value.semanticCache.maxEntries) }
     })
-    if (r.success) message.success('配置已保存并生效')
+    if (r.success) {
+      message.success('配置已保存并生效')
+      // 若触发了向量模型切换，重嵌入任务已自动启动（状态轮询自动开启）
+      refreshReembedStatus()
+    }
     else message.error(r.msg || '保存失败')
   } catch (e) { message.error(e.message || '保存失败') }
   finally { saving.value = false }

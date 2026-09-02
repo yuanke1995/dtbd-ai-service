@@ -19,6 +19,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.redis.RedisVectorStore;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -46,6 +48,7 @@ import java.util.regex.Pattern;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 文档管理服务
@@ -73,6 +76,8 @@ public class DocumentService {
     /** 知识块引用关系（交叉引用识别 + 1-hop 扩散）：与块/文档同生命周期重建 */
     private final KnowledgeRefService knowledgeRefService;
     private final AnswerCacheService answerCacheService;
+    /** 向量模型（@Primary 为 DynamicEmbeddingModel）：重嵌入前探测新维度用 */
+    private final org.springframework.ai.embedding.EmbeddingModel embeddingModel;
     /** docx 解析器：图片描述补齐用（解析时失败/超限的图，按 URL 重新描述） */
     private final DocxParser docxParser;
     /** 解析进度节流守卫：docId -> 已上报 progress（值未变化不写库） */
@@ -85,6 +90,39 @@ public class DocumentService {
     private final Map<String, Thread> parseThreads = new ConcurrentHashMap<>();
     /** 同名上传串行锁：避免并发上传同一文件名时双方都判定"无可复用"而产生重复文档（单实例内有效） */
     private final Map<String, Object> uploadLocks = new ConcurrentHashMap<>();
+
+    /** 向量库索引名（DROP/重建索引用，与 spring.ai.vectorstore.redis.index-name 一致） */
+    @Value("${spring.ai.vectorstore.redis.index-name:ai-doc-index}")
+    private String vectorIndexName;
+
+    /**
+     * 向量库 schema 自动初始化开关（与 RedisVectorStore 自动配置同源）。
+     * 重嵌入护栏：为 false 时 afterPropertiesSet() 不会重建索引，DROP 之后将无索引可写可查，
+     * 向量路彻底不可用且无法自愈——必须先于 DROP 拒绝任务。
+     */
+    @Value("${spring.ai.vectorstore.redis.initialize-schema:true}")
+    private boolean vectorInitializeSchema;
+
+    /** 全量重嵌入任务状态（设置页查询/展示；字段 volatile 供异步线程写、接口线程读） */
+    private final ReembedStatus reembedStatus = new ReembedStatus();
+    private final AtomicBoolean reembedRunning = new AtomicBoolean(false);
+
+    /** 重嵌入状态快照（设置页/接口用） */
+    public static class ReembedStatus {
+        public volatile String status = "idle";   // idle / running / done / failed
+        public volatile int total;
+        public volatile int done;
+        public volatile int failed;
+        public volatile String error;
+        public volatile long startTime;
+        public volatile long endTime;
+        /** 切换前索引维度（取自 embedding.dimensions 记录，0=首次/未知） */
+        public volatile int oldDim;
+        /** 本次重建所用新模型维度（探测得到，索引 schema 按此重建） */
+        public volatile int newDim;
+        /** 对账：任务结束时索引内实际文档数（与 done 对比可发现丢块） */
+        public volatile int indexed;
+    }
 
     /** 解析线程池（并发 parse.concurrency 可调：避免多文档同时解析打爆 embedding/Ollama；保存即生效） */
     private ThreadPoolExecutor parseExecutor;
@@ -269,6 +307,177 @@ public class DocumentService {
         } catch (Exception e) {
             log.warn("知识块向量化失败 id={}: {}", k.getId(), e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * 全量重嵌入（向量模型热切换后自动触发，也可设置页手动触发）：
+     * 向量无法跨模型迁移（不同模型向量空间数学不兼容，即使维度相同语义也不同），
+     * 唯一正确做法是清空向量索引后用新模型全量重算。
+     * <p>
+     * 编排顺序（前两步是护栏，任何一步失败都在动索引之前抛出，旧索引与旧向量保持完整）：
+     * <ol>
+     *   <li>护栏：initialize-schema 必须为 true，否则 DROP 后无法重建索引（向量路永久不可用）</li>
+     *   <li>护栏：探测新模型维度（不可达/维度非法即放弃，服务不降级），与 embedding.dimensions
+     *       记录的旧维度比对记日志</li>
+     *   <li>清空语义缓存（旧模型问题向量即刻作废，避免整个重嵌窗口内命中错答案）</li>
+     *   <li>DROP 向量索引（连数据）→ 按新维度重建 schema</li>
+     *   <li>游标分批重新 embedding 全部知识块</li>
+     *   <li>记录新维度到 embedding.dimensions（下次切换的旧维度基线）+ 索引文档数对账</li>
+     * </ol>
+     * 期间向量检索返回空结果，自动降级关键词路（HybridRetrieval 已有降级），系统不中断；
+     * 新文档解析/知识块编辑在重嵌期间写入的向量即为新模型产物，任务覆盖不到的增量部分由
+     * 分批游标自然补齐（重嵌开始后新增的块 id 大于游标会被后续批次读到；先写后读的块会被同 id 覆盖）。
+     * 已知残留风险：DROP 与并发解析的向量写入撞车时那批向量会落进已删除索引，
+     * 由第 6 步对账（indexed vs done）暴露，解析空闲时再触发一次即可补齐。
+     */
+    public boolean reembedAllAsync() {
+        if (!reembedRunning.compareAndSet(false, true)) {
+            log.warn("[Reembed] 全量重嵌入任务已在运行，忽略重复触发");
+            return false;
+        }
+        Thread t = new Thread(() -> {
+            try {
+                reembedAll();
+                reembedStatus.endTime = System.currentTimeMillis();
+                reembedStatus.status = "done";
+                log.info("[Reembed] 全量重嵌入完成: {}/{} 块, 失败 {} 块, 维度 {}→{}, 索引内 {} 块, 耗时 {}ms",
+                        reembedStatus.done, reembedStatus.total, reembedStatus.failed,
+                        reembedStatus.oldDim, reembedStatus.newDim, reembedStatus.indexed,
+                        reembedStatus.endTime - reembedStatus.startTime);
+            } catch (Exception e) {
+                reembedStatus.status = "failed";
+                reembedStatus.error = e.getMessage();
+                log.error("[Reembed] 全量重嵌入失败（已完成 {} 块）: {}", reembedStatus.done, e.getMessage(), e);
+            } finally {
+                reembedStatus.endTime = System.currentTimeMillis();
+                reembedRunning.set(false);
+            }
+        }, "reembed-all");
+        t.setDaemon(true);
+        t.start();
+        return true;
+    }
+
+    public ReembedStatus getReembedStatus() {
+        return reembedStatus;
+    }
+
+    private void reembedAll() {
+        if (!(vectorStore instanceof RedisVectorStore rvs)) {
+            throw new IllegalStateException("向量库非 RedisVectorStore，不支持全量重嵌入（当前: "
+                    + vectorStore.getClass().getName() + "）");
+        }
+        // 护栏1（前置，先于任何破坏性操作）：schema 自动初始化关闭时不能 DROP——
+        // afterPropertiesSet() 不会重建索引，DROP 后向量路将永久不可用且无法自愈
+        if (!vectorInitializeSchema) {
+            throw new IllegalStateException("spring.ai.vectorstore.redis.initialize-schema=false，"
+                    + "DROP 索引后无法自动重建（向量检索将永久不可用），已拒绝执行重嵌入；"
+                    + "请置为 true 后重启，或由运维手动重建索引");
+        }
+        reembedStatus.status = "running";
+        reembedStatus.total = 0;
+        reembedStatus.done = 0;
+        reembedStatus.failed = 0;
+        reembedStatus.error = null;
+        reembedStatus.indexed = 0;
+        reembedStatus.startTime = System.currentTimeMillis();
+        reembedStatus.endTime = 0;
+        // 护栏2（前置）：真实探测新模型维度。此时 DynamicEmbeddingModel 已指向新配置，
+        // 探测失败说明新模型不可达——在 DROP 之前抛出，旧索引与旧向量保持完整（服务不降级）
+        reembedStatus.oldDim = Math.max(0, configService.getInt("embedding.dimensions", 0));
+        int newDim;
+        try {
+            newDim = embeddingModel.dimensions();
+        } catch (Exception e) {
+            throw new IllegalStateException("新向量模型维度探测失败（" + e.getMessage()
+                    + "），已放弃重嵌入并保留旧索引；请先修正向量模型配置", e);
+        }
+        if (newDim <= 0) {
+            throw new IllegalStateException("新向量模型返回维度非法(" + newDim + ")，已放弃重嵌入并保留旧索引");
+        }
+        reembedStatus.newDim = newDim;
+        log.info("[Reembed] 维度护栏通过: 旧索引维度={} → 新模型维度={}{}", reembedStatus.oldDim, newDim,
+                reembedStatus.oldDim > 0 && reembedStatus.oldDim != newDim ? "（维度变化，索引 schema 必须重建）" : "");
+        // 护栏3：先清语义缓存，再动向量索引。c_ai_answer_cache 存的是旧模型问题向量——
+        // 放到任务末尾清会留下一个数分钟长的错答窗口：期间新问题用新模型向量与旧向量比对，
+        // 维度不同时被 cosine 维度护栏挡掉（缓存加速失效），维度相同但语义空间不同时更危险
+        // （相似度可能越过阈值，直接返回一条语义无关的历史回答）。故必须在此刻清空。
+        answerCacheService.clearAll();
+        log.info("[Reembed] 语义缓存已清空（旧模型问题向量作废）");
+        // 1. DROP 索引连数据：旧模型向量全部作废（维度不同时 RediSearch schema 也必须重建）
+        try {
+            rvs.getJedis().ftDropIndexDD(vectorIndexName);
+            log.info("[Reembed] 向量索引 {} 已删除（含旧向量数据）", vectorIndexName);
+        } catch (Exception e) {
+            log.info("[Reembed] 向量索引 {} 不存在或删除失败（空库场景可忽略）: {}", vectorIndexName, e.getMessage());
+        }
+        // 2. 重建索引 schema：embeddingModel（DynamicEmbeddingModel）此时已是新配置，dimensions() 为新维度
+        rvs.afterPropertiesSet();
+        // 3. 游标分批全量重嵌（id 升序、LIMIT 翻页，逻辑删除由 MyBatis-Plus 自动过滤；与解析链路同批大小与重试）
+        int batchSize = 10;
+        int embedRetry = Math.max(0, configService.getInt("parse.embedRetryCount", 1));
+        String lastId = "";
+        while (true) {
+            List<AiKnowledge> batch = knowledgeMapper.selectList(new LambdaQueryWrapper<AiKnowledge>()
+                    .gt(AiKnowledge::getId, lastId)
+                    .orderByAsc(AiKnowledge::getId)
+                    .last("LIMIT " + batchSize));
+            if (batch.isEmpty()) {
+                break;
+            }
+            lastId = batch.get(batch.size() - 1).getId();
+            reembedStatus.total = Math.max(reembedStatus.total, reembedStatus.done + batch.size());
+            List<Document> docs = new ArrayList<>(batch.size());
+            for (AiKnowledge k : batch) {
+                Map<String, Object> metadata = new HashMap<>();
+                if (k.getDocId() != null) {
+                    metadata.put("docId", k.getDocId());
+                }
+                metadata.put("title", k.getTitle() == null ? "" : k.getTitle());
+                metadata.put("knowledgeId", k.getId());
+                if (k.getTitlePath() != null && !k.getTitlePath().isBlank()) {
+                    metadata.put("titlePath", k.getTitlePath());
+                }
+                if (k.getImages() != null) {
+                    metadata.put("images", k.getImages());
+                }
+                // overlap 前缀是解析期上下文，重嵌时不可恢复，传 null（仅影响分块边界处的语义衔接，影响极小）
+                docs.add(new Document(k.getId(),
+                        buildEmbedText(k.getTitle(), k.getTitlePath(), k.getContent(), null), metadata));
+            }
+            try {
+                vectorAddWithRetry("reembed", docs, embedRetry);
+                reembedStatus.done += docs.size();
+            } catch (Exception e) {
+                // 单批失败不终止整任务（重嵌是重建性操作，失败块记数，完成后可再次触发补齐）
+                reembedStatus.failed += docs.size();
+                log.warn("[FAIL-LOUD] [Reembed] 批次重嵌失败（{} 块）: {}", docs.size(), e.getMessage());
+            }
+        }
+        // 4. 记录本次索引维度：作为下次切换的"旧维度"基线，也让设置页能显示当前索引维度。
+        // 只在索引确实按 newDim 重建后写入，失败任务不留下说谎的记录
+        configService.putInternal("embedding.dimensions", String.valueOf(newDim));
+        // 5. 对账：索引实际文档数 vs 本次成功写入数。两者差异说明有丢块
+        // （典型来源：DROP 与并发解析写入撞车，那批向量落进了已删除的索引）
+        reembedStatus.indexed = readIndexDocCount(rvs);
+        if (reembedStatus.indexed > 0 && reembedStatus.indexed < reembedStatus.done) {
+            log.warn("[FAIL-LOUD] [Reembed] 索引对账不一致: 成功写入 {} 块，索引内仅 {} 块"
+                    + "（可能与并发解析撞车），建议解析空闲时再触发一次重嵌入补齐",
+                    reembedStatus.done, reembedStatus.indexed);
+        }
+    }
+
+    /**
+     * 读取索引内文档数（FT.INFO num_docs），仅用于对账展示——失败返回 0（不影响任务判定成败）
+     */
+    private int readIndexDocCount(RedisVectorStore rvs) {
+        try {
+            Object n = rvs.getJedis().ftInfo(vectorIndexName).get("num_docs");
+            return n == null ? 0 : Integer.parseInt(String.valueOf(n).trim());
+        } catch (Exception e) {
+            log.debug("[Reembed] 索引文档数读取失败（跳过对账）: {}", e.getMessage());
+            return 0;
         }
     }
 
