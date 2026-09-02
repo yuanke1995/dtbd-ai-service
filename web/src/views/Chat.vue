@@ -725,6 +725,7 @@ async function switchSession(sid) {
           role: m.role === 'user' ? 'user' : 'ai',
           content: String(m.content || ''),
           messageId: m.messageId || m.id || null,
+          fb: (m.fb === 0 || m.fb === 1) ? m.fb : null, // 历史消息的既有评价（单选锁定刷新后仍生效）
           images: Array.isArray(m.images) ? m.images : [],
           sources: Array.isArray(m.sources) ? m.sources : [],
           related: [],

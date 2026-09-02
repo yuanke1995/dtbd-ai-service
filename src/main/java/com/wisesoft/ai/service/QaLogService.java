@@ -85,6 +85,33 @@ public class QaLogService {
     }
 
     /**
+     * 批量查询消息的既有评价（message_id → 1/0）。
+     * 历史消息回显用：前端单选锁定态需要随刷新恢复，否则锁只存在于页面内存、刷新后可重新点另一边。
+     */
+    public Map<String, Integer> loadFeedbackRatings(java.util.Collection<String> messageIds) {
+        Map<String, Integer> result = new HashMap<>();
+        if (messageIds == null || messageIds.isEmpty()) return result;
+        List<String> ids = messageIds.stream()
+                .filter(id -> id != null && !id.isBlank())
+                .distinct()
+                .collect(Collectors.toList());
+        if (ids.isEmpty()) return result;
+        try {
+            List<AiQaFeedback> list = feedbackMapper.selectList(new LambdaQueryWrapper<AiQaFeedback>()
+                    .in(AiQaFeedback::getMessageId, ids));
+            for (AiQaFeedback f : list) {
+                if (f.getRating() != null) {
+                    result.put(f.getMessageId(), f.getRating());
+                }
+            }
+        } catch (Exception e) {
+            // fail-loud：状态加载失败只影响锁定展示（可再次评价的旧行为兜底），不阻断历史读取
+            log.warn("加载消息反馈状态失败: {}", e.getMessage());
+        }
+        return result;
+    }
+
+    /**
      * 差评样本列表（反馈回流闭环）：
      * 👎 样本按时间倒序，联气回答消息还原「问题 + 回答摘要 + 引用块」，供看板一键加评估集 / 补知识块。
      * 消息已被对话组删除的样本跳过（feedback 行保留，不阻塞其余）。

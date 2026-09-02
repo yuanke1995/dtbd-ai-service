@@ -8,6 +8,7 @@ import com.wisesoft.ai.dto.SessionInfo;
 import com.wisesoft.ai.mapper.AiKnowledgeMapper;
 import com.wisesoft.ai.model.AiKnowledge;
 import com.wisesoft.ai.service.ImageUrlSigner;
+import com.wisesoft.ai.service.QaLogService;
 import com.wisesoft.ai.service.RagService;
 import com.wisesoft.ai.service.ConfigService;
 import com.wisesoft.ai.service.RateLimitService;
@@ -50,6 +51,7 @@ public class ChatController {
     private final com.wisesoft.ai.mapper.AiMessageMapper messageMapper;
     private final ConfigService configService;
     private final RateLimitService rateLimitService;
+    private final QaLogService qaLogService;
 
     @Operation(summary = "SSE 流式问答",
             description = "发送问题（可含图片），通过 SSE 流式返回 AI 回答。事件类型：thinking（深度思考增量）、thinking_done（思考结束）、token（文本增量）、image（图片 URL 列表）、done（引用来源/相关推荐/消息ID/思考全文）、error（错误信息）。按用户限频（ratelimit.chatPerMinute）")
@@ -162,6 +164,13 @@ public class ChatController {
         sessionService.assertOwned(sessionId, UserContext.resolve(httpRequest));
         List<Map<String, Object>> history = sessionService.getHistory(sessionId);
         // 历史图片存的是原始 URL，响应时动态签名（避免签名过期导致恢复会话图片 401）
+        // 同步带回各回答消息的既有评价（fb）：前端"有/没帮助单选锁定"依赖此状态，刷新后不丢
+        List<String> msgIds = history.stream()
+                .map(m -> m.get("messageId") == null ? null : String.valueOf(m.get("messageId")))
+                .filter(id -> id != null && !id.isBlank())
+                .distinct()
+                .toList();
+        Map<String, Integer> ratings = qaLogService.loadFeedbackRatings(msgIds);
         for (Map<String, Object> msg : history) {
             Object imgs = msg.get("images");
             if (imgs instanceof List<?> list && !list.isEmpty()) {
@@ -169,6 +178,11 @@ public class ChatController {
                         .map(String::valueOf)
                         .map(imageUrlSigner::signUrl)
                         .toList());
+            }
+            Object mid = msg.get("messageId");
+            if (mid != null) {
+                Integer fb = ratings.get(String.valueOf(mid));
+                if (fb != null) msg.put("fb", fb);
             }
         }
         return ResultJson.ok(history);
