@@ -116,10 +116,12 @@
                     <button class="act-icon-btn" @click="copyAnswer(i)"><copy-outlined /></button>
                   </a-tooltip>
                   <a-tooltip title="有帮助" placement="top">
-                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 1 }" @click="openFeedback(m, 1)"><like-outlined /></button>
+                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 1, 'fb-locked': m.fb === 0 }"
+                            @click="openFeedback(m, 1)"><like-outlined /></button>
                   </a-tooltip>
                   <a-tooltip title="没帮助" placement="top">
-                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 0 }" @click="openFeedback(m, 0)"><dislike-outlined /></button>
+                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 0, 'fb-locked': m.fb === 1 }"
+                            @click="openFeedback(m, 0)"><dislike-outlined /></button>
                   </a-tooltip>
                   <a-tooltip title="重新生成" placement="top">
                     <button class="act-icon-btn" :disabled="loading" @click="regenerate(i)"><reload-outlined /></button>
@@ -541,12 +543,16 @@ const resetView = () => { zoom.value = 1; offset.value = { x: 0, y: 0 } }
 const prev = () => { if (previewIndex.value > 0) { previewIndex.value--; resetView() } }
 const next = () => { if (previewIndex.value < previewList.value.length - 1) { previewIndex.value++; resetView() } }
 
-// 回答反馈（👍👎 + 可选文本）
+// 回答反馈（👍👎 + 可选文本；单选：同一回答只能选一项，可重复点当前项补充说明）
 const feedbackVisible = ref(false)
 const feedbackSubmitting = ref(false)
 const feedbackText = ref('')
 const feedbackTarget = ref(null) // { msg, rating }
 const openFeedback = (m, rating) => {
+  if (m.fb != null && m.fb !== rating) {
+    message.warning(`已评价为「${m.fb === 1 ? '有帮助' : '没帮助'}」，同一回答只能选择一项`)
+    return
+  }
   feedbackTarget.value = { msg: m, rating }
   feedbackText.value = ''
   feedbackVisible.value = true
@@ -1694,6 +1700,9 @@ const scrollForce = () => nextTick(() => {
 .act-icon-btn.act-danger:hover:not(:disabled) { color: #ff4d4f; background: rgba(255,77,79,.08); }
 .act-icon-btn:disabled { cursor: not-allowed; opacity: .4; }
 .act-icon-btn.fb-active { color: #1677ff; }
+/* 反馈单选锁定：已评价另一项时置灰（点击仍会提示原因，不静默） */
+.act-icon-btn.fb-locked { opacity: .3; cursor: not-allowed; }
+.act-icon-btn.fb-locked:hover { color: #8c8c8c; background: transparent; }
 /* 检索状态行（回答下方合并区）：概览行 + 展开的检索词/来源条目，条目点击弹原文（平替原引用 chips） */
 .retrieval-merged { margin-top: 8px; width: 100%; }
 .retrieval-line { font-size: 12px; color: #999; user-select: none; cursor: pointer; }
