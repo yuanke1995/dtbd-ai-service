@@ -187,14 +187,17 @@
           <div class="md disclaimer-body" v-html="renderMd(DISCLAIMER_TEXT, [])"></div>
         </a-modal>
 
-        <!-- 会话重命名 -->
-        <a-modal v-model:open="renameVisible" title="重命名会话" :footer="null" width="400" destroy-on-close>
-          <div style="display:flex;gap:8px">
-            <a-input ref="renameInputRef" v-model:value="renameValue" :maxlength="50" show-count
-                     placeholder="输入新的会话标题" @pressEnter="doRenameSession" />
-            <a-button type="primary" :loading="renamingSession" @click="doRenameSession">保存</a-button>
+        <!-- 会话重命名：条目旁悬浮小卡片（fixed 定位在会话条目右侧；回车保存，ESC/点外部/滚动即关） -->
+        <div v-if="renameVisible" class="rename-pop" :style="renameStyle" @mousedown.stop>
+          <div class="rename-pop-title">重命名会话</div>
+          <a-input ref="renameInputRef" v-model:value="renameValue" :maxlength="50" show-count
+                   placeholder="输入新的会话标题" size="small"
+                   @pressEnter="doRenameSession" @keydown.esc="closeRenamePop" />
+          <div class="rename-pop-actions">
+            <a-button size="small" @click="closeRenamePop">取消</a-button>
+            <a-button size="small" type="primary" :loading="renamingSession" @click="doRenameSession">保存</a-button>
           </div>
-        </a-modal>
+        </div>
 
         <!-- 检索调试弹窗：分步展示检索过程（为什么这么答） -->
         <a-modal v-model:open="debugVisible" title="🔍 检索调试（为什么这么答）" :footer="null" width="780">
@@ -620,6 +623,7 @@ const onGlobalKeydown = e => {
   if (mod && k === 'n') { e.preventDefault(); createNewSession(); return }
   if (mod && k === 'k') { e.preventDefault(); focusSearch(); return }
   if (e.key === 'Escape') {
+    if (renameVisible.value) { closeRenamePop(); return }
     if (loading.value) { stop(); return }
     if (document.activeElement === textareaRef.value) {
       if (text.value) text.value = ''
@@ -642,6 +646,14 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleWindowResize)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('paste', onGlobalPaste)
+  // 重命名浮层监听（watch 卸载时不触发 cleanup，手动移除）
+  if (renameCleanup) {
+    const { onDocDown, onScroll, onResize } = renameCleanup
+    document.removeEventListener('mousedown', onDocDown)
+    document.removeEventListener('scroll', onScroll, true)
+    window.removeEventListener('resize', onResize)
+    renameCleanup = null
+  }
 })
 
 // 初始化：加载会话列表 → 选择最近会话或新建
@@ -804,18 +816,53 @@ const focusSearch = () => {
   if (sidebarWidth.value < SIDEBAR_ICON_THRESHOLD) sidebarWidth.value = 260
   nextTick(() => sidebarRef.value?.focusSearch())
 }
-// 会话重命名（sidebar ··· 菜单触发；弹窗输入后调接口并同步本地标题）
+// 会话重命名：sidebar ··· 菜单触发，在会话条目旁悬浮小卡片（fixed 定位）；输入后调接口并同步本地标题
 const renameVisible = ref(false)
 const renameValue = ref('')
 const renameTarget = ref(null)
 const renameInputRef = ref(null)
 const renamingSession = ref(false)
-const openRenameModal = s => {
+const renamePos = ref(null) // 条目 getBoundingClientRect（悬浮卡片定位锚点；会话条目最多 420px 宽，卡片恒在右侧可视区）
+const RENAME_POP_W = 276
+const renameStyle = computed(() => {
+  const r = renamePos.value
+  if (!r) return {}
+  const left = Math.max(8, Math.min(r.right + 10, window.innerWidth - RENAME_POP_W - 8))
+  const top = Math.max(8, Math.min(r.top, window.innerHeight - 160))
+  return { left: left + 'px', top: top + 'px', width: RENAME_POP_W + 'px' }
+})
+const openRenameModal = (s, rect) => {
   renameTarget.value = s
   renameValue.value = (s && s.title) || ''
+  renamePos.value = rect
   renameVisible.value = true
   nextTick(() => renameInputRef.value?.focus())
 }
+const closeRenamePop = () => {
+  renameVisible.value = false
+  renamePos.value = null
+  renameTarget.value = null
+}
+// 浮层打开期间：点外部关闭、滚动/窗口变化即关（fixed 卡片不随内容滚动，位置失效就收起）
+let renameCleanup = null
+watch(renameVisible, v => {
+  if (renameCleanup) {
+    const { onDocDown, onScroll, onResize } = renameCleanup
+    document.removeEventListener('mousedown', onDocDown)
+    document.removeEventListener('scroll', onScroll, true)
+    window.removeEventListener('resize', onResize)
+    renameCleanup = null
+  }
+  if (v) {
+    const onDocDown = () => closeRenamePop()
+    const onScroll = () => closeRenamePop()
+    const onResize = () => closeRenamePop()
+    document.addEventListener('mousedown', onDocDown)
+    document.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onResize)
+    renameCleanup = { onDocDown, onScroll, onResize }
+  }
+})
 const doRenameSession = async () => {
   const t = renameTarget.value
   const title = renameValue.value.trim()
@@ -826,7 +873,7 @@ const doRenameSession = async () => {
     if (r.success) {
       const target = sessions.value.find(x => x.id === t.id)
       if (target) target.title = title
-      renameVisible.value = false
+      closeRenamePop()
       message.success('已重命名')
     } else message.error(r.msg || '重命名失败')
   } catch (e) { message.error(e.message || '重命名失败') }
@@ -1479,6 +1526,15 @@ const scrollForce = () => nextTick(() => {
   box-shadow: 0 2px 8px rgba(0,0,0,.18);
 }
 .jump-latest:hover { background: #1677ff; }
+/* 会话重命名悬浮小卡片（fixed 钉在会话条目右侧；z-index 高于 antd dropdown 菜单，避免被盖） */
+.rename-pop {
+  position: fixed; z-index: 1080;
+  background: #fff; border: 1px solid #e5e6eb; border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.12);
+  padding: 12px 12px 10px;
+}
+.rename-pop-title { font-size: 13px; font-weight: 600; color: #333; margin-bottom: 8px; }
+.rename-pop-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 /* 输入卡片：无内边框文本在上，工具行在下 */
 .input-box {
   position: relative; flex: 1; min-width: 0; max-width: 860px;

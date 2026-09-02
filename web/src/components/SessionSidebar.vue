@@ -57,6 +57,7 @@
         <div
           v-for="s in sessions"
           :key="s.id"
+          :ref="el => setItemEl(s.id, el)"
           class="session-item"
           :class="{ active: s.id === currentSessionId }"
           @click="batchMode ? toggleSel(s.id) : $emit('select', s.id)"
@@ -165,7 +166,11 @@ const onMenuClick = (s, { key }) => {
     selected.value = new Set([s.id])
   } else if (key === 'fav') emit('toggle-favorite', s)
   else if (key === 'pin') emit('toggle-pin', s)
-  else if (key === 'rename') emit('rename', s)
+  else if (key === 'rename') {
+    // 携带条目屏幕坐标：父组件在条目旁渲染重命名悬浮卡片
+    const el = itemEls.get(s.id)
+    emit('rename', s, el ? el.getBoundingClientRect() : null)
+  }
   else if (key === 'del') {
     Modal.confirm({
       title: '删除会话？',
@@ -238,6 +243,13 @@ const formatTime = (t) => {
   const mm = String(d.getMonth() + 1).padStart(2, '0')
   const dd = String(d.getDate()).padStart(2, '0')
   return `${mm}-${dd}`
+}
+
+// 会话条目 DOM 引用（重命名悬浮卡片定位用；列表增删时自动重建）
+const itemEls = new Map()
+const setItemEl = (id, el) => {
+  if (el) itemEls.set(id, el)
+  else itemEls.delete(id)
 }
 
 // 供父组件快捷键（Cmd/Ctrl+K）聚焦搜索框
