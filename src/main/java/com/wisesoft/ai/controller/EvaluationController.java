@@ -57,6 +57,20 @@ public class EvaluationController {
         return ResultJson.ok(evalService.load());
     }
 
+    /** 最近一次自动体检报告（从未运行返回 null） */
+    @Operation(summary = "最近自动体检报告", description = "定时体检（默认每日）与手动触发共用；含指标、相对上期变化与红黄绿状态")
+    @GetMapping("/last-report")
+    public ResultJson getLastReport() {
+        return ResultJson.ok(evalService.lastAutoReport());
+    }
+
+    /** 手动触发自动体检（同步执行，评估集大时耗时数十秒，前端 loading 等待） */
+    @Operation(summary = "立即自动体检", description = "按当前线上参数跑全量评估集并对比上期，结果写 eval.lastReport")
+    @PostMapping("/run-auto")
+    public ResultJson runAuto() {
+        return ResultJson.ok(evalService.runAutoCheck());
+    }
+
     /** 批量运行评估（多组参数对比） */
     @Operation(summary = "运行评估（参数组对比）")
     @PostMapping("/run")

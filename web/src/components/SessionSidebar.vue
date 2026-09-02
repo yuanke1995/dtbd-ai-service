@@ -31,6 +31,7 @@
       <div class="sidebar-search" v-if="!collapsed">
         <div class="search-row">
           <a-input
+            ref="searchInputRef"
             v-model:value="searchText"
             placeholder="搜索会话"
             allow-clear
@@ -83,6 +84,9 @@
                     <check-square-outlined style="color:#666;margin-right:6px" />批量管理
                   </a-menu-item>
                   <a-menu-divider />
+                  <a-menu-item key="rename">
+                    <edit-outlined style="color:#666;margin-right:6px" />重命名
+                  </a-menu-item>
                   <a-menu-item key="fav">
                     <star-outlined :style="{ color: s.isFavorite ? '#faad14' : '#666', marginRight: '6px' }" />
                     {{ s.isFavorite ? '取消收藏' : '收藏' }}
@@ -140,7 +144,7 @@
 import { ref, computed } from 'vue'
 import { Modal } from 'ant-design-vue'
 import { PlusOutlined, DeleteOutlined, MenuFoldOutlined, MenuUnfoldOutlined, ClearOutlined, CommentOutlined,
-         SearchOutlined, PushpinOutlined, PushpinFilled, StarOutlined, MoreOutlined, CheckSquareOutlined } from '@ant-design/icons-vue'
+         SearchOutlined, PushpinOutlined, PushpinFilled, StarOutlined, MoreOutlined, CheckSquareOutlined, EditOutlined } from '@ant-design/icons-vue'
 
 const props = defineProps({
   sessions: { type: Array, default: () => [] },
@@ -152,15 +156,16 @@ const props = defineProps({
   dragging: { type: Boolean, default: false }    // 拖拽中（禁用宽度过渡动画）
 })
 
-const emit = defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear', 'toggle-pin', 'toggle-favorite', 'search', 'filter-change', 'batch-delete'])
+const emit = defineEmits(['select', 'delete', 'new', 'toggle-collapse', 'clear', 'toggle-pin', 'toggle-favorite', 'search', 'filter-change', 'batch-delete', 'rename'])
 
-// 「···」更多菜单：批量管理进入多选模式（当前会话默认勾选）；收藏/置顶直接派发，删除二次确认
+// 「···」更多菜单：批量管理进入多选模式（当前会话默认勾选）；收藏/置顶/重命名直接派发，删除二次确认
 const onMenuClick = (s, { key }) => {
   if (key === 'batch') {
     batchMode.value = true
     selected.value = new Set([s.id])
   } else if (key === 'fav') emit('toggle-favorite', s)
   else if (key === 'pin') emit('toggle-pin', s)
+  else if (key === 'rename') emit('rename', s)
   else if (key === 'del') {
     Modal.confirm({
       title: '删除会话？',
@@ -234,6 +239,11 @@ const formatTime = (t) => {
   const dd = String(d.getDate()).padStart(2, '0')
   return `${mm}-${dd}`
 }
+
+// 供父组件快捷键（Cmd/Ctrl+K）聚焦搜索框
+const searchInputRef = ref(null)
+const focusSearch = () => searchInputRef.value?.focus()
+defineExpose({ focusSearch })
 </script>
 
 <style scoped>

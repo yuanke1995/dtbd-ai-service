@@ -166,6 +166,10 @@ export const pinSession = (sid, pinned) =>
 export const favoriteSession = (sid, favorite) =>
   request(`/session/${sid}/favorite`, { method: 'PUT', body: JSON.stringify({ favorite }) })
 
+/** 重命名会话 */
+export const renameSessionApi = (sid, title) =>
+  request(`/session/${sid}/rename`, { method: 'PUT', body: JSON.stringify({ title }) })
+
 /** 删除会话（MySQL 软删除 + Redis 清理） */
 export const deleteSessionApi = sid => request(`/session/${sid}`, { method: 'DELETE' })
 
@@ -340,3 +344,9 @@ export const getEvalSet = () => request('/eval/set')
 /** 检索评估：批量参数组对比运行 */
 export const runEvaluation = payload =>
   request('/eval/run', { method: 'POST', body: JSON.stringify(payload) })
+
+/** 检索评估：最近一次自动体检报告（无则 null） */
+export const getEvalLastReport = () => request('/eval/last-report')
+
+/** 检索评估：立即自动体检（按线上参数全量跑，耗时数十秒） */
+export const runEvalAutoCheck = () => request('/eval/run-auto', { method: 'POST', timeout: 300000 })

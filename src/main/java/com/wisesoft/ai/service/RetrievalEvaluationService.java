@@ -472,4 +472,104 @@ public class RetrievalEvaluationService {
     private double round3(double v) {
         return Math.round(v * 1000) / 1000.0;
     }
+
+    // ==================== 自动体检（周期任务 + 看板手动触发共用） ====================
+
+    /**
+     * 用"当前线上参数"跑全量评估集，与上期报告（config 键 eval.lastReport）对比核心指标：
+     * 任一指标相对跌幅超阈值（eval.autoThresholdPct，默认 10%）→ status=decline（看板红黄灯依据）。
+     * 评估集为空/无上期基线时不判退化，只记录现状。结果写回 eval.lastReport 供看板展示。
+     */
+    public synchronized Map<String, Object> runAutoCheck() {
+        long start = System.currentTimeMillis();
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("runTime", now());
+        try {
+            EvalSet set = load();
+            if (set.cases().isEmpty()) {
+                report.put("status", "empty");
+                report.put("caseCount", 0);
+                report.put("message", "评估集为空：先在「检索评估」页生成评估集，自动体检才会生效");
+            } else {
+                // 单组"当前配置"（null 覆盖 = 完全跟随线上参数），固定 k=5/10 控制耗时
+                EvalResult result = run(set.cases(), null, List.of(5, 10));
+                GroupResult group = result.groups().isEmpty() ? null : result.groups().get(0);
+                if (group == null) {
+                    report.put("status", "error");
+                    report.put("message", "体检执行失败：参数组无结果（检索服务异常？）");
+                } else {
+                    Map<String, Double> metrics = group.metrics();
+                    report.put("status", "ok");
+                    report.put("caseCount", group.cases().size());
+                    report.put("metrics", metrics);
+                    Object deprecatedOk = result.deprecatedCheck() == null ? null : result.deprecatedCheck().get("ok");
+                    report.put("deprecatedOk", deprecatedOk == null || Boolean.TRUE.equals(deprecatedOk));
+                    if (!result.timedOutGroups().isEmpty()) report.put("timedOut", result.timedOutGroups());
+
+                    // 与上期对比：同键指标相对变化（%），跌幅超阈值置 decline
+                    Map<String, Object> prev = parseReport(configService.get("eval.lastReport"));
+                    Map<String, Double> prevMetrics = prev == null ? null : castMetrics(prev.get("metrics"));
+                    double thresholdPct = Math.max(1, configService.getDouble("eval.autoThresholdPct", 10.0));
+                    if (prevMetrics == null || prevMetrics.isEmpty()) {
+                        report.put("message", "首期体检完成（暂无上期基线，" + metrics.size() + " 项指标）");
+                    } else {
+                        Map<String, Object> delta = new LinkedHashMap<>();
+                        List<String> declinedItems = new ArrayList<>();
+                        for (Map.Entry<String, Double> e : metrics.entrySet()) {
+                            Double base = prevMetrics.get(e.getKey());
+                            if (base == null || base <= 0) continue;
+                            double rel = (e.getValue() - base) / base * 100.0;
+                            delta.put(e.getKey(), round3(rel));
+                            if (rel < -thresholdPct) {
+                                declinedItems.add(e.getKey() + " -" + round3(Math.abs(rel)) + "%");
+                            }
+                        }
+                        report.put("deltaPct", delta.isEmpty() ? null : delta);
+                        if (!declinedItems.isEmpty()) {
+                            report.put("status", "decline");
+                            report.put("message", "检索质量下滑（较上期）：" + String.join("、", declinedItems));
+                        } else {
+                            report.put("message", "各项指标较上期无显著下滑（阈值 " + (long) thresholdPct + "%）");
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[FAIL-LOUD] 检索评估自动体检失败: {}", e.getMessage());
+            report.put("status", "error");
+            report.put("message", "自动体检执行异常：" + e.getMessage());
+        }
+        report.put("elapsedMs", System.currentTimeMillis() - start);
+        configService.putInternal("eval.lastReport", JSON.toJSONString(report));
+        log.info("[Eval] 自动体检完成: status={}, caseCount={}, elapsed={}ms",
+                report.get("status"), report.get("caseCount"), report.get("elapsedMs"));
+        return report;
+    }
+
+    /** 最近一次自动体检报告（从未跑过返回 null） */
+    public Map<String, Object> lastAutoReport() {
+        return parseReport(configService.get("eval.lastReport"));
+    }
+
+    private Map<String, Object> parseReport(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            return JSON.parseObject(json);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Double> castMetrics(Object obj) {
+        if (!(obj instanceof Map)) return null;
+        Map<String, Double> out = new LinkedHashMap<>();
+        ((Map<String, Object>) obj).forEach((k, v) -> {
+            try {
+                out.put(String.valueOf(k), Double.parseDouble(String.valueOf(v)));
+            } catch (Exception ignored) {
+            }
+        });
+        return out;
+    }
 }

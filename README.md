@@ -29,8 +29,10 @@ ai-doc-assistant/
 │   ├── util/                        # TokenCounter（分语言 token 估算，上下文预算用）
 │   ├── model/ + mapper/ + dto/      # 实体（含 AiDocumentVersion）/ MyBatis-Plus Mapper / 传输对象
 ├── src/main/resources/
+├── config/
+│   └── application-local.yml        # 本地开发私有配置（含密钥/数据目录，.gitignore 忽略；位于 Spring Boot 外部配置目录，不打进构建产物）
+├── src/main/resources/
 │   ├── application.yml              # 配置（关键密钥无默认值：DB_PASSWORD/AI_TRUSTED_TOKEN 缺失 fail-fast）
-│   ├── application-local.yml        # 本地开发私有配置（含数据目录，.gitignore 忽略）
 │   └── schema.sql                   # 建表脚本（启动自动执行，幂等可重复运行）
 ├── data/                            # 运行时生成：files/{docId}/ 源文件 + images/{docId}/ 提取图 + images/chat/ 用户图
 ├── deploy/nginx.conf                # 生产 nginx 参考配置
@@ -79,7 +81,7 @@ export AI_VISION_MODEL=qwen3-vl:2b        # 图片描述/OCR 模型（本地 Oll
 export AI_VISION_BASE_URL=http://localhost:11434  # 视觉地址（不含 /v1，代码自动拼）
 export AI_VISION_THINK=false              # 关闭 qwen3 思考模式（提速且输出稳定）
 export AI_IMAGES_DIR=./data               # 数据落盘目录（跨平台兜底；生产容器内为 /app/data）
-export AI_IMAGES_AUTH_ENABLED=false       # 图片访问鉴权（生产建议 true，HMAC 签名 URL）
+export AI_IMAGES_AUTH_ENABLED=true        # 图片访问鉴权（HMAC 签名 URL；默认已开启，本地开发在 config/application-local.yml 设 false）
 export AI_QUERY_REWRITE_ENABLED=true      # 查询改写开关（默认开启）
 export AI_IMAGE_FILTER_ENABLED=true       # 回答图片相关性校验开关（默认开启）
 export AI_RATELIMIT_ENABLED=true          # 接口限流开关（Redis 固定窗口，按用户/IP；也可设置页改）
@@ -88,7 +90,7 @@ export AI_RATELIMIT_UPLOAD=10             # 上传限频：次/分钟/用户（0
 export LOG_LEVEL_APP=info                 # 应用日志级别
 ```
 
-**本地开发**：无需 export，把真实值直接写入 `src/main/resources/application-local.yml`（私有文件，已加入 .gitignore；**数据目录 `ai-app.images.dir` 也在此配置**，Windows 机器改成 `D:/workspace/dtbd-ai-service/data` 即可，天然区分平台），然后以 `local` profile 启动（application.yml 已默认激活 local）：
+**本地开发**：无需 export，把真实值直接写入项目根 `config/application-local.yml`（私有文件，已加入 .gitignore；Spring Boot 自动从外部 `config/` 目录加载，**不打进构建产物**——密钥不会随 jar 分发；**数据目录 `ai-app.images.dir` 也在此配置**，Windows 机器改成 `D:/workspace/dtbd-ai-service/data` 即可，天然区分平台。该文件同时可关闭图片鉴权 `auth-enabled: false` 保持本地开发便利），然后以 `local` profile 启动（application.yml 已默认激活 local）：
 - IDEA：Run Configuration → Active profiles 填 `local`
 - 命令行：`SPRING_PROFILES_ACTIVE=local mvn spring-boot:run`
 
@@ -127,8 +129,8 @@ Vite 将 `/proxy/**` 代理到 `http://localhost:8090/ai`。环境配置见 `web
 
 1. **文档管理**：上传 `.docx` / `.pdf` / `.xlsx` / `.txt` / `.md` / `.csv`（默认 ≤200MB，可多文件 + **拖拽/粘贴上传**，全页拖拽高亮；上限在设置页调整，物理上限 1GB；**大文件流式解析**不整载内存）→ 异步解析（解析中状态轮询，进度条实时展示：图片识别阶段逐张显示"识别图片 k/total"）→ 生效/弃用/重解析/**批量重解析**/批量操作/命中次数统计；**解析中删除文档立即中断**（线程中断 + 产物自动清理，无孤儿数据）；点击"知识块"可预览该文档的分块与图片（支持**编辑/删除单个知识块**——编辑走 Markdown 工具栏 + 左写右看实时预览 + 图片点选插入 + 未保存关闭提醒，保存后自动重新向量化；**知识块级启停用**——停用块不参与召回；**跨文档全局搜索**——按关键词搜全部知识块）；**版本管理**（每次解析/重解析自动存快照，可查看历史版本并一键回滚）；**结构感知切分**（docx 默认开启：按标题层级开新块、段落边界断块、表格独立成块；**正文只存净内容**，章节路径 `【上下文】章节 > 小节` 独立存储，向量化与检索回答时再拼入上下文，需重解析生效）；**交叉引用识别**（解析时自动扫描块内"详见/参见/见 X 节/《章节名》/XX章节"等引用表达，建立块间引用关系 `c_ai_knowledge_ref`，需重解析生效）
 2. **智能问答**：提问（支持上传图片+问题）→ 混合检索 + 查询改写 + **知识块关联扩散**（命中块自动带出被引用/父章节关联块）→ 流式回答，位置级插入文档原图、[N] 引用角标（点击弹窗看来源全文与图片，扩散块标注"关联引用/父章节上下文"）、末尾相关追问；**回答下方检索状态行**（"搜索 N 个关键词，参考 M 段资料"）展开后逐条列出来源与命中摘要，**点击条目弹原文**（与角标同弹窗）；检索阶段有进度提示（理解问题→检索中→生成回答）；头部"AI 回答可能有误"可点击查看完整免责声明；回答下方操作区（检索调试/重新生成/复制 Markdown/导出 .md/👍👎 反馈）；回答顶部可能展示降级提示（未命中/超时截断/深度思考降级/图片剔除等，调试级提示需设置页开启）；断连自动重试（内联提示）；**语义缓存**：与历史问题高度相似时直接复用回答（秒回）
-3. **会话管理**：侧边栏搜索（标题/内容模糊匹配）、**置顶/收藏**（置顶排最前，收藏 tab 筛选）、拖拽伸缩、删除/清空；**按消息组删除问答**（豆包式：进入多选模式，勾选回答自动勾选同组问题，支持撤销）+ 消息时间戳显示
-4. **数据看板**：统计卡片（问答量/满意率/引用率/无命中率）+ 热门问题/无命中 TOP10 + **知识库缺口管理**（无命中问题一键入库，含向量召回）+ **差评样本回流**（看板还原差评问题与引用块，一键加入检索评估集）
+3. **会话管理**：侧边栏搜索（标题/内容模糊匹配）、**置顶/收藏/重命名**（置顶排最前，收藏 tab 筛选）、拖拽伸缩、删除/清空；**按消息组删除问答**（豆包式：进入多选模式，勾选回答自动勾选同组问题，支持撤销）+ 消息时间戳显示；**快捷键**：Esc 停止生成/清空输入、⌘/Ctrl+N 新建会话、⌘/Ctrl+K 聚焦会话搜索；输入区支持**拖入/粘贴发图**（与文档页一致）；生成中**上翻回看历史不被打断**（暂停自动滚动，可一键回底）
+4. **数据看板**：统计卡片（问答量/满意率/引用率/无命中率，加载骨架不闪 0）+ 热门问题/无命中 TOP10 + **知识库缺口管理**（无命中问题一键入库，含向量召回）+ **差评样本回流**（看板还原差评问题与引用块，一键加入检索评估集）+ **检索质量自动体检**（定时按线上参数跑评估集并与上期对比，指标下滑即红黄灯预警，可手动触发）
 5. **系统设置**：**问答/视觉/向量三类模型均可跨厂商热切换**（网关地址/API Key/模型名，API Key 以 RSA 加密入库）+ 温度/System Prompt（角色段）/检索权重与行为参数/重排区间/解析并发与结构切分/上下文参数，**保存即生效**（DB 存储，折叠分组展示，顶部**锚点导航**快速定位 + 滚动高亮，参数带 `?` 说明）；其中**向量模型切换会先探测新配置**（不可达/维度非法一律拒绝保存），通过后自动全量重嵌入，面板内展示进度/维度变化/耗时/索引对账并可手动重试；问答输入框左侧深度思考开关（图标按钮，localStorage 记忆）
 6. **检索评估**（顶栏入口）：评估集从历史问答引用回放生成（问题→期望知识块，差评案例自动补充）→ **一键体检**（当前配置跑全量评估，红绿灯结论 + 落空/低分题目清单，零参数门槛）→ **对比调优**（+ 添加参数组选预设：关键词优先/向量优先/向量+重排/多路模拟，或自定义；空参数框灰色占位回显当前值）→ 结果表 **recall@k/MRR/命中率** 相对基线 ↑↓ 对比 + 自动结论，好的组**一键「应用此组」直接写入配置生效**（不污染评估，应用前可看逐问题明细）
 
@@ -293,7 +295,7 @@ ai-app:
     max-width: 1280                         # 识别用压缩图最长边（qwen3-vl 最佳清晰度档，视觉 token 约 1600-2500；展示用原图不受限）
     quality: 0.9                            # JPEG 压缩质量（识别用；带透明通道自动转 PNG）
     url-prefix: /ai/images
-    auth-enabled: ${AI_IMAGES_AUTH_ENABLED:false}
+    auth-enabled: ${AI_IMAGES_AUTH_ENABLED:true}   # 图片访问鉴权默认开启（防漏配裸奔；本地开发在 config/application-local.yml 设 false）
     auth-expire-seconds: 3600
     image-filter:                          # 回答 [图片N] 相关性校验（防 LLM 错配）
       enabled: ${AI_IMAGE_FILTER_ENABLED:true}

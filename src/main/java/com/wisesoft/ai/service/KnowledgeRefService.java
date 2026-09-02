@@ -41,7 +41,7 @@ public class KnowledgeRefService {
     private final ConfigService configService;
 
     /** 引用表达（记录一次命中：编号 或 章节名；loose=false 的提及类只做精确匹配，控制误报） */
-    private record Candidate(String refText, String num, String name, boolean loose) {
+    record Candidate(String refText, String num, String name, boolean loose) {
     }
 
     /** 扩散结果：original=原始命中块，extra=扩散块（出边→入边→父块，按此顺序），origins=块→来源标注 */
@@ -158,8 +158,13 @@ public class KnowledgeRefService {
     /** 单块引用条数上限（提及类易多，防 ref 膨胀；显式引用在前、提及在后，超出丢弃） */
     private static final int MAX_REFS_PER_BLOCK = 8;
 
-    /** 扫描块 content，提取候选引用（显式引用 + 无动词提及；同 from+to 去重） */
+    /** 扫描块 content，提取候选引用（显式引用 + 无动词提及；同 from+to 去重）。
+     *  mentionEnabled 由调用方读取配置（retrieval.refDetectMention），无参桥接实例方法便于单测直接验证纯逻辑 */
     List<Candidate> detectRefs(String content) {
+        return detectRefs0(content, configService.getBoolean("retrieval.refDetectMention"));
+    }
+
+    static List<Candidate> detectRefs0(String content, boolean mentionEnabled) {
         List<Candidate> list = new ArrayList<>();
         if (content == null || content.isBlank()) return list;
         Set<String> seen = new HashSet<>();
@@ -196,8 +201,8 @@ public class KnowledgeRefService {
             }
         }
 
-        // —— 无动词提及（retrieval.refDetectMention 开关，默认开；仅精确匹配防误报） ——
-        if (configService.getBoolean("retrieval.refDetectMention")) {
+        // —— 无动词提及（开关默认开；仅精确匹配防误报） ——
+        if (mentionEnabled) {
             Matcher m5 = REF_NUM_MENTION.matcher(content);
             while (m5.find()) {
                 String num = m5.group(1);

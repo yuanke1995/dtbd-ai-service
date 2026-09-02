@@ -2,6 +2,7 @@
   <div class="chat-layout">
     <!-- 左侧会话列表 -->
     <SessionSidebar
+      ref="sidebarRef"
       :sessions="visibleSessions"
       :current-session-id="currentSessionId"
       :collapsed="sidebarCollapsed"
@@ -19,6 +20,7 @@
       @filter-change="onFilterChange"
       @toggle-pin="handleTogglePin"
       @toggle-favorite="handleToggleFavorite"
+      @rename="openRenameModal"
     />
     <!-- 侧边栏拖拽手柄（左右伸缩） -->
     <div class="sidebar-resizer" title="拖动调整宽度" @mousedown="onSidebarDrag" />
@@ -31,7 +33,7 @@
           <span class="disclaimer" title="查看免责声明" @click="disclaimerVisible = true"><info-circle-outlined style="margin-right:4px" />AI 回答可能有误，重要信息请核实</span>
         </div>
 
-        <div class="messages" ref="box" @click="openPreview">
+        <div class="messages" ref="box" @click="openPreview" @scroll="onMessagesScroll">
           <div v-if="messages.length === 0" class="welcome">
             <robot-outlined style="font-size:48px;color:#1677ff" />
             <h2>你好！我是小报 👋</h2>
@@ -153,6 +155,8 @@
               </div>
             </div>
           </div>
+          <!-- 生成中用户上翻回看历史时自动滚动暂停，此按钮一键回到底部继续跟随 -->
+          <div v-if="!stickToBottom && messages.length" class="jump-latest" @click.stop="scrollForce">↓ 回到底部</div>
         </div>
 
         <!-- 引用来源详情弹窗（灯箱打开时禁用 ESC 关闭：ESC 优先关灯箱；宽度按内容自适应 + 右下角可拖拽伸缩） -->
@@ -181,6 +185,15 @@
         <!-- 免责声明（点击头部提示打开） -->
         <a-modal v-model:open="disclaimerVisible" title="免责声明" :footer="null" width="560">
           <div class="md disclaimer-body" v-html="renderMd(DISCLAIMER_TEXT, [])"></div>
+        </a-modal>
+
+        <!-- 会话重命名 -->
+        <a-modal v-model:open="renameVisible" title="重命名会话" :footer="null" width="400" destroy-on-close>
+          <div style="display:flex;gap:8px">
+            <a-input ref="renameInputRef" v-model:value="renameValue" :maxlength="50" show-count
+                     placeholder="输入新的会话标题" @pressEnter="doRenameSession" />
+            <a-button type="primary" :loading="renamingSession" @click="doRenameSession">保存</a-button>
+          </div>
         </a-modal>
 
         <!-- 检索调试弹窗：分步展示检索过程（为什么这么答） -->
@@ -243,7 +256,10 @@
             删除
           </a-button>
         </div>
-        <div v-if="!selectMode" class="input">
+        <div v-if="!selectMode" class="input" @dragenter.prevent="onDragEnter" @dragover.prevent
+             @dragleave.prevent="onDragLeave" @drop.prevent="onDropImages">
+          <!-- 拖入图片提示遮罩 -->
+          <div v-if="dragOver" class="drop-overlay">松开以添加图片</div>
           <!-- 待发送图片预览（点击可放大查看） -->
           <div v-if="pendingImages.length" class="pending-imgs">
             <div v-for="(p, pi) in pendingImages" :key="pi" class="pending-img">
@@ -286,7 +302,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch, h } from 'vue'
 import { message, notification } from 'ant-design-vue'
 import { RobotOutlined, SendOutlined, PauseCircleOutlined, LikeOutlined, DislikeOutlined, PictureOutlined, ReloadOutlined, EditOutlined, BugOutlined, SyncOutlined, CopyOutlined, DownloadOutlined, InfoCircleOutlined, QuestionCircleOutlined, DownOutlined, BulbOutlined, LoadingOutlined, MoreOutlined, DeleteOutlined, ArrowUpOutlined } from '@ant-design/icons-vue'
-import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, batchDeleteSessionsApi, pinSession, favoriteSession, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval, getSuggested, deleteMessageGroup, undoDeleteMessageGroup, getConfig } from '../api'
+import { sendQuestion, newSession, getHistory, listSessions, deleteSessionApi, batchDeleteSessionsApi, pinSession, favoriteSession, renameSessionApi, submitFeedback as apiSubmitFeedback, getKnowledgeDetail, clearAllSessionsApi, debugRetrieval, getSuggested, deleteMessageGroup, undoDeleteMessageGroup, getConfig } from '../api'
 import SessionSidebar from '../components/SessionSidebar.vue'
 import { renderMd, resolveImg, onImgError, copyCode, prepKnowledgeContent } from '../utils/markdown'
 
@@ -324,6 +340,14 @@ const currentSessionTitle = computed(() => {
 })
 const messages = ref([])
 const box = ref(null)
+// 自动滚动跟随：生成中用户上翻即暂停（回看历史不被拽走），回到底部附近自动恢复
+const stickToBottom = ref(true)
+const AUTO_SCROLL_MARGIN = 80
+const onMessagesScroll = () => {
+  const el = box.value
+  if (!el) return
+  stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < AUTO_SCROLL_MARGIN
+}
 // 灯箱多图状态：previewList（resolveImg 后 URL）+ previewIndex；previewUrl 为 computed
 const previewList = ref([])
 const previewIndex = ref(0)
@@ -586,6 +610,26 @@ watch(previewUrl, v => {
 })
 onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
+// 全局快捷键：Esc 停止生成（未生成则清空输入框）、Cmd/Ctrl+N 新建会话、Cmd/Ctrl+K 聚焦会话搜索；
+// 输入法组合键（isComposing）不拦截；灯箱打开时 ESC/方向键交由灯箱处理
+const onGlobalKeydown = e => {
+  if (e.isComposing || e.keyCode === 229) return
+  if (previewUrl.value && ['Escape', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return
+  const mod = e.metaKey || e.ctrlKey
+  const k = e.key.toLowerCase()
+  if (mod && k === 'n') { e.preventDefault(); createNewSession(); return }
+  if (mod && k === 'k') { e.preventDefault(); focusSearch(); return }
+  if (e.key === 'Escape') {
+    if (loading.value) { stop(); return }
+    if (document.activeElement === textareaRef.value) {
+      if (text.value) text.value = ''
+      else textareaRef.value?.blur()
+    }
+  }
+}
+// 粘贴发图（微信截图等 Ctrl+V；纯文本粘贴不拦截）
+const onGlobalPaste = e => onPasteImages(e)
+
 // 窄窗口（<640px）自动折叠侧边栏：保证浏览器窗口可以任意缩小，不出现横向溢出
 const handleWindowResize = () => {
   if (window.innerWidth < 640 && sidebarWidth.value >= SIDEBAR_ICON_THRESHOLD) {
@@ -594,7 +638,11 @@ const handleWindowResize = () => {
   }
 }
 window.addEventListener('resize', handleWindowResize)
-onUnmounted(() => window.removeEventListener('resize', handleWindowResize))
+onUnmounted(() => {
+  window.removeEventListener('resize', handleWindowResize)
+  window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('paste', onGlobalPaste)
+})
 
 // 初始化：加载会话列表 → 选择最近会话或新建
 onMounted(async () => {
@@ -606,6 +654,9 @@ onMounted(async () => {
     await createNewSession()
   }
   focusInput()
+  // 全局快捷键与粘贴发图（组件卸载时移除）
+  window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('paste', onGlobalPaste)
   // 推荐问题池：DB 配置优先（失败静默回退内置默认）
   getSuggested().then(r => {
     if (r.success && Array.isArray(r.data) && r.data.length) tips.value = r.data
@@ -648,7 +699,8 @@ async function switchSession(sid) {
     const r = await getHistory(sid)
     if (r.success && Array.isArray(r.data)) {
       messages.value = r.data
-        .filter(m => m && m.content)
+        // 纯图片用户提问 content 为空：只过滤空壳（无正文也无图），不能只按 content 过滤否则刷新后图片提问消失
+        .filter(m => m && (m.content || (Array.isArray(m.images) && m.images.length)))
         .map(m => ({
           role: m.role === 'user' ? 'user' : 'ai',
           content: String(m.content || ''),
@@ -661,7 +713,8 @@ async function switchSession(sid) {
           time: m.createTime ? new Date(m.createTime).getTime() : null,
           retrieved: (() => { try { return m.retrieved ? JSON.parse(m.retrieved) : null } catch (e) { return null } })()
         }))
-      scroll()
+      // 切换会话回到底部（历史加载完成）
+      scrollForce()
     } else {
       messages.value = []
     }
@@ -745,6 +798,70 @@ async function createNewSession() {
 
 // 聚焦输入框（新建/切换会话后调用；输入区固定在页面底部，nextTick 确保渲染完成）
 const focusInput = () => nextTick(() => textareaRef.value?.focus())
+// 会话搜索框（Cmd/Ctrl+K 快捷键；折叠态先展开再聚焦）
+const sidebarRef = ref(null)
+const focusSearch = () => {
+  if (sidebarWidth.value < SIDEBAR_ICON_THRESHOLD) sidebarWidth.value = 260
+  nextTick(() => sidebarRef.value?.focusSearch())
+}
+// 会话重命名（sidebar ··· 菜单触发；弹窗输入后调接口并同步本地标题）
+const renameVisible = ref(false)
+const renameValue = ref('')
+const renameTarget = ref(null)
+const renameInputRef = ref(null)
+const renamingSession = ref(false)
+const openRenameModal = s => {
+  renameTarget.value = s
+  renameValue.value = (s && s.title) || ''
+  renameVisible.value = true
+  nextTick(() => renameInputRef.value?.focus())
+}
+const doRenameSession = async () => {
+  const t = renameTarget.value
+  const title = renameValue.value.trim()
+  if (!t || !title) { message.warning('标题不能为空'); return }
+  renamingSession.value = true
+  try {
+    const r = await renameSessionApi(t.id, title)
+    if (r.success) {
+      const target = sessions.value.find(x => x.id === t.id)
+      if (target) target.title = title
+      renameVisible.value = false
+      message.success('已重命名')
+    } else message.error(r.msg || '重命名失败')
+  } catch (e) { message.error(e.message || '重命名失败') }
+  finally { renamingSession.value = false }
+}
+
+// 聊天区拖入/粘贴发图（与文档页能力对齐；纯文本粘贴不受影响）
+const dragOver = ref(false)
+let dragDepth = 0
+const onDragEnter = e => {
+  if (!loading.value && Array.from(e.dataTransfer?.types || []).includes('Files')) {
+    dragDepth++
+    dragOver.value = true
+  }
+}
+const onDragLeave = () => { if (--dragDepth <= 0) { dragDepth = 0; dragOver.value = false } }
+const onDropImages = e => {
+  dragDepth = 0
+  dragOver.value = false
+  if (loading.value) return
+  addImageFiles(Array.from(e.dataTransfer?.files || []))
+}
+const onPasteImages = e => {
+  const imgs = Array.from(e.clipboardData?.files || []).filter(f => f.type.startsWith('image/'))
+  if (!imgs.length || loading.value) return
+  e.preventDefault() // 阻止图片被当作文本粘进输入框
+  addImageFiles(imgs)
+}
+const addImageFiles = files => {
+  for (const f of files) {
+    if (pendingImages.value.length >= 5) { message.warning('最多上传 5 张图片'); break }
+    if (!f.type.startsWith('image/')) continue
+    compressImage(f).then(dataUrl => pendingImages.value.push({ dataUrl })).catch(() => message.error(`图片处理失败: ${f.name}`))
+  }
+}
 
 // 删除会话
 async function handleDeleteSession(sid) {
@@ -812,11 +929,7 @@ const pickImages = () => { if (pendingImages.value.length >= 5) { message.warnin
 const onFilesChange = e => {
   const files = Array.from(e.target.files || [])
   e.target.value = ''
-  for (const f of files) {
-    if (pendingImages.value.length >= 5) { message.warning('最多上传 5 张图片'); break }
-    if (!f.type.startsWith('image/')) { message.warning(`跳过非图片文件: ${f.name}`); continue }
-    compressImage(f).then(dataUrl => pendingImages.value.push({ dataUrl })).catch(() => message.error(`图片处理失败: ${f.name}`))
-  }
+  addImageFiles(files)
 }
 const compressImage = file => new Promise((resolve, reject) => {
   const img = new Image()
@@ -902,7 +1015,7 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1,
   }
   loading.value = true
   // 发送后立即滚到底部：不等第一个 token（深度思考/图片处理时 AI 迟迟不出字，视角也要先到最下看到 loading 气泡）
-  scroll()
+  scrollForce()
   abortController.value = new AbortController()
   let full = ''
   let gotToken = false
@@ -974,7 +1087,7 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1,
       messages.value[idx].degradations = degradations
       loading.value = false
       abortController.value = null
-      scroll()
+      scrollForce()
       // 首条消息后刷新会话列表（标题已由后端生成）
       if (isFirstMessage) loadSessions()
     },
@@ -1010,7 +1123,7 @@ const streamAnswer = (question, imgs, replaceIdx, isFirstMessage, autoRetry = 1,
       loading.value = false
       abortController.value = null
       message.error(e)
-      scroll()
+      scrollForce()
     }
   })
 }
@@ -1248,7 +1361,19 @@ const ask = q => { text.value = q; nextTick(send) }
 // Markdown 渲染统一走公共模块（utils/markdown.js）：renderMd / resolveImg / onImgError / copyCode / prepKnowledgeContent
 // 交互事件（角标→来源弹窗、图片→灯箱、代码复制）由 openPreview 事件委托处理
 
-const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.value.scrollHeight })
+// 贴底才自动滚动：生成期间用户上翻回看历史不被拽走；scrollForce 强制回底（发送/切换/完成/失败时用）
+const scroll = () => nextTick(() => {
+  if (box.value && stickToBottom.value) {
+    box.value.scrollTop = box.value.scrollHeight
+    stickToBottom.value = true
+  }
+})
+const scrollForce = () => nextTick(() => {
+  if (box.value) {
+    box.value.scrollTop = box.value.scrollHeight
+    stickToBottom.value = true
+  }
+})
 </script>
 
 <style scoped>
@@ -1337,7 +1462,23 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
    p 为 v-html 动态内容不带 scoped 属性，需 :deep 穿透） */
 .bubble.user :deep(.md > p) { margin: 0; }
 .bubble.ai { background: transparent; padding: 0; }
-.input { padding: 12px 48px 16px; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.input { position: relative; padding: 12px 48px 16px; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+/* 拖入图片提示遮罩（仅接收文件拖入；文本拖入不受影响） */
+.drop-overlay {
+  position: absolute; inset: 4px 48px 8px; z-index: 6; pointer-events: none;
+  background: rgba(22,119,255,.06); border: 2px dashed #1677ff; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  color: #1677ff; font-size: 15px; font-weight: 500; letter-spacing: 1px;
+}
+/* 回到底部（生成中上翻回看历史时暂停自动滚动，按钮一键恢复跟随） */
+.jump-latest {
+  position: sticky; bottom: 12px; z-index: 5;
+  width: fit-content; margin: 0 auto 4px;
+  background: rgba(22,119,255,.92); color: #fff; font-size: 12px;
+  padding: 4px 16px; border-radius: 999px; cursor: pointer; user-select: none;
+  box-shadow: 0 2px 8px rgba(0,0,0,.18);
+}
+.jump-latest:hover { background: #1677ff; }
 /* 输入卡片：无内边框文本在上，工具行在下 */
 .input-box {
   position: relative; flex: 1; min-width: 0; max-width: 860px;
@@ -1511,7 +1652,6 @@ const scroll = () => nextTick(() => { if (box.value) box.value.scrollTop = box.v
 .rt-ref-tag { color: #1677ff; margin-right: 4px; }
 .rt-snip { color: #bbb; margin-top: 2px; }
 /* 检索进度提示（首 token 前的阶段状态：理解问题/检索资料/生成回答） */
-.stage-hint
 .stage-hint { margin-top: 6px; font-size: 13px; color: #1677ff; display: flex; align-items: center; gap: 6px; }
 /* 回答反馈（默认隐藏，hover 消息块时悬浮显示；保留整行可 hover 避免移过去按钮消失） */
 .fb-row {

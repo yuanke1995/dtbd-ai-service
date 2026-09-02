@@ -39,14 +39,18 @@ public class ImageUrlSigner {
     /**
      * 为图片路径生成带签名与过期时间的 URL（原路径追加 ?expire=&sig=）
      * 例如 /ai/images/{docId}/0.png → /ai/images/{docId}/0.png?expire=1785...&sig=xxxx
+     * 签名基准为去掉 query 的路径（与拦截器 request.getRequestURI() 一致）：
+     * 原 URL 若自带参数也能通过鉴权，否则签出的 URL 会被拦截器判 401
      */
     public String signUrl(String url) {
         if (!isEnabled()) {
             return url;
         }
         long expire = Instant.now().getEpochSecond() + properties.getImages().getAuthExpireSeconds();
-        String sig = sign(url, expire);
-        return url + (url.contains("?") ? "&" : "?") + "expire=" + expire + "&sig=" + sig;
+        int q = url == null ? -1 : url.indexOf('?');
+        String sigBase = q > 0 ? url.substring(0, q) : url;
+        String sig = sign(sigBase, expire);
+        return url + (q > 0 ? "&" : "?") + "expire=" + expire + "&sig=" + sig;
     }
 
     /**
