@@ -115,13 +115,13 @@
                   <a-tooltip title="复制" placement="top">
                     <button class="act-icon-btn" @click="copyAnswer(i)"><copy-outlined /></button>
                   </a-tooltip>
-                  <a-tooltip title="有帮助" placement="top">
-                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 1, 'fb-locked': m.fb === 0 }"
-                            @click="openFeedback(m, 1)"><like-outlined /></button>
+                  <a-tooltip :title="m.fb != null ? '已评价' : '有帮助'" placement="top">
+                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 1 }"
+                            :disabled="m.fb != null" @click="openFeedback(m, 1)"><like-outlined /></button>
                   </a-tooltip>
-                  <a-tooltip title="没帮助" placement="top">
-                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 0, 'fb-locked': m.fb === 1 }"
-                            @click="openFeedback(m, 0)"><dislike-outlined /></button>
+                  <a-tooltip :title="m.fb != null ? '已评价' : '没帮助'" placement="top">
+                    <button class="act-icon-btn" :class="{ 'fb-active': m.fb === 0 }"
+                            :disabled="m.fb != null" @click="openFeedback(m, 0)"><dislike-outlined /></button>
                   </a-tooltip>
                   <a-tooltip title="重新生成" placement="top">
                     <button class="act-icon-btn" :disabled="loading" @click="regenerate(i)"><reload-outlined /></button>
@@ -1701,9 +1701,7 @@ const scrollForce = () => nextTick(() => {
 .act-icon-btn.act-danger:hover:not(:disabled) { color: #ff4d4f; background: rgba(255,77,79,.08); }
 .act-icon-btn:disabled { cursor: not-allowed; opacity: .4; }
 .act-icon-btn.fb-active { color: #1677ff; }
-/* 反馈单选锁定：已评价另一项时置灰（点击仍会提示原因，不静默） */
-.act-icon-btn.fb-locked { opacity: .3; cursor: not-allowed; }
-.act-icon-btn.fb-locked:hover { color: #8c8c8c; background: transparent; }
+/* 反馈已评价：按钮整体禁用（act-icon-btn:disabled 已置灰），不能再点任何一项 */
 /* 检索状态行（回答下方合并区）：概览行 + 展开的检索词/来源条目，条目点击弹原文（平替原引用 chips） */
 .retrieval-merged { margin-top: 8px; width: 100%; }
 .retrieval-line { font-size: 12px; color: #999; user-select: none; cursor: pointer; }
