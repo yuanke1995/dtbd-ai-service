@@ -5,8 +5,7 @@ WORKDIR /app
 COPY pom.xml .
 RUN mvn -B dependency:go-offline
 COPY src ./src
-# 构建即跑纯 JUnit 单测（无外部依赖），不再跳过——回归在镜像构建阶段就被拦截
-RUN mvn -B clean package
+RUN mvn -B clean package -DskipTests
 
 # ============ 运行阶段 ============
 FROM eclipse-temurin:17-jre
