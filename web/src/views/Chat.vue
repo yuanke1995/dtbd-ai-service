@@ -190,9 +190,11 @@
         <!-- 会话重命名：条目旁悬浮小卡片（fixed 定位在会话条目右侧；回车保存，ESC/点外部/滚动即关） -->
         <div v-if="renameVisible" class="rename-pop" :style="renameStyle" @mousedown.stop>
           <div class="rename-pop-title">重命名会话</div>
-          <a-input ref="renameInputRef" v-model:value="renameValue" :maxlength="50" show-count
-                   placeholder="输入新的会话标题" size="small"
-                   @pressEnter="doRenameSession" @keydown.esc="closeRenamePop" />
+          <a-textarea ref="renameInputRef" v-model:value="renameValue" :maxlength="50" show-count
+                      placeholder="输入新的会话标题" size="small"
+                      :auto-size="{ minRows: 2, maxRows: 4 }"
+                      @keydown.enter.exact.prevent="doRenameSession"
+                      @keydown.esc="closeRenamePop" />
           <div class="rename-pop-actions">
             <a-button size="small" @click="closeRenamePop">取消</a-button>
             <a-button size="small" type="primary" :loading="renamingSession" @click="doRenameSession">保存</a-button>
