@@ -2,6 +2,8 @@ package com.wisesoft.ai.schedule;
 
 import com.wisesoft.ai.service.ConfigService;
 import com.wisesoft.ai.service.KeywordIndexService;
+import com.wisesoft.ai.service.RetrievalEvaluationService;
+import com.wisesoft.ai.service.UserImageService;
 import com.wisesoft.ai.thread.ThreadPoolManager;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -40,6 +42,8 @@ public class ScheduleCenter {
     private final List<PeriodicTask> tasks = new ArrayList<>();
     private final ConfigService configService;
     private final KeywordIndexService keywordIndexService;
+    private final UserImageService userImageService;
+    private final RetrievalEvaluationService evalService;
 
     /** 仅负责计时（daemon，随 JVM 退出），任务体都在 ThreadPoolManager 里跑 */
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -48,9 +52,12 @@ public class ScheduleCenter {
         return t;
     });
 
-    public ScheduleCenter(ConfigService configService, KeywordIndexService keywordIndexService) {
+    public ScheduleCenter(ConfigService configService, KeywordIndexService keywordIndexService,
+                          UserImageService userImageService, RetrievalEvaluationService evalService) {
         this.configService = configService;
         this.keywordIndexService = keywordIndexService;
+        this.userImageService = userImageService;
+        this.evalService = evalService;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -61,6 +68,17 @@ public class ScheduleCenter {
                 () -> configService.getInt("keyword.reconcileIntervalMs", 3_600_000),
                 () -> configService.getBoolean("keyword.reconcileOnStartup"),
                 () -> keywordIndexService.reconcile());
+        // 聊天图片目录清理：防止 data/images/chat 磁盘缓慢泄漏（保留期 images.chatRetentionMillis，默认 7 天）
+        register("聊天图片目录清理",
+                () -> configService.getInt("images.chatCleanupIntervalMs", 86_400_000),
+                () -> false,
+                () -> userImageService.cleanupChatImages(configService.getLong("images.chatRetentionMillis", 7L * 24 * 3600 * 1000)));
+        // 检索质量自动体检：按线上参数跑评估集并与上期对比（间隔 eval.autoIntervalMs，默认每日；≤0 停用）。
+        // 评估集为空自动跳过并记录（生成评估集后无需重启即生效）；下滑结论落在 eval.lastReport 供看板红绿灯
+        register("检索评估自动体检",
+                () -> configService.getInt("eval.autoIntervalMs", 86_400_000),
+                () -> false,
+                () -> evalService.runAutoCheck());
         // 配置缓存兜底刷新：Redis 订阅断线期间错过的变更由周期全量重读补齐
         register("配置缓存兜底刷新",
                 () -> 5 * 60 * 1000,

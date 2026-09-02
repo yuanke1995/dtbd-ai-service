@@ -8,7 +8,7 @@ target/
 .DS_Store
 # 运行时产物与本地敏感配置
 data/
-src/main/resources/application-local.yml
+config/application-local.yml
 .env
 .env.local
 /.workbuddy/

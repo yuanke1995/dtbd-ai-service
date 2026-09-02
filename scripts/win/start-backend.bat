@@ -10,15 +10,16 @@ set ROOT=%~dp0..\..
 set JAR=%ROOT%\target\ai-doc-assistant.jar
 
 if not exist "%JAR%" (
-    echo JAR not found. Build first:  mvn package -DskipTests
+    echo JAR not found. Build first:  mvn package
     pause
     exit /b 1
 )
 
-REM ---- edit these two lines (no quotes) ----
-set DB_PASSWORD=OceanBase_123#
-set AI_TRUSTED_TOKEN=ai-doc-internal-token
-REM -----------------------------------------
+REM ---- 必填：填你的实际值（与 IDEA run config / 平台网关一致；不要提交真实值）----
+REM 留空 = 后端启动即 fail-fast（DB_PASSWORD 缺失），不会用默认密钥兜底
+set DB_PASSWORD=
+set AI_TRUSTED_TOKEN=
+REM -----------------------------------------------------------------------------
 
 REM ---- optional overrides (uncomment to change) ----
 REM set REDIS_PORT=6380

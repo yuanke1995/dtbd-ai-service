@@ -679,8 +679,21 @@ public class DocxParser implements DocumentParser {
             while ((entry = zis.getNextEntry()) != null) {
                 if (!"word/styles.xml".equals(entry.getName())) continue;
                 byte[] xml = zis.readAllBytes();
-                org.w3c.dom.Document d = javax.xml.parsers.DocumentBuilderFactory.newInstance()
-                        .newDocumentBuilder().parse(new ByteArrayInputStream(xml));
+                // 防 XXE：styles.xml 来自上传文件，禁用 DOCTYPE 与外部实体（恶意 docx 可借实体读取/探测内网）
+                javax.xml.parsers.DocumentBuilderFactory dbf = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+                try {
+                    dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+                    dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+                    dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+                    dbf.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+                } catch (javax.xml.parsers.ParserConfigurationException ignored) {
+                    // 上述特性不可用时由下方兜底开关再拦一层（老 JDK/自定义实现）
+                    dbf.setXIncludeAware(false);
+                    dbf.setExpandEntityReferences(false);
+                }
+                dbf.setXIncludeAware(false);
+                dbf.setExpandEntityReferences(false);
+                org.w3c.dom.Document d = dbf.newDocumentBuilder().parse(new ByteArrayInputStream(xml));
                 org.w3c.dom.NodeList styleNodes = d.getElementsByTagName("w:style");
                 for (int i = 0; i < styleNodes.getLength(); i++) {
                     org.w3c.dom.Element se = (org.w3c.dom.Element) styleNodes.item(i);

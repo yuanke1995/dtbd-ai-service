@@ -1097,7 +1097,13 @@ public class DocumentService {
     }
 
     /**
-     * 回滚到指定版本：物理清空现有知识块 → 按快照原 id 重建 → 重新向量化
+     * 回滚到指定版本：先全量向量化快照内容（用最终 id 直接写入：与当前行同 id 的块自动覆盖旧向量、快照新增 id 落新向量），
+     * 嵌入全部成功后再做行级切换（仅删除不在快照中的旧向量与旧行，按快照原 id 重建行 + 关键词索引）。
+     * <p>
+     * 相比"先物理清空再重建"：嵌入（外部模型调用，失败主因）失败时当前内容分毫未动，并按现存量行恢复向量；
+     * 切换段全部为本地幂等操作，即使失败重试即可，不再出现"回滚到一半把当前可用内容毁掉"。
+     * 已知边界：嵌入阶段同 id 向量已被快照内容覆盖，切换完成前对该文档的并发检索可能短暂命中快照语义
+     * （行内容仍是旧版本），窗口仅限本方法执行期间。
      */
     public void rollback(String docId, int version) {
         AiDocument doc = documentMapper.selectById(docId);
@@ -1116,12 +1122,7 @@ public class DocumentService {
             throw new BizException("目标版本无知识块数据");
         }
 
-        // 1. 物理清空现有知识块 + 向量（释放主键，允许按原 id 重建）
-        deleteVectorsAndKnowledge(docId);
-        knowledgeMapper.physicalDeleteByDocId(docId);
-        keywordIndexService.deleteByDoc(docId); // 关键词索引同步：清空该文档旧块（best-effort）
-
-        // 2. 按快照重建（复用原 id 保持历史引用可溯源）
+        // 1. 构建快照块（仅内存，不落库不动向量；复用原 id 保持历史引用可溯源）
         List<org.springframework.ai.document.Document> aiDocs = new ArrayList<>();
         List<AiKnowledge> rebuilt = new ArrayList<>();
         int idx = 0;
@@ -1144,9 +1145,7 @@ public class DocumentService {
             k.setImages(imagesObj == null ? null : JSON.toJSONString(imagesObj));
             k.setChunkIndex(idx++);
             k.setContentHash(contentHash(title, titlePath, content, imgList));
-            knowledgeMapper.insert(k);
-            k.setVectorId(k.getId());
-            knowledgeMapper.updateById(k);
+            k.setVectorId(k.getId()); // 向量 id 与行 id 恒同（与 embedAndStore 语义一致）
 
             Map<String, Object> metadata = new HashMap<>();
             metadata.put("docId", docId);
@@ -1159,13 +1158,16 @@ public class DocumentService {
             rebuilt.add(k);
         }
 
-        // 3. 分批向量化（失败批重试一次；仍失败则记录，最终不谎报回滚成功）
-        int failedBatches = 0;
+        // 2. 先向量化（最终 id 直接写入）。任一批重试一次后仍失败 → 恢复原向量并抛错，当前内容保持可用
         if (!aiDocs.isEmpty()) {
+            List<AiKnowledge> currentRows = knowledgeMapper.selectList(
+                    new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+            java.util.Set<String> written = new java.util.HashSet<>();
             int batchSize = 10;
             for (int i = 0; i < aiDocs.size(); i += batchSize) {
                 int end = Math.min(i + batchSize, aiDocs.size());
                 List<org.springframework.ai.document.Document> batch = aiDocs.subList(i, end);
+                batch.forEach(d -> written.add(d.getId()));
                 try {
                     vectorStore.add(batch);
                 } catch (Exception e) {
@@ -1173,26 +1175,37 @@ public class DocumentService {
                     try {
                         vectorStore.add(batch);
                     } catch (Exception e2) {
-                        failedBatches++;
                         log.error("[{}] 回滚向量化重试仍失败 {}-{}: {}", docId, i + 1, end, e2.getMessage());
+                        restoreVectorsAfterRollbackFail(docId, currentRows, written);
+                        throw new BizException("回滚向量化失败，已恢复原文档内容与向量，请稍后重试");
                     }
                 }
             }
         }
 
+        // 3. 行级切换（全为本地幂等操作）：删不在快照中的旧向量与旧行 → 按快照原 id 重建行 → 关键词索引
+        List<AiKnowledge> currentRows = knowledgeMapper.selectList(
+                new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
+        java.util.Set<String> keepIds = rebuilt.stream().map(AiKnowledge::getId).collect(java.util.stream.Collectors.toSet());
+        List<String> staleVectorIds = currentRows.stream().map(AiKnowledge::getVectorId)
+                .filter(id -> id != null && !id.isBlank() && !keepIds.contains(id))
+                .toList();
+        if (!staleVectorIds.isEmpty()) {
+            try {
+                vectorStore.delete(staleVectorIds);
+            } catch (Exception e) {
+                log.warn("[{}] 回滚删除多余向量失败: {}", docId, e.getMessage());
+            }
+        }
+        knowledgeMapper.physicalDeleteByDocId(docId);
+        keywordIndexService.deleteByDoc(docId); // 关键词索引同步：清空该文档旧块（best-effort）
+        for (AiKnowledge k : rebuilt) {
+            knowledgeMapper.insert(k);
+        }
+
         // 4. 更新文档状态 + 清理较新版本行
         doc.setChunkCount(snapshot.size());
         doc.setVersion(version);
-        if (failedBatches > 0) {
-            // 部分块无向量（仅关键词可召回）：置失败态并说明，避免"显示回滚成功但向量缺失"的静默不一致
-            doc.setStatus(3);
-            doc.setFailReason("回滚后 " + failedBatches + " 批向量化失败，请重试回滚或重新解析");
-            documentMapper.updateById(doc);
-            documentMetaCache.invalidate(docId);
-            updateProgress(docId, progressGuard.getOrDefault(docId, 0), "回滚向量化失败");
-            log.error("[{}] 回滚到 v{} 未完成: {} 批向量化失败", docId, version, failedBatches);
-            throw new BizException("回滚后有 " + failedBatches + " 批知识块向量化失败，文档已置为解析失败，请重试");
-        }
         doc.setStatus(0);
         doc.setFailReason(null);
         documentMapper.updateById(doc);
@@ -1207,6 +1220,33 @@ public class DocumentService {
         }
         answerCacheService.clearAll();
         log.info("[{}] 回滚到 v{} 完成: {} chunks", docId, version, snapshot.size());
+    }
+
+    /**
+     * 回滚向量化失败后的恢复：删除本阶段写入的向量（含同 id 覆盖的旧向量与快照新增的孤儿向量），
+     * 再按当前 MySQL 行内容重新向量化——embedding 为瞬时故障时可自愈；仍失败时该文档仅关键词可召回
+     * （行与状态均保持原样，重试回滚或重新解析即可恢复向量），不再出现"回滚失败连带当前内容丢失"。
+     */
+    private void restoreVectorsAfterRollbackFail(String docId, List<AiKnowledge> currentRows, java.util.Set<String> writtenIds) {
+        try {
+            List<String> rowVectorIds = currentRows.stream().map(AiKnowledge::getVectorId)
+                    .filter(id -> id != null && !id.isBlank()).toList();
+            java.util.Set<String> rowIdSet = currentRows.stream().map(AiKnowledge::getId)
+                    .collect(java.util.stream.Collectors.toSet());
+            List<String> orphanIds = writtenIds.stream().filter(id -> !rowIdSet.contains(id)).toList();
+            List<String> toDelete = new ArrayList<>(rowVectorIds);
+            toDelete.addAll(orphanIds);
+            if (!toDelete.isEmpty()) {
+                vectorStore.delete(toDelete);
+            }
+        } catch (Exception e) {
+            log.warn("[{}] 回滚失败后清理向量异常: {}", docId, e.getMessage());
+        }
+        // 按当前行内容恢复向量（逐行 best-effort；行内容始终在库中，缺向量可稍后重解析补齐）
+        for (AiKnowledge k : currentRows) {
+            embedAndStore(k, k.getContent());
+        }
+        updateProgress(docId, 0, "回滚向量化失败，原内容与向量已恢复，请稍后重试");
     }
 
     /**
@@ -1258,6 +1298,9 @@ public class DocumentService {
         // 不整体删除旧向量与知识块：processUpload 的 diff 式重建依赖它们做 content_hash 匹配
         // （未变块保留 id+向量，变更/删除块由 processUpload 清理；失败时旧内容可回退保留）
         // 也不清空图片目录：内容寻址文件名下，未变图片文件保留供复用块引用，变更/删除图的旧文件由 processUpload 成功后孤儿清扫
+        // 提交前保存"解析前"状态：下方 setStatus(2) 会改写内存对象，队列满恢复分支必须用此原值，
+        // 否则恢复语句把状态重置回 2（沿用 doc.getStatus() 的原实现会让文档永久卡在"解析中"）
+        int origStatus = doc.getStatus() == null ? 0 : doc.getStatus();
         doc.setStatus(2);
         doc.setFailReason(null);
         documentMapper.updateById(doc);
@@ -1271,7 +1314,7 @@ public class DocumentService {
         } catch (RejectedExecutionException e) {
             // 队列满：恢复文档原状态（避免停留在"解析中"）
             documentMapper.update(null, new LambdaUpdateWrapper<AiDocument>()
-                    .eq(AiDocument::getId, docId).set(AiDocument::getStatus, doc.getStatus() == null ? 0 : doc.getStatus()));
+                    .eq(AiDocument::getId, docId).set(AiDocument::getStatus, origStatus));
             throw new BizException("解析队列繁忙（已有 50 个待解析任务），请稍后再试");
         }
     }
@@ -1368,20 +1411,6 @@ public class DocumentService {
         if (locked == 0) {
             throw new BizException("该文档正在解析中，请等待完成后再操作");
         }
-    }
-
-    private void deleteVectorsAndKnowledge(String docId) {
-        List<AiKnowledge> chunks = knowledgeMapper.selectList(
-                new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
-        if (!chunks.isEmpty()) {
-            List<String> vectorIds = chunks.stream().map(AiKnowledge::getVectorId).toList();
-            try {
-                vectorStore.delete(vectorIds);
-            } catch (Exception e) {
-                log.warn("删除向量失败: {}", e.getMessage());
-            }
-        }
-        knowledgeMapper.delete(new LambdaQueryWrapper<AiKnowledge>().eq(AiKnowledge::getDocId, docId));
     }
 
     // ==================== 文件管理 ====================

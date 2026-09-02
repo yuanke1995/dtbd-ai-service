@@ -483,6 +483,16 @@ public class ConfigService {
         }
     }
 
+    public long getLong(String key, long def) {
+        String v = get(key);
+        if (v == null || v.isBlank()) return def;
+        try {
+            return Long.parseLong(v.trim());
+        } catch (Exception e) {
+            return def;
+        }
+    }
+
     public boolean getBoolean(String key) {
         try {
             return Boolean.parseBoolean(get(key).trim());

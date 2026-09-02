@@ -133,7 +133,7 @@ export const renderMd = (t, images = []) => {
   pre = pre.replace(/\n\s*\|\s*$/g, '')
   // ④ 渲染 + 消毒（放行内部图片占位前缀 __AI_IMG_，否则 DOMPurify 会剥掉其 src 导致图片丢失）
   let html = DOMPurify.sanitize(md.render(pre), {
-    ALLOWED_URI_REGEXP: /^(?:__AI_IMG_|https?:|data:|mailto:|tel:)/i
+    ALLOWED_URI_REGEXP: /^(?:__AI_IMG_|https?:|data:image\/|mailto:|tel:)/i
   })
   // ⑤ DOM 后处理（sanitize 之后新建元素不受白名单限制）
   const box = document.createElement('div')

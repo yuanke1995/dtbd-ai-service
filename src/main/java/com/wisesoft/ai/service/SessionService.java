@@ -16,6 +16,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -51,6 +52,7 @@ public class SessionService {
     private final ObjectMapper objectMapper;
     private final AiSessionMapper sessionMapper;
     private final AiMessageMapper messageMapper;
+    private final TransactionTemplate transactionTemplate;
 
     /**
      * 创建新会话（MySQL + Redis）
@@ -169,6 +171,19 @@ public class SessionService {
     }
 
     /**
+     * 重命名会话（校验归属；标题去空白并限长 50 字）
+     */
+    public void renameSession(String userId, String sessionId, String title) {
+        assertOwned(sessionId, userId);
+        String t = title.trim();
+        if (t.length() > 50) t = t.substring(0, 50).trim();
+        AiSession update = new AiSession();
+        update.setId(sessionId);
+        update.setTitle(t);
+        sessionMapper.updateById(update);
+    }
+
+    /**
      * 通用布尔标志更新（置顶/收藏）
      */
     private void updateFlag(String sessionId, boolean flag, String fieldName,
@@ -233,12 +248,14 @@ public class SessionService {
     }
 
     /**
-     * 获取会话完整历史（MySQL 优先，Redis 兜底）
+     * 获取会话完整历史（MySQL 优先；MySQL 非空时合并 Redis 中未落库的降级消息，空时 Redis 兜底）
      */
     public List<Map<String, Object>> getHistory(String sessionId) {
         List<Map<String, Object>> fromMysql = readFromMysql(sessionId);
         if (!fromMysql.isEmpty()) {
-            return fromMysql;
+            // MySQL 非空也可能缺最近消息：写侧瞬时失败降级 Redis 的消息标记 mysqlPending，此处补合并并异步补写，
+            // 避免"MySQL 有旧数据即不回读 Redis"导致降级窗口内的新消息对用户永久不可见（Redis 30 分钟过期后彻底丢失）
+            return mergeRedisPending(sessionId, fromMysql);
         }
         // MySQL 无数据，从 Redis 读取
         List<Map<String, Object>> fromRedis = readRange(sessionId, 0, -1);
@@ -250,14 +267,14 @@ public class SessionService {
     }
 
     /**
-     * 获取最近 N 轮对话（MySQL 直读最近 N 轮，Redis 兜底）
+     * 获取最近 N 轮对话（MySQL 直读最近 N 轮，Redis 兜底/合并）
      * 返回 null 表示"读取失败"（fail-loud：调用方需区分"无历史"与"历史读取失败"，不得静默当无历史）
      */
     public List<Map<String, Object>> getRecentHistory(String sessionId, int rounds) {
         List<Map<String, Object>> recent = readRecentFromMysql(sessionId, rounds);
         if (recent == null) return null; // 读失败：显式失败信号，调用方 fail-loud
         if (!recent.isEmpty()) {
-            return recent;
+            return mergeRedisPending(sessionId, recent);
         }
         // MySQL 无数据，从 Redis 读取（Redis 已按 maxHistory 裁剪）
         List<Map<String, Object>> fromRedis = readRange(sessionId, 0, -1);
@@ -266,6 +283,50 @@ public class SessionService {
             backfillToMysql(sessionId, fromRedis);
         }
         return fromRedis;
+    }
+
+    /**
+     * 合并 Redis 降级消息：仅追加标记了 mysqlPending 且与 MySQL 既有消息不重复（role+content+images 判重）的条目。
+     * 正常双写路径下 Redis 尾部条目都已在 MySQL，靠判重跳过不会重复；追加出的消息异步幂等补写 MySQL。
+     */
+    private List<Map<String, Object>> mergeRedisPending(String sessionId, List<Map<String, Object>> fromMysql) {
+        try {
+            List<Map<String, Object>> cached = readRange(sessionId, 0, -1);
+            if (cached.isEmpty()) return fromMysql;
+            List<Map<String, Object>> pending = cached.stream()
+                    .filter(m -> Boolean.TRUE.equals(m.get("mysqlPending")))
+                    .collect(Collectors.toList());
+            if (pending.isEmpty()) return fromMysql;
+
+            Set<String> existing = fromMysql.stream()
+                    .map(m -> messageKey(m.get("role"), m.get("content"), m.get("images")))
+                    .collect(Collectors.toSet());
+            List<Map<String, Object>> merged = new ArrayList<>(fromMysql);
+            List<Map<String, Object>> toBackfill = new ArrayList<>();
+            for (Map<String, Object> m : pending) {
+                String key = messageKey(m.get("role"), m.get("content"), m.get("images"));
+                if (existing.contains(key)) continue;
+                existing.add(key);
+                merged.add(m);
+                toBackfill.add(m);
+            }
+            if (!toBackfill.isEmpty()) {
+                List<Map<String, Object>> need = toBackfill;
+                ThreadPoolManager.execute(() -> backfillToMysql(sessionId, need));
+            }
+            return merged;
+        } catch (Exception e) {
+            log.warn("合并 Redis 降级消息失败 (session={}): {}", sessionId, e.getMessage());
+            return fromMysql;
+        }
+    }
+
+    /** 消息判重键：role + content，content 为空（纯图消息）时附加图片序列，防止同文本合法重复被误判 */
+    static String messageKey(Object role, Object content, Object images) {
+        String img = images instanceof List<?> list ? JSON.toJSONString(list)
+                : (images == null ? "" : String.valueOf(images));
+        return String.valueOf(role == null ? "" : role) + '\u0001'
+                + String.valueOf(content == null ? "" : content) + '\u0001' + img;
     }
 
     /**
@@ -312,49 +373,35 @@ public class SessionService {
 
     /**
      * 追加消息（含检索状态行数据）：retrieved 为 JSON（keywords/refs/terms），随消息持久化使状态行刷新后仍在
+     * <p>
+     * MySQL 事务写入（会话行锁 + 物理 max 序号，防并发同号与软删复用）→ 瞬时失败延时重试一次 →
+     * 仍失败降级 Redis（标记 mysqlPending，读侧合并并异步补写，保证降级窗口消息不永久不可见）
      */
     public String appendMessage(String sessionId, String role, String content, List<String> images, String sources, String thinking, String retrieved) {
         // 1. MySQL 持久化
         try {
-            // 获取下一序号
-            int nextSeq = getNextSequence(sessionId);
-
-            // 插入消息
-            AiMessage msg = new AiMessage();
-            msg.setSessionId(sessionId);
-            msg.setRole(role);
-            msg.setContent(content);
-            msg.setThinking(thinking);
-            msg.setImages(images != null && !images.isEmpty() ? JSON.toJSONString(images) : null);
-            msg.setSources(sources);
-            msg.setRetrieved(retrieved);
-            msg.setSequence(nextSeq);
-            messageMapper.insert(msg);
-
-            // 更新会话：title（取首条用户问题前50字）、message_count、update_time
-            AiSession update = new AiSession();
-            update.setId(sessionId);
-            update.setMessageCount(nextSeq); // sequence 自增即消息数
-            update.setUpdateTime(null); // MyBatis-Plus 会忽略 null，用 ON UPDATE CURRENT_TIMESTAMP
-            if (role.equals("user")) {
-                // 仅在 title 为空时设置（首条用户消息）
-                AiSession existing = sessionMapper.selectById(sessionId);
-                if (existing != null && existing.getTitle() == null) {
-                    String title = content.length() > 50 ? content.substring(0, 50) : content;
-                    update.setTitle(title.trim());
-                }
-            }
-            sessionMapper.updateById(update);
-            return msg.getId();
+            return appendToMysql(sessionId, role, content, images, sources, thinking, retrieved);
         } catch (Exception e) {
             log.warn("MySQL 追加消息失败 (session={}): {}", sessionId, e.getMessage());
         }
+        // 瞬时故障（连接中断/主备切换等）短延时重试一次，多数抖动可自愈，避免直接进入 Redis 降级分叉
+        try {
+            Thread.sleep(300);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+        try {
+            return appendToMysql(sessionId, role, content, images, sources, thinking, retrieved);
+        } catch (Exception e) {
+            log.warn("MySQL 追加消息重试仍失败 (session={}): {}", sessionId, e.getMessage());
+        }
 
-        // 2. Redis 缓存（MySQL 失败也不影响 Redis 写入，保证前端体验）
+        // 2. Redis 缓存（MySQL 持续不可用也不影响前端体验；mysqlPending 标记使读侧能合并补写，防消息丢失）
         try {
             Map<String, Object> redisMsg = new HashMap<>();
             redisMsg.put("role", role);
             redisMsg.put("content", content);
+            redisMsg.put("mysqlPending", true);
             if (thinking != null && !thinking.isBlank()) {
                 redisMsg.put("thinking", thinking);
             }
@@ -367,6 +414,12 @@ public class SessionService {
                 } catch (Exception ignored) {
                 }
             }
+            if (retrieved != null && !retrieved.isBlank()) {
+                try {
+                    redisMsg.put("retrieved", JSON.parse(retrieved));
+                } catch (Exception ignored) {
+                }
+            }
             String json = objectMapper.writeValueAsString(redisMsg);
             int max = properties.getSession().getMaxHistory() * 2;
             long expireSeconds = properties.getSession().getExpireMinutes() * 60L;
@@ -376,6 +429,56 @@ public class SessionService {
             log.warn("Redis 追加消息失败 (session={}): {}", sessionId, e.getMessage());
         }
         return null;
+    }
+
+    /**
+     * 事务内写 MySQL 一条消息：锁会话行（不存在则补建占位后重取锁）串行化同会话并发写 →
+     * 序号取物理 max+1（含软删行，删除轮次后不复用，撤销按 seq-1 配对可靠）→ 插入 → 同步会话计数/首问标题。
+     * 任一失败抛异常回滚，由调用方决定降级。
+     */
+    private String appendToMysql(String sessionId, String role, String content, List<String> images,
+                                 String sources, String thinking, String retrieved) {
+        return transactionTemplate.execute(status -> {
+            AiSession locked = sessionMapper.selectForUpdate(sessionId);
+            if (locked == null) {
+                AiSession placeholder = new AiSession();
+                placeholder.setId(sessionId);
+                placeholder.setMessageCount(0);
+                try {
+                    sessionMapper.insert(placeholder);
+                } catch (Exception ignored) {
+                    // 并发补建冲突：忽略，重取锁即可
+                }
+                locked = sessionMapper.selectForUpdate(sessionId);
+            }
+            if (locked == null) {
+                throw new IllegalStateException("会话行不可用: " + sessionId);
+            }
+
+            int seq = messageMapper.maxSequencePhysical(sessionId) + 1;
+            AiMessage msg = new AiMessage();
+            msg.setSessionId(sessionId);
+            msg.setRole(role);
+            msg.setContent(content);
+            msg.setThinking(thinking);
+            msg.setImages(images != null && !images.isEmpty() ? JSON.toJSONString(images) : null);
+            msg.setSources(sources);
+            msg.setRetrieved(retrieved);
+            msg.setSequence(seq);
+            messageMapper.insert(msg);
+
+            // 更新会话：message_count=seq、title（首条用户消息前 50 字）；软删行由 updateById 自动过滤不更新
+            AiSession update = new AiSession();
+            update.setId(sessionId);
+            update.setMessageCount(seq);
+            if ("user".equals(role) && content != null && !content.isBlank()
+                    && (locked.getTitle() == null || locked.getTitle().isBlank())) {
+                String title = content.length() > 50 ? content.substring(0, 50) : content;
+                update.setTitle(title.trim());
+            }
+            sessionMapper.updateById(update);
+            return msg.getId();
+        });
     }
 
     /**
@@ -535,23 +638,6 @@ public class SessionService {
     }
 
     /**
-     * 获取会话的下一条消息序号
-     */
-    private int getNextSequence(String sessionId) {
-        try {
-            LambdaQueryWrapper<AiMessage> wrapper = new LambdaQueryWrapper<>();
-            wrapper.eq(AiMessage::getSessionId, sessionId)
-                    .orderByDesc(AiMessage::getSequence)
-                    .last("LIMIT 1");
-            List<AiMessage> list = messageMapper.selectList(wrapper);
-            return list.isEmpty() ? 1 : list.get(0).getSequence() + 1;
-        } catch (Exception e) {
-            log.warn("查询消息序号失败: {}", e.getMessage());
-            return 1;
-        }
-    }
-
-    /**
      * 从 Redis 读取指定范围的消息
      */
     private List<Map<String, Object>> readRange(String sessionId, long start, long end) {
@@ -578,33 +664,55 @@ public class SessionService {
     private void backfillToMysql(String sessionId, List<Map<String, Object>> messages) {
         ThreadPoolManager.execute(() -> {
             try {
-                // 检查 MySQL 是否已有数据，避免重复 backfill
-                LambdaQueryWrapper<AiMessage> check = new LambdaQueryWrapper<>();
-                check.eq(AiMessage::getSessionId, sessionId)
-                        .last("LIMIT 1");
-                if (!messageMapper.selectList(check).isEmpty()) {
-                    return; // 已有数据，跳过
+                int added = backfillInsert(sessionId, messages);
+                if (added > 0) {
+                    log.info("Backfill 完成: session={}, messages={}", sessionId, added);
+                }
+            } catch (Exception e) {
+                log.warn("Backfill 失败 (session={}): {}", sessionId, e.getMessage());
+            }
+        });
+    }
+
+    /**
+     * 幂等补写消息：按 (role, content, images) 判重逐条插入缺失项（空库回填与降级窗口合并共用）。
+     * 事务内锁会话行取物理 max 序号，与并发 append 不撞号；序号/标题随插随更。
+     *
+     * @return 实际插入条数
+     */
+    private int backfillInsert(String sessionId, List<Map<String, Object>> messages) {
+        if (messages == null || messages.isEmpty()) return 0;
+        try {
+            return transactionTemplate.execute(status -> {
+                AiSession locked = sessionMapper.selectForUpdate(sessionId);
+                if (locked == null) {
+                    AiSession placeholder = new AiSession();
+                    placeholder.setId(sessionId);
+                    placeholder.setMessageCount(0);
+                    try {
+                        sessionMapper.insert(placeholder);
+                    } catch (Exception ignored) {
+                    }
+                    locked = sessionMapper.selectForUpdate(sessionId);
                 }
 
-                // 确保 session 记录存在
-                AiSession existing = sessionMapper.selectById(sessionId);
-                if (existing == null) {
-                    AiSession session = new AiSession();
-                    session.setId(sessionId);
-                    session.setMessageCount(0);
-                    sessionMapper.insert(session);
-                }
-
-                int seq = 0;
-                String title = null;
+                // 判重基准：MySQL 现存全部消息（逻辑过滤，已软删的不参与判重——恢复后是同一条，不会重复插）
+                Set<String> existing = messageMapper.selectList(new LambdaQueryWrapper<AiMessage>()
+                                .eq(AiMessage::getSessionId, sessionId))
+                        .stream()
+                        .map(m -> messageKey(m.getRole(), m.getContent(), m.getImages()))
+                        .collect(Collectors.toSet());
+                String title = locked == null || locked.getTitle() == null || locked.getTitle().isBlank()
+                        ? null : locked.getTitle();
+                int seq = messageMapper.maxSequencePhysical(sessionId);
+                int added = 0;
                 for (Map<String, Object> m : messages) {
                     String role = String.valueOf(m.getOrDefault("role", ""));
                     String content = String.valueOf(m.getOrDefault("content", ""));
                     Object imagesObj = m.get("images");
-                    String imagesJson = null;
-                    if (imagesObj instanceof List<?> list && !list.isEmpty()) {
-                        imagesJson = JSON.toJSONString(list);
-                    }
+                    String imagesJson = imagesObj instanceof List<?> list && !list.isEmpty()
+                            ? JSON.toJSONString(list) : null;
+                    if (existing.contains(messageKey(role, content, imagesJson))) continue;
 
                     AiMessage msg = new AiMessage();
                     msg.setSessionId(sessionId);
@@ -619,27 +727,33 @@ public class SessionService {
                     if (sourcesObj != null) {
                         msg.setSources(JSON.toJSONString(sourcesObj));
                     }
+                    Object retrievedObj = m.get("retrieved");
+                    if (retrievedObj != null) {
+                        msg.setRetrieved(String.valueOf(retrievedObj));
+                    }
                     msg.setSequence(++seq);
                     messageMapper.insert(msg);
-
-                    if (title == null && "user".equals(role)) {
+                    existing.add(messageKey(role, content, imagesJson));
+                    added++;
+                    if (title == null && "user".equals(role) && !content.isBlank()) {
                         title = content.length() > 50 ? content.substring(0, 50).trim() : content.trim();
                     }
                 }
 
-                // 更新 session 的 title 和 message_count
-                if (title != null || seq > 0) {
+                // 同步会话计数/标题（仅非软删行；计数取 max 防止合并场景回写缩水——仅展示用）
+                if (added > 0 && locked != null && (locked.getDeleted() == null || locked.getDeleted() == 0)) {
                     AiSession update = new AiSession();
                     update.setId(sessionId);
-                    update.setMessageCount(seq);
+                    int base = locked.getMessageCount() == null ? 0 : locked.getMessageCount();
+                    update.setMessageCount(Math.max(base, seq));
                     if (title != null) update.setTitle(title);
                     sessionMapper.updateById(update);
                 }
-
-                log.info("Backfill 完成: session={}, messages={}", sessionId, seq);
-            } catch (Exception e) {
-                log.warn("Backfill 失败 (session={}): {}", sessionId, e.getMessage());
-            }
-        });
+                return added;
+            });
+        } catch (Exception e) {
+            log.warn("补写消息到 MySQL 失败 (session={}): {}", sessionId, e.getMessage());
+            return 0;
+        }
     }
 }

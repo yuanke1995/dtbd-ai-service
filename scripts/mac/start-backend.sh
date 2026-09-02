@@ -10,8 +10,11 @@ set -e
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 JAR="$ROOT/target/ai-doc-assistant.jar"
 
+# 切到项目根运行：Spring Boot 从 ./config/ 加载外部 application-local.yml（本地密钥不入 jar）
+cd "$ROOT"
+
 if [ ! -f "$JAR" ]; then
-  echo "JAR not found. Build first: mvn package -DskipTests"
+  echo "JAR not found. Build first: mvn package"
   exit 1
 fi
 

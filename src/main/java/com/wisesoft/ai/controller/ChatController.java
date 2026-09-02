@@ -64,6 +64,23 @@ public class ChatController {
 
         String question = request.getQuestion().trim();
 
+        // 聊天传图上限：数量与单张体积（防 base64 洪峰压垮解码/视觉处理；数据 URL 字符量≈体积×4/3）
+        List<String> images = request.getImages();
+        if (images != null && !images.isEmpty()) {
+            if (images.size() > 9) {
+                throw new BizException("一次最多发送 9 张图片");
+            }
+            for (String img : images) {
+                int comma = img == null ? -1 : img.indexOf(',');
+                if (comma <= 0 || !img.startsWith("data:image/")) {
+                    throw new BizException("图片格式不正确（需 data:image/* 的 data URL）");
+                }
+                if (img.length() - comma - 1 > 14_000_000) { // ≈10MB 原图（base64 膨胀 4/3）
+                    throw new BizException("单张图片不能超过 10MB");
+                }
+            }
+        }
+
         String sessionId = request.getSessionId();
         if (sessionId == null || sessionId.isEmpty()) {
             sessionId = sessionService.createSession(userId);
@@ -84,7 +101,7 @@ public class ChatController {
         long sseTimeout = configService.getLong("chat.sseTimeoutMs");
         if (sseTimeout <= 0) sseTimeout = 300000L;
         SseEmitter emitter = new SseEmitter(sseTimeout);
-        ragService.chat(sessionId, question, request.getImages(), request.isDeepThink(), emitter);
+        ragService.chat(sessionId, question, images, request.isDeepThink(), emitter);
         return emitter;
     }
 
@@ -117,6 +134,23 @@ public class ChatController {
             HttpServletRequest httpRequest) {
         boolean favorite = Boolean.TRUE.equals(body.get("favorite"));
         sessionService.updateFavorite(UserContext.resolve(httpRequest), sessionId, favorite);
+        return ResultJson.ok("操作成功");
+    }
+
+    @Operation(summary = "重命名会话", description = "修改会话标题（≤50 字；校验归属）")
+    @PutMapping("/session/{sessionId}/rename")
+    public ResultJson renameSession(
+            @Parameter(description = "会话 ID") @PathVariable("sessionId") String sessionId,
+            @RequestBody Map<String, String> body,
+            HttpServletRequest httpRequest) {
+        String title = body == null ? null : body.get("title");
+        if (title == null || title.isBlank()) {
+            throw new BizException("标题不能为空");
+        }
+        if (title.trim().length() > 50) {
+            throw new BizException("标题过长（最多 50 字）");
+        }
+        sessionService.renameSession(UserContext.resolve(httpRequest), sessionId, title);
         return ResultJson.ok("操作成功");
     }
 

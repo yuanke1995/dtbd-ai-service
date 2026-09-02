@@ -29,4 +29,8 @@ public interface AiMessageMapper extends BaseMapper<AiMessage> {
     /** 恢复单条软删除消息（撤销删除用） */
     @Update("UPDATE c_ai_message SET deleted = 0 WHERE id = #{id}")
     int restoreById(@Param("id") String id);
+
+    /** 会话内最大序号（物理查询：含已软删行）。删除轮次后序号不复用，撤销按 seq-1 精确配对依赖序号单调唯一 */
+    @Select("SELECT COALESCE(MAX(sequence), 0) FROM c_ai_message WHERE session_id = #{sessionId}")
+    int maxSequencePhysical(@Param("sessionId") String sessionId);
 }

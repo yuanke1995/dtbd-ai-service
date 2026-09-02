@@ -7,8 +7,9 @@ spring:
   application:
     name: ai-doc-assistant
   profiles:
-    # 本地开发：local（每台机器独立的本地配置，含密钥与数据目录，已被 gitignore）
-    # 生产部署：不激活 local，通过环境变量提供密钥与 AI_IMAGES_DIR
+    # 本地开发：local（每台机器独立的本地配置，位于项目根 config/application-local.yml——Spring Boot 外部配置目录，
+    # 不进构建产物，含密钥与数据目录，已被 gitignore）
+    # 生产部署：不激活 local（或激活但无 profile 文件即纯默认值），通过环境变量提供密钥与 AI_IMAGES_DIR
     active: local
 
   # 文件上传物理上限（防内存攻击；业务上限由 c_ai_config 的 upload.maxFileSize 控制，保存即生效）
@@ -128,8 +129,9 @@ ai-app:
     # JPEG 压缩质量（0~1），带透明通道的图自动转 PNG 无损保留
     quality: 0.9
     url-prefix: /ai/images
-    # 图片访问鉴权（HMAC 签名 URL + 过期时间；本地开发默认关闭，生产必须开启 AI_IMAGES_AUTH_ENABLED=true）
-    auth-enabled: ${AI_IMAGES_AUTH_ENABLED:false}
+    # 图片访问鉴权（HMAC 签名 URL + 过期时间；默认开启——漏配环境变量的独立部署不会裸奔暴露文档截图。
+    # 本地开发如需关闭：在外部 config/application-local.yml 中设 ai-app.images.auth-enabled: false）
+    auth-enabled: ${AI_IMAGES_AUTH_ENABLED:true}
     # 签名有效期（秒）
     auth-expire-seconds: 3600
     # 回答中 [图片N] 标记与图片描述的相关性校验（LLM 偶发错配兜底；无描述/无关键词自动放行，不误杀）

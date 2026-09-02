@@ -223,6 +223,11 @@ public class RagService {
      * 整条流水线在独立线程池执行（重活不占 Tomcat 请求线程），控制器返回后 SSE 由流水线线程驱动。
      */
     public void chat(String sessionId, String question, List<String> userImages, boolean deepThink, SseEmitter emitter) {
+        // 断开跟踪：登记查表项并绑定生命周期回调清理；发送失败也会打标（见 sendSseEvent），各等待点据此短路后续 LLM/检索开销
+        ACTIVE_SSE.put(emitter, new java.util.concurrent.atomic.AtomicBoolean());
+        emitter.onCompletion(() -> ACTIVE_SSE.remove(emitter));
+        emitter.onTimeout(() -> ACTIVE_SSE.remove(emitter));
+        emitter.onError(t -> ACTIVE_SSE.remove(emitter));
         syncPipelineSize();
         try {
             pipelineExecutor.execute(() -> runChat(sessionId, question, userImages, deepThink, emitter));
@@ -272,6 +277,11 @@ public class RagService {
                     addDegradation(degradations, degradedCodes, "historyFailed", "会话历史读取失败，本次无多轮记忆");
                     recentHistory = List.of();
                 }
+                // 客户端断开短路：改写是 LLM 调用，断开后不再发起
+                if (clientDisconnected(emitter)) {
+                    log.info("[SSE] 客户端断开，跳过查询改写: session={}", sessionId);
+                    return;
+                }
                 RewriteResult rr = rewriteQuery(question, recentHistory);
                 retrievalQuery = rr.query();
                 if (rr.degraded()) {
@@ -289,6 +299,12 @@ public class RagService {
 
             // 日志记录用（final 副本，lambda 中引用需要 effectively final）
             final String queryForLog = retrievalQuery;
+
+            // 客户端断开短路（图片视觉处理/改写期间断开已在此打标）：思考与检索都是成本操作，不再发起
+            if (clientDisconnected(emitter)) {
+                log.info("[SSE] 客户端断开，终止本轮问答（检索前）: session={}", sessionId);
+                return;
+            }
 
             // 1. 深度思考（可选）：思考流式 → 提取检索计划 → 多路检索。
             //    失败/超时/提取失败 → 降级为原始 question 单路检索并 fail-loud（thinkingHolder 保留已收集增量，可为空）
@@ -320,6 +336,11 @@ public class RagService {
                     // M2 fail-loud：深度思考降级（思考阶段失败/超时/未提取到检索计划）——用户可读措辞，技术原因留日志
                     addDegradation(degradations, degradedCodes, "deepThinkDegraded", "深度思考未完成，已转为普通回答");
                 }
+            }
+            // 深度思考期间断开（thinking 发送失败即中止思考流并打标）：降级路径同样不再继续检索
+            if (clientDisconnected(emitter)) {
+                log.info("[SSE] 客户端断开，终止本轮问答（思考后）: session={}", sessionId);
+                return;
             }
             // 降级/未开启深度思考：走普通单路检索
             if (hits == null) {
@@ -551,6 +572,11 @@ public class RagService {
             }
 
             // 5. 异步流式生成（缓冲过滤 <related> 块：跨 token 分割也能正确剥离，前端不会看到标签原文）
+            // 生成前最后一道短路检查：流式回答是最长成本段，断开即不再发起（生成中断开由 doOnNext 发送失败取消订阅）
+            if (clientDisconnected(emitter)) {
+                log.info("[SSE] 客户端断开，终止本轮问答（生成前）: session={}", sessionId);
+                return;
+            }
             sendSseEvent(emitter, "stage", "正在生成回答…", sessionId);
             AnswerStreamState st = new AnswerStreamState(sessionId, question, emitter,
                     imgIndex, imgDescIndex, sources, userImgs, startTime, queryForLog, thinkingHolder,
@@ -603,7 +629,11 @@ public class RagService {
                             String raw = bufStr;
                             st.emitBuf.setLength(0);
                             st.fullResponse.append(raw);
-                            sendSseEvent(emitter, "token", raw, st.sessionId);
+                            // 客户端断开：取消流订阅立即停止模型输出（不补 error/complete）
+                            if (!sendSseEvent(emitter, "token", raw, st.sessionId)) {
+                                st.disposeSafe();
+                                return;
+                            }
                         }
                         return;
                     }
@@ -621,10 +651,18 @@ public class RagService {
                     st.emitBuf.append(tailKeep);
                     if (!sendPart.isEmpty()) {
                         st.fullResponse.append(sendPart);
-                        sendSseEvent(emitter, "token", sendPart, st.sessionId);
+                        // 客户端断开：取消流订阅立即停止模型输出（不补 error/complete）
+                        if (!sendSseEvent(emitter, "token", sendPart, st.sessionId)) {
+                            st.disposeSafe();
+                        }
                     }
                 })
                 .doOnError(error -> {
+                    // 客户端已断开：不重试也不报错（管道已不在），直接收尾
+                    if (clientDisconnected(st.emitter)) {
+                        st.disposeSafe();
+                        return;
+                    }
                     Throwable root = error;
                     while (root.getCause() != null) root = root.getCause();
                     boolean noTokenYet = st.fullResponse.length() == 0 && st.emitBuf.length() == 0;
@@ -793,8 +831,9 @@ public class RagService {
 
     /**
      * 判断字符串中是否存在未完整闭合的 related 块（开始/闭合标签的跨 token 片段也算）
+     * package-private static：纯字符串逻辑，供单元测试直接验证（滑动窗口缓冲依赖此判定）
      */
-    private boolean containsUnclosedRelated(String s) {
+    static boolean containsUnclosedRelated(String s) {
         if (s.contains("</related>")) {
             // 已有关闭标签：剔除完整块后，剩余部分若还有 related 痕迹则视为未闭合
             String rest = s.replaceAll("<related>[\\s\\S]*?</related>", "");
@@ -806,7 +845,7 @@ public class RagService {
     /**
      * 判断字符串末尾是否为 <related> 标签的部分前缀（捕获跨 token 分割的开始标签）
      */
-    private boolean isRelatedStart(String s) {
+    private static boolean isRelatedStart(String s) {
         int lt = s.lastIndexOf('<');
         if (lt < 0) return false;
         String tail = s.substring(lt);
@@ -816,7 +855,7 @@ public class RagService {
     /**
      * 判断字符串末尾是否为 </related> 标签的部分前缀（捕获跨 token 分割的闭合标签）
      */
-    private boolean isRelatedEndStart(String s) {
+    private static boolean isRelatedEndStart(String s) {
         int lt = s.lastIndexOf('<');
         if (lt < 0) return false;
         String tail = s.substring(lt);
@@ -1073,7 +1112,10 @@ public class RagService {
                         String delta = extractThinkingDelta(resp, thinkingMode);
                         if (delta != null && !delta.isBlank()) {
                             thinking.append(delta);
-                            sendSseEvent(emitter, "thinking", delta, sessionId);
+                            // 客户端断开：抛异常中止同步消费（blockLast），省余下思考输出；调用方检查点兜底不再检索
+                            if (!sendSseEvent(emitter, "thinking", delta, sessionId)) {
+                                throw new SseClientGoneException();
+                            }
                         }
                     })
                     .blockLast(Duration.ofMillis(Math.max(1000, timeoutMillis)));
@@ -1088,6 +1130,10 @@ public class RagService {
             sendSseEvent(emitter, "thinking_done", JSON.toJSONString(done), sessionId);
             log.info("[DEEP-THINK] 思考完成 {} 字, refined={}, subs={}", display.length(), plan.refinedQuery(), plan.subQueries());
             return new DeepThinkResult(true, display, plan.refinedQuery(), plan.subQueries(), null);
+        } catch (SseClientGoneException e) {
+            log.info("[SSE] 客户端断开，深度思考终止: session={}", sessionId);
+            return new DeepThinkResult(false, stripSearchBlock(thinking.toString(), "search"),
+                    question, List.of(), "disconnected");
         } catch (Exception e) {
             log.warn("[FAIL-LOUD] 深度思考失败/超时，降级普通检索: {}", e.getMessage());
             String display = stripSearchBlock(thinking.toString(), "search");
@@ -1150,15 +1196,38 @@ public class RagService {
         return (text == null || text.isBlank()) ? null : text;
     }
 
-    private void sendSseEvent(SseEmitter emitter, String type, String content, String sessionId) {
+    /** 活跃 SSE 通道的断开标记（emitter → 已断开）。仅内部查表用；发送失败即打标、完成回调即移除，不会长期滞留 */
+    private static final java.util.concurrent.ConcurrentHashMap<SseEmitter, java.util.concurrent.atomic.AtomicBoolean> ACTIVE_SSE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 客户端是否已断开（供各等待点短路，避免断开后继续跑 LLM 调用与检索） */
+    private static boolean clientDisconnected(SseEmitter emitter) {
+        java.util.concurrent.atomic.AtomicBoolean dead = ACTIVE_SSE.get(emitter);
+        return dead != null && dead.get();
+    }
+
+    /** 客户端断开信号：思考流 doOnNext 内中断同步消费（blockLast）用 */
+    private static final class SseClientGoneException extends RuntimeException {
+    }
+
+    /**
+     * SSE 发送。返回 false = 客户端已断开（本次发送失败或此前已打标）；断开只记日志不抛错
+     * （fail-loud），调用方在关键发送点按返回值短路后续 LLM/检索开销。
+     */
+    private boolean sendSseEvent(SseEmitter emitter, String type, String content, String sessionId) {
+        java.util.concurrent.atomic.AtomicBoolean dead = ACTIVE_SSE.get(emitter);
+        if (dead != null && dead.get()) return false;
         try {
             emitter.send(SseEmitter.event()
                     .name(type)
                     .data("{\"type\":\"" + type + "\",\"content\":" +
                             JSON.toJSONString(content) +
                             ",\"sessionId\":\"" + sessionId + "\"}"));
+            return true;
         } catch (IOException e) {
-            // 客户端断开，忽略
+            ACTIVE_SSE.computeIfAbsent(emitter, k -> new java.util.concurrent.atomic.AtomicBoolean()).set(true);
+            log.warn("[FAIL-LOUD] SSE 客户端断开 (type={}, session={}): {}", type, sessionId, e.getMessage());
+            return false;
         }
     }
 

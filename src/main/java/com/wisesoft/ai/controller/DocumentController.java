@@ -61,6 +61,9 @@ public class DocumentController {
             HttpServletRequest httpRequest) throws Exception {
         rateLimitService.checkRateLimit("upload", rateIdentity(httpRequest));
         checkUploadSize(file);
+        if (description != null && description.length() > 500) {
+            throw new BizException("文档描述过长（最多 500 字）");
+        }
         var doc = documentService.upload(file, description, category);
         log.info("[AUDIT] 上传文档 operator={} docId={} file={} size={}", UserContext.resolve(httpRequest),
                 doc.getId(), file.getOriginalFilename(), file.getSize());
@@ -75,6 +78,9 @@ public class DocumentController {
             @Parameter(description = "批量描述（可选，应用到所有文件）") @RequestParam(value = "description", required = false) String description,
             HttpServletRequest httpRequest) {
         rateLimitService.checkRateLimit("upload", rateIdentity(httpRequest));
+        if (description != null && description.length() > 500) {
+            throw new BizException("文档描述过长（最多 500 字）");
+        }
         List<Map<String, Object>> results = new ArrayList<>();
         for (MultipartFile file : files) {
             Map<String, Object> item = new LinkedHashMap<>();
